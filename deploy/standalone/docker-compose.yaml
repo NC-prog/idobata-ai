@@ -1,0 +1,94 @@
+# 井戸端AI standalone プロファイル（Dell Precision 7560 / RTX A5000 Laptop 16GB）
+# ASR（Qwen3-ASR-1.7B）+ LLM（Qwen3-8B-AWQ）+ VOICEVOX を 1 台に同居させる。
+#
+# 起動: docker compose -f deploy/standalone/docker-compose.yaml --env-file deploy/standalone/.env up -d --build
+# 停止: docker compose -f deploy/standalone/docker-compose.yaml down
+# ログ: docker compose -f deploy/standalone/docker-compose.yaml logs -f
+#
+# GPU 配分（--gpu-memory-utilization は GPU 全体 16GB に対する割合）:
+#   asr 0.30（約4.8GB）+ llm 0.45（約7.2GB）= 0.75。残り 0.25（約4GB）は
+#   WP01 以降の YOLO11-pose と多言語 TTS 用に空けておく。
+#
+# vLLM は起動時に「空き VRAM ≥ 割当」を検査するため、2 コンテナが同時に
+# プロファイリングすると競合する。llm は asr が healthy になってから起動する。
+
+x-vllm-common: &vllm-common
+  build:
+    context: ./vllm
+    dockerfile: Dockerfile
+  image: idobata-vllm:v0.27.1
+  restart: unless-stopped
+  ipc: host
+  volumes:
+    - "${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/root/.cache/huggingface"
+  environment:
+    - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+  healthcheck:
+    test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 300s
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  asr:
+    <<: *vllm-common
+    container_name: idobata-asr
+    ports:
+      - "127.0.0.1:8005:8000"
+    command:
+      - "--model"
+      - "${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}"
+      - "--served-model-name"
+      - "/models/asr"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--gpu-memory-utilization"
+      - "${ASR_GPU_UTIL:-0.30}"
+      - "--max-model-len"
+      - "4096"
+      - "--enforce-eager"
+
+  llm:
+    <<: *vllm-common
+    container_name: idobata-llm
+    ports:
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      asr:
+        condition: service_healthy
+    command:
+      - "--model"
+      - "${LLM_MODEL:-Qwen/Qwen3-8B-AWQ}"
+      - "--served-model-name"
+      - "/models/llm"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--gpu-memory-utilization"
+      - "${LLM_GPU_UTIL:-0.45}"
+      - "--max-model-len"
+      - "8192"
+
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-latest
+    container_name: idobata-voicevox
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:50021:50021"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:50021/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s

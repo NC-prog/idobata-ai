@@ -1,0 +1,41 @@
+[project]
+name = "idobata-ai-server"
+version = "0.1.0"
+description = "井戸端AI フロントAI（音声往復: VAD → Qwen3-ASR → LLM → VOICEVOX）"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.50",           # vLLM Gateway (OpenAI互換) クライアント
+    "httpx>=0.27",            # 非同期HTTP（フォールバック実装用）
+    "websockets>=13.0",       # エッジ連携 (edge_bridge)
+    "sounddevice>=0.5",       # マイク入力
+    "numpy>=1.26",
+    "soundfile>=0.12",        # 音声ファイルI/O
+    "silero-vad>=5.1",        # VAD（発話区間検出）
+    "pydantic>=2.8",          # セッション状態・議事録スキーマ
+    "pyyaml>=6.0",            # 拠点コンテキストの読み込み
+    "fastapi>=0.115",         # Web オペレーターパネル
+    "uvicorn[standard]>=0.30",  # ASGI サーバ
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.11",
+    "ruff>=0.6",
+    "types-pyyaml>=6.0.12.20260815",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["integration: 実際の ASR / LLM / VOICEVOX に接続する統合テスト"]
+addopts = "-m 'not integration'"
