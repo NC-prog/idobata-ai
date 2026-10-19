@@ -47,6 +47,23 @@ class TestBuildConfig:
     def test_site_selection(self) -> None:
         assert build_config({"IDOBATA_SITE": "akiota"}).site == "akiota"
 
+    def test_audio_devices_default_to_none(self) -> None:
+        cfg = build_config({})
+        assert cfg.audio_input.device_id is None
+        assert cfg.audio_output.device_id is None
+
+    def test_audio_devices_from_env(self) -> None:
+        cfg = build_config({
+            "IDOBATA_AUDIO_INPUT_DEVICE": "0",
+            "IDOBATA_AUDIO_OUTPUT_DEVICE": " 20 ",
+        })
+        assert cfg.audio_input.device_id == 0
+        assert cfg.audio_output.device_id == 20
+
+    def test_audio_device_must_be_integer(self) -> None:
+        with pytest.raises(ConfigError):
+            build_config({"IDOBATA_AUDIO_INPUT_DEVICE": "hw:0,0"})
+
 
 class TestLoadEnvFile:
     def test_does_not_override_existing(self, tmp_path: Path) -> None:

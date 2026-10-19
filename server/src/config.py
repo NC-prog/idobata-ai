@@ -150,6 +150,10 @@ class AudioOutputConfig:
     """音声出力（TTS 再生先）の設定。"""
 
     device_id: int | None = None
+    # 再生タイムアウト = WAV の実時間 + この秒数。超えたらストリームを強制的に閉じる
+    play_timeout_margin_sec: float = 2.0
+    # OutputStream.write() 1 回あたりの長さ（秒）。中断要求はこの粒度で確認する
+    write_block_sec: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,9 @@ class SpeechGateConfig:
 
     # TTS 再生終了後、VAD を再開するまでの後マージン（秒）
     post_margin_sec: float = 0.7
+    # 安全装置: mute(expected_sec) から「想定再生時間 + 後マージン + この秒数」で自動 unmute する
+    # （再生処理が戻らなくてもゲートが開くように）
+    safety_margin_sec: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -244,7 +251,32 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     else:
         llm = LLMConfig()
 
-    return AppConfig(profile=profile, site=site, data_dir=data_dir, llm=llm)
+    audio_input = AudioInputConfig(
+        device_id=_parse_device_id(env, "IDOBATA_AUDIO_INPUT_DEVICE")
+    )
+    audio_output = AudioOutputConfig(
+        device_id=_parse_device_id(env, "IDOBATA_AUDIO_OUTPUT_DEVICE")
+    )
+
+    return AppConfig(
+        profile=profile,
+        site=site,
+        data_dir=data_dir,
+        llm=llm,
+        audio_input=audio_input,
+        audio_output=audio_output,
+    )
+
+
+def _parse_device_id(env: Mapping[str, str], key: str) -> int | None:
+    """音声デバイス ID（sounddevice の番号）を読む。未設定・空なら None（既定デバイス）。"""
+    raw = env.get(key, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} は整数のデバイス番号で指定してください: {raw!r}") from exc
 
 
 def _load_default() -> AppConfig:

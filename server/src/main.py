@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 # WAV 入力の末尾に足す無音（VAD に SPEECH_END を出させるため）
 _WAV_TAIL_SILENCE_SEC = 1.0
+# 疑似音声モードでゲートが開くのを待つときの確認間隔
+_GATE_POLL_SEC = 0.05
 
 
 @dataclass
@@ -69,11 +71,21 @@ class VoiceLoop:
     ) -> None:
         self._mode = mode
         self._input_wavs = input_wavs
-        self._audio_device = audio_device
+        # CLI 指定がなければ .env（IDOBATA_AUDIO_INPUT_DEVICE / _OUTPUT_DEVICE）の値
+        self._audio_device = (
+            audio_device if audio_device is not None else config.audio_input.device_id
+        )
         self._output_wav_dir = output_wav_dir
-        self._tts = TTSClient(output_device_id=output_device)
+        self._tts = TTSClient(
+            output_device_id=(
+                output_device if output_device is not None else config.audio_output.device_id
+            )
+        )
         self._dialogue = Dialogue(LLMClient())
-        self._gate = SpeechGate(post_margin_sec=config.speech_gate.post_margin_sec)
+        self._gate = SpeechGate(
+            post_margin_sec=config.speech_gate.post_margin_sec,
+            safety_margin_sec=config.speech_gate.safety_margin_sec,
+        )
         self._asr: ASRClient | None = None
         self._reply_count = 0
         self._turn_lock = asyncio.Lock()
@@ -103,6 +115,8 @@ class VoiceLoop:
         print(f"  LLM: {config.llm.gateway_url} ({config.llm.chat_model})")
         if self._mode == "voice":
             print(f"  ASR: {config.asr.base_url}")
+            if not self._input_wavs:
+                print(f"  音声入力デバイス: [{self._audio_device}]")
             if self._input_wavs:
                 print(f"  入力WAV: {', '.join(p.name for p in self._input_wavs)}")
         if self._output_wav_dir is not None:
@@ -156,8 +170,10 @@ class VoiceLoop:
                 await source.start()
                 await self._run_pipeline(vad, _with_tail_silence(source))
                 await source.stop()
-                # 疑似音声では 1 ファイル = 1 往復として、応答が終わるまで待つ
+                # 疑似音声では 1 ファイル = 1 往復として、応答が終わりゲートが開くまで待つ
+                # （閉じたまま次のファイルを流すと、冒頭がゲートで捨てられる）
                 await self._drain_turns()
+                await self._wait_gate_open()
             return
 
         mic_cfg = replace(config.audio_input, device_id=self._audio_device)
@@ -234,6 +250,11 @@ class VoiceLoop:
         while self._turn_tasks:
             await asyncio.gather(*list(self._turn_tasks), return_exceptions=True)
 
+    async def _wait_gate_open(self) -> None:
+        # 再生が戻らなくてもゲートの安全装置で開くので、無限には待たない
+        while self._gate.is_muted:
+            await asyncio.sleep(_GATE_POLL_SEC)
+
     # ------------------------------------------------------------------
     # 応答 → 発話
     # ------------------------------------------------------------------
@@ -254,13 +275,22 @@ class VoiceLoop:
                 print(f"[計測] 発話終了→ {timing.summary()}")
 
     async def _speak(self, text: str, timing: TurnTiming | None) -> None:
-        """VOICEVOX で合成し、再生（または WAV 書き出し）する。再生中はゲートを閉じる。"""
+        """VOICEVOX で合成し、再生（または WAV 書き出し）する。再生中はゲートを閉じる。
+
+        合成後に想定再生時間を渡してゲートの安全装置を張る。再生が戻らなくても
+        「再生時間 + 後マージン + 安全マージン」でゲートは開く。
+        """
         self._gate.mute()
         try:
             try:
                 wav = await self._tts.synthesize(text)
             except (httpx.ConnectError, httpx.HTTPStatusError):
                 logger.warning("VOICEVOX 合成に失敗。音声なしで続行します。")
+                return
+            try:
+                self._gate.mute(expected_sec=TTSClient.wav_duration_sec(wav))
+            except Exception:
+                logger.warning("合成音声の長さを読めません。再生をスキップします。", exc_info=True)
                 return
             # 合成完了 = 再生（または書き出し）開始とみなす
             if timing is not None:
@@ -307,8 +337,14 @@ def main() -> None:
         "--output-wav-dir", type=Path, default=None,
         help="応答音声を再生せず WAV で書き出すディレクトリ（自動確認用）",
     )
-    parser.add_argument("--audio-device", type=int, default=None, help="音声入力デバイス ID")
-    parser.add_argument("--output-device", type=int, default=None, help="TTS 音声出力デバイス ID")
+    parser.add_argument(
+        "--audio-device", type=int, default=None,
+        help="音声入力デバイス ID（省略時は .env の IDOBATA_AUDIO_INPUT_DEVICE）",
+    )
+    parser.add_argument(
+        "--output-device", type=int, default=None,
+        help="TTS 音声出力デバイス ID（省略時は .env の IDOBATA_AUDIO_OUTPUT_DEVICE）",
+    )
     parser.add_argument("--list-devices", action="store_true", help="音声デバイス一覧を表示して終了")
     parser.add_argument("--debug", action="store_true", help="DEBUG ログ（発話本文を含む）")
     args = parser.parse_args()

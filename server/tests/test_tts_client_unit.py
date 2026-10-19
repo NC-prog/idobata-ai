@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
-from typing import Any
+import threading
+import time
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -145,87 +148,198 @@ class TestPrepareAudio:
 # ------------------------------------------------------------------
 
 
+class _FakeOutputStream:
+    """sounddevice.OutputStream のモック。生成時の device と write 量を記録する。"""
+
+    instances: ClassVar[list[_FakeOutputStream]] = []
+    fail_devices: ClassVar[set[int | None]] = set()
+
+    def __init__(
+        self, *, samplerate: int, channels: int, dtype: str, device: int | None,
+    ) -> None:
+        if device in self.fail_devices:
+            raise RuntimeError("device unavailable")
+        self.samplerate = samplerate
+        self.channels = channels
+        self.device = device
+        self.written = 0
+        self.calls: list[str] = []
+        _FakeOutputStream.instances.append(self)
+
+    def start(self) -> None:
+        self.calls.append("start")
+
+    def write(self, data: np.ndarray) -> None:
+        assert data.shape[1] == self.channels
+        self.written += data.shape[0]
+
+    def stop(self) -> None:
+        self.calls.append("stop")
+
+    def abort(self) -> None:
+        self.calls.append("abort")
+
+    def close(self) -> None:
+        self.calls.append("close")
+
+
+def _fake_sd_module(stream_cls: type[Any] = _FakeOutputStream) -> MagicMock:
+    def fake_query(dev: int, kind: str) -> dict[str, Any]:
+        return {
+            "name": f"FakeDevice-{dev}",
+            "max_output_channels": 2,
+            "default_samplerate": 48000.0,
+        }
+
+    def fake_check(*, device: int, samplerate: float) -> None:
+        pass
+
+    return MagicMock(
+        OutputStream=stream_cls,
+        query_devices=fake_query,
+        check_output_settings=fake_check,
+        PortAudioError=Exception,
+    )
+
+
+@pytest.fixture(autouse=False)
+def fake_stream() -> Any:
+    _FakeOutputStream.instances = []
+    _FakeOutputStream.fail_devices = set()
+    yield _FakeOutputStream
+    _FakeOutputStream.instances = []
+    _FakeOutputStream.fail_devices = set()
+
+
+class TestPlayWavStream:
+    """OutputStream を明示的に開いて流し切ること。"""
+
+    def test_writes_all_frames_then_stops_and_closes(self, fake_stream: Any) -> None:
+        client = TTSClient(output_device_id=99)
+        wav_data = _make_wav_bytes(samples=24000, channels=1, samplerate=24000)
+
+        with patch.dict("sys.modules", {"sounddevice": _fake_sd_module()}):
+            client._play_wav(wav_data)
+
+        (stream,) = fake_stream.instances
+        assert stream.device == 99
+        assert stream.channels == 2  # モノラル → ステレオ
+        assert stream.written == 24000
+        assert stream.calls == ["start", "stop", "close"]
+
+    def test_logs_start_and_end(
+        self, fake_stream: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        client = TTSClient(output_device_id=99)
+        wav_data = _make_wav_bytes(samples=2400, channels=1, samplerate=24000)
+        with patch.dict("sys.modules", {"sounddevice": _fake_sd_module()}), \
+                caplog.at_level(logging.INFO, logger="src.tts_client"):
+            client._play_wav(wav_data)
+
+        messages = [r.message for r in caplog.records]
+        assert any(m.startswith("再生開始: device=99") for m in messages)
+        assert any(m.startswith("再生終了: device=99, 経過") for m in messages)
+
+
 class TestPlayWavFallback:
     """指定デバイスで再生失敗時のデフォルトデバイスフォールバックを検証。"""
 
-    def test_fallback_to_default_device(self) -> None:
+    def test_fallback_to_default_device(self, fake_stream: Any) -> None:
         """指定デバイスで例外発生時、device=None で再試行すること。"""
         client = TTSClient(output_device_id=99)
         wav_data = _make_wav_bytes(samples=480, channels=1, samplerate=24000)
+        fake_stream.fail_devices = {99}
 
-        play_calls: list[dict[str, Any]] = []
-
-        def fake_play(data: Any, sr: Any, device: Any = None) -> None:
-            play_calls.append({"device": device})
-            if device == 99:
-                raise RuntimeError("device unavailable")
-
-        def fake_wait() -> None:
-            pass
-
-        def fake_query(dev: int, kind: str) -> dict[str, Any]:
-            return {
-                "name": f"FakeDevice-{dev}",
-                "max_output_channels": 2,
-                "default_samplerate": 48000.0,
-            }
-
-        def fake_check(*, device: int, samplerate: float) -> None:
-            pass
-
-        with patch.dict("sys.modules", {
-            "sounddevice": MagicMock(
-                play=fake_play,
-                wait=fake_wait,
-                query_devices=fake_query,
-                check_output_settings=fake_check,
-                PortAudioError=Exception,
-            ),
-        }):
-            # _play_wav 内で import するため、モジュールキャッシュを差し替え
+        with patch.dict("sys.modules", {"sounddevice": _fake_sd_module()}):
             client._play_wav(wav_data)
 
-        # 最初に device=99 で試行、次に device=None でフォールバック
-        assert len(play_calls) == 2
-        assert play_calls[0]["device"] == 99
-        assert play_calls[1]["device"] is None
+        (stream,) = fake_stream.instances
+        assert stream.device is None
+        assert stream.calls == ["start", "stop", "close"]
 
-    def test_fallback_emits_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_fallback_emits_warning(
+        self, fake_stream: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """フォールバック時に WARNING ログが出ること。"""
         import logging
 
         client = TTSClient(output_device_id=99)
         wav_data = _make_wav_bytes(samples=480, channels=1, samplerate=24000)
+        fake_stream.fail_devices = {99}
 
-        def fake_play(data: Any, sr: Any, device: Any = None) -> None:
-            if device == 99:
-                raise RuntimeError("device unavailable")
-
-        def fake_wait() -> None:
-            pass
-
-        def fake_query(dev: int, kind: str) -> dict[str, Any]:
-            return {
-                "name": f"FakeDevice-{dev}",
-                "max_output_channels": 2,
-                "default_samplerate": 48000.0,
-            }
-
-        def fake_check(*, device: int, samplerate: float) -> None:
-            pass
-
-        with patch.dict("sys.modules", {
-            "sounddevice": MagicMock(
-                play=fake_play,
-                wait=fake_wait,
-                query_devices=fake_query,
-                check_output_settings=fake_check,
-                PortAudioError=Exception,
-            ),
-        }), caplog.at_level(logging.WARNING, logger="src.tts_client"):
+        with patch.dict("sys.modules", {"sounddevice": _fake_sd_module()}), \
+                caplog.at_level(logging.WARNING, logger="src.tts_client"):
             client._play_wav(wav_data)
 
         assert any("フォールバック" in r.message for r in caplog.records)
+
+
+class _HangingOutputStream(_FakeOutputStream):
+    """write() が abort() されるまで戻らないストリーム（実機の不具合の再現）。"""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._released = threading.Event()
+
+    def write(self, data: np.ndarray) -> None:
+        self._released.wait(timeout=10)
+        if "abort" in self.calls:
+            raise RuntimeError("stream aborted")
+
+    def abort(self) -> None:
+        super().abort()
+        self._released.set()
+
+
+class TestPlayTimeout:
+    """play() が戻らない再生を打ち切ること。"""
+
+    async def test_hanging_stream_is_aborted_after_timeout(
+        self, fake_stream: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        client = TTSClient(output_device_id=99)
+        client._play_timeout_margin = 0.2
+        wav_data = _make_wav_bytes(samples=2400, channels=1, samplerate=24000)  # 0.1 秒
+
+        with patch.dict("sys.modules", {"sounddevice": _fake_sd_module(_HangingOutputStream)}), \
+                caplog.at_level(logging.WARNING, logger="src.tts_client"):
+            t0 = time.monotonic()
+            await client.play(wav_data)
+            elapsed = time.monotonic() - t0
+            # 強制クローズはデーモンスレッドで行うので、少し待ってから確認する
+            for _ in range(50):
+                if "close" in fake_stream.instances[0].calls:
+                    break
+                await asyncio.sleep(0.01)
+
+        assert 0.25 <= elapsed < 1.0  # WAV 0.1 秒 + 0.2 秒で打ち切り
+        (stream,) = fake_stream.instances  # 中断時はフォールバックしない
+        assert stream.calls[-2:] == ["abort", "close"]
+        assert any("強制的に閉じます" in r.message for r in caplog.records)
+        await client.close()
+
+    async def test_normal_play_returns_without_warning(
+        self, fake_stream: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        client = TTSClient(output_device_id=99)
+        wav_data = _make_wav_bytes(samples=2400, channels=1, samplerate=24000)
+        with patch.dict("sys.modules", {"sounddevice": _fake_sd_module()}), \
+                caplog.at_level(logging.WARNING, logger="src.tts_client"):
+            await client.play(wav_data)
+
+        assert fake_stream.instances[0].calls == ["start", "stop", "close"]
+        assert not caplog.records
+        await client.close()
+
+    def test_wav_duration_sec(self) -> None:
+        wav_data = _make_wav_bytes(samples=36000, channels=1, samplerate=24000)
+        assert TTSClient.wav_duration_sec(wav_data) == pytest.approx(1.5)
 
 
 # ------------------------------------------------------------------
