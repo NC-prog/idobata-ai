@@ -128,9 +128,13 @@ class TTSClient:
             logger.warning("VOICEVOX 合成エラー (%s)。音声再生をスキップします。", exc.response.status_code)
             return
 
+        await self.play(audio_data)
+
+    async def play(self, wav_data: bytes) -> None:
+        """合成済みの WAV を再生する（再生完了まで待つ）。失敗時はスキップ。"""
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, self._play_wav, audio_data)
+            await loop.run_in_executor(None, self._play_wav, wav_data)
         except Exception:
             logger.warning("音声再生に失敗しました。スキップします。", exc_info=True)
 

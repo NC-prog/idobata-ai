@@ -1,0 +1,61 @@
+"""実サービス（ASR / LLM / VOICEVOX）に繋ぐ往復テスト。
+
+``docker compose -f deploy/standalone/docker-compose.yaml up -d`` 後に
+``uv run pytest -m integration`` で実行する。
+"""
+
+from __future__ import annotations
+
+import io
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+from src.asr_client import ASRClient, load_site_vocabulary
+from src.config import config
+from src.dialogue import Dialogue
+from src.llm_client import LLMClient
+from src.tts_client import TTSClient
+
+pytestmark = pytest.mark.integration
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _load_16k(path: Path) -> np.ndarray:
+    data, sr = sf.read(str(path), dtype="float32")
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if sr != 16000:
+        idx = np.linspace(0, len(data) - 1, int(len(data) * 16000 / sr)).astype(np.int64)
+        data = data[idx]
+    return np.asarray(data, dtype=np.float32)
+
+
+async def test_wav_asr_llm_tts_roundtrip() -> None:
+    asr = ASRClient()
+    asr.set_static_context(load_site_vocabulary(config.site, config.asr.site_context_dir))
+    tts = TTSClient()
+    try:
+        audio = _load_16k(FIXTURES / "test_speech_ja.wav")
+        final = None
+        async for chunk in asr.transcribe_segment([audio], time.monotonic()):
+            if chunk.is_final:
+                final = chunk
+        assert final is not None
+        assert "テスト" in final.text
+        assert final.language == "ja"
+
+        reply = await Dialogue(LLMClient()).respond(final.text, final.language)
+        assert reply
+        assert "<think>" not in reply
+
+        wav = await tts.synthesize(reply)
+        data, sr = sf.read(io.BytesIO(wav))
+        assert sr > 0 and len(data) > sr  # 1 秒以上の音声
+    finally:
+        await asr.close()
+        await tts.close()

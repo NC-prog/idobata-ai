@@ -6,8 +6,10 @@
 # ログ: docker compose -f deploy/standalone/docker-compose.yaml logs -f
 #
 # GPU 配分（--gpu-memory-utilization は GPU 全体 16GB に対する割合）:
-#   asr 0.30（約4.8GB）+ llm 0.45（約7.2GB）= 0.75。残り 0.25（約4GB）は
+#   asr 0.35（約5.6GB）+ llm 0.45（約7.2GB）= 0.80。残り 0.20（約3.2GB）は
 #   WP01 以降の YOLO11-pose と多言語 TTS 用に空けておく。
+#   指示書の当初値は asr 0.30 だったが、Qwen3-ASR-1.7B の重み 3.9GiB + CUDA 文脈で
+#   KV キャッシュ枠が残らず起動しないため 0.35 に上げた（docs/WP00_result.md 参照）。
 #
 # vLLM は起動時に「空き VRAM ≥ 割当」を検査するため、2 コンテナが同時に
 # プロファイリングすると競合する。llm は asr が healthy になってから起動する。
@@ -53,10 +55,18 @@ services:
       - "--port"
       - "8000"
       - "--gpu-memory-utilization"
-      - "${ASR_GPU_UTIL:-0.30}"
+      - "${ASR_GPU_UTIL:-0.35}"
       - "--max-model-len"
       - "4096"
       - "--enforce-eager"
+      # 16GB 機向け: 既定（256 並列・音声 5 本ぶんのエンコーダ予約）だと 0.30 に収まらない。
+      # 窓口 1 拠点なら同時 4 本・1 リクエスト 1 音声・バッチ 1024 トークンで足りる。
+      - "--max-num-seqs"
+      - "4"
+      - "--max-num-batched-tokens"
+      - "1024"
+      - "--limit-mm-per-prompt"
+      - '{"audio": 1}'
 
   llm:
     <<: *vllm-common
@@ -79,6 +89,12 @@ services:
       - "${LLM_GPU_UTIL:-0.45}"
       - "--max-model-len"
       - "8192"
+      # 16GB 機向け: 既定の 256 並列だと活性化メモリの見積もりで KV 枠が消える。
+      - "--max-num-seqs"
+      - "8"
+      - "--max-num-batched-tokens"
+      - "1024"
+      - "--enforce-eager"
 
   voicevox:
     image: voicevox/voicevox_engine:cpu-latest

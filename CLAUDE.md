@@ -30,10 +30,10 @@
 
 | サービス | standalone | site | モデル名（API 指定） | GPU 割当（standalone） |
 |---|---|---|---|---|
-| ASR（Qwen3-ASR-1.7B） | `http://127.0.0.1:8005/v1` | 同左 | `/models/asr` | 0.30（約4.8GB） |
-| LLM（Qwen3-8B-AWQ） | `http://127.0.0.1:8001/v1` | `IDOBATA_BACKEND_URL`（Tailscale 経由の T2／3660。未設定なら起動時エラー） | `/models/llm` | 0.45（約7.2GB） |
+| ASR（Qwen3-ASR-1.7B） | `http://127.0.0.1:8005/v1` | 同左 | `/models/asr` | 0.35（約5.6GB、実測 5.2GB） |
+| LLM（Qwen3-8B-AWQ） | `http://127.0.0.1:8001/v1` | `IDOBATA_BACKEND_URL`（Tailscale 経由の T2／3660。未設定なら起動時エラー） | `/models/llm` | 0.45（約7.2GB、実測 7.3GB、`--enforce-eager`） |
 | TTS（VOICEVOX） | `http://127.0.0.1:50021` | 同左 | - | CPU |
-| 予備 | - | - | - | 0.25（約4GB、YOLO11-pose・多言語TTS用。使い切らない） |
+| 予備 | - | - | - | 0.20（約3.2GB、YOLO11-pose・多言語TTS用。使い切らない） |
 
 - モデル名は必ず `/models/` プレフィックス付き。API key は `"dummy"`
 - Qwen3 の思考モードは既定オフ（サーバに `--reasoning-parser` を付けず、リクエストで `chat_template_kwargs.enable_thinking=false`）

@@ -257,22 +257,22 @@ class VoiceLoop:
         """VOICEVOX で合成し、再生（または WAV 書き出し）する。再生中はゲートを閉じる。"""
         self._gate.mute()
         try:
+            try:
+                wav = await self._tts.synthesize(text)
+            except (httpx.ConnectError, httpx.HTTPStatusError):
+                logger.warning("VOICEVOX 合成に失敗。音声なしで続行します。")
+                return
+            # 合成完了 = 再生（または書き出し）開始とみなす
+            if timing is not None:
+                timing.t_audio_start = time.monotonic()
             if self._output_wav_dir is not None:
                 self._reply_count += 1
                 out = self._output_wav_dir / f"reply_{self._reply_count:02d}.wav"
-                try:
-                    await self._tts.synthesize_to_file(text, str(out))
-                except (httpx.ConnectError, httpx.HTTPStatusError):
-                    logger.warning("VOICEVOX 合成に失敗。音声なしで続行します。")
-                    return
-                if timing is not None:
-                    timing.t_audio_start = time.monotonic()
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(wav)
                 print(f"[音声] {out}")
             else:
-                if timing is not None:
-                    # 合成完了＝再生開始の直前を音声開始とみなす（synthesize_and_play 内部）
-                    timing.t_audio_start = time.monotonic()
-                await self._tts.synthesize_and_play(text)
+                await self._tts.play(wav)
         finally:
             self._gate.schedule_unmute()
 
@@ -323,7 +323,7 @@ def main() -> None:
         datefmt="%H:%M:%S",
         stream=sys.stdout,
     )
-    for noisy in ("httpx", "openai", "websockets", "httpcore"):
+    for noisy in ("httpx", "httpx2", "openai", "websockets", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     if args.input_wav and args.mode != "voice":
