@@ -1,0 +1,116 @@
+"""井戸端AI のテスト音声（server/tests/fixtures/*.wav）を VOICEVOX で合成する。
+
+来訪者役の発話 3 本（挨拶・手続きの質問・雑談）を作る。会議音声など実在の録音は使わない。
+応答側（井戸端AI）の声は四国めたん（speaker 2）なので、来訪者役は別の話者にしている。
+
+使い方（VOICEVOX が 127.0.0.1:50021 で起動していること）:
+    uv run --project server python scripts/gen_test_audio.py
+    uv run --project server python scripts/gen_test_audio.py --out-dir /tmp/fixtures
+
+出力は VOICEVOX 既定の 24kHz / mono / PCM16 WAV。前後に無音を付け、VAD が発話区間を切り出せるようにする。
+音声の利用は VOICEVOX および各キャラクターの利用規約に従う（クレジットは fixtures/README.md）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUT_DIR = REPO_ROOT / "server" / "tests" / "fixtures"
+DEFAULT_VOICEVOX_URL = "http://127.0.0.1:50021"
+
+TIMEOUT_SEC = 60.0
+MAX_RETRIES = 3
+RETRY_WAIT_SEC = 2.0
+# VAD が発話の始まり・終わりを確定できるよう、前後に足す無音（秒）
+PRE_SILENCE_SEC = 0.5
+POST_SILENCE_SEC = 0.8
+
+
+@dataclass(frozen=True)
+class Utterance:
+    """合成する 1 発話。"""
+
+    filename: str
+    speaker_id: int
+    speaker_name: str
+    text: str
+
+
+UTTERANCES: tuple[Utterance, ...] = (
+    Utterance(
+        filename="visitor_greeting_ja.wav",
+        speaker_id=8,
+        speaker_name="春日部つむぎ",
+        text="こんにちは。ちょっと寄ってみました。今日は少し時間があるんです。",
+    ),
+    Utterance(
+        filename="visitor_procedure_ja.wav",
+        speaker_id=11,
+        speaker_name="玄野武宏",
+        text="住民票の写しを取りたいんですけど、どこの窓口に行けばいいですか。",
+    ),
+    Utterance(
+        filename="visitor_smalltalk_ja.wav",
+        speaker_id=13,
+        speaker_name="青山龍星",
+        text="最近、急に寒くなりましたね。朝晩は特に冷えますよ。",
+    ),
+)
+
+
+def _post_with_retry(
+    client: httpx.Client, path: str, params: dict[str, Any], body: Any = None
+) -> httpx.Response:
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = client.post(path, params=params, json=body)
+            resp.raise_for_status()
+            return resp
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            last_exc = exc
+            print(f"  {path} 失敗（{attempt}/{MAX_RETRIES}）: {exc}", file=sys.stderr)
+            time.sleep(RETRY_WAIT_SEC)
+    assert last_exc is not None
+    raise last_exc
+
+
+def synthesize(client: httpx.Client, utt: Utterance) -> bytes:
+    """VOICEVOX の audio_query → synthesis で WAV バイト列を得る。"""
+    query = _post_with_retry(
+        client, "/audio_query", {"text": utt.text, "speaker": utt.speaker_id}
+    ).json()
+    query["prePhonemeLength"] = PRE_SILENCE_SEC
+    query["postPhonemeLength"] = POST_SILENCE_SEC
+    return _post_with_retry(
+        client, "/synthesis", {"speaker": utt.speaker_id}, body=query
+    ).content
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--voicevox-url", default=DEFAULT_VOICEVOX_URL)
+    args = parser.parse_args()
+
+    out_dir: Path = args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with httpx.Client(base_url=args.voicevox_url, timeout=TIMEOUT_SEC) as client:
+        for utt in UTTERANCES:
+            wav = synthesize(client, utt)
+            out = out_dir / utt.filename
+            out.write_bytes(wav)
+            print(f"{out}  ({utt.speaker_name}, {len(wav)} bytes)  {utt.text}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

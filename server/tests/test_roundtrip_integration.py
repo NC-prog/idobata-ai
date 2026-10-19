@@ -40,13 +40,13 @@ async def test_wav_asr_llm_tts_roundtrip() -> None:
     asr.set_static_context(load_site_vocabulary(config.site, config.asr.site_context_dir))
     tts = TTSClient()
     try:
-        audio = _load_16k(FIXTURES / "test_speech_ja.wav")
+        audio = _load_16k(FIXTURES / "visitor_procedure_ja.wav")
         final = None
         async for chunk in asr.transcribe_segment([audio], time.monotonic()):
             if chunk.is_final:
                 final = chunk
         assert final is not None
-        assert "テスト" in final.text
+        assert "住民票" in final.text
         assert final.language == "ja"
 
         reply = await Dialogue(LLMClient()).respond(final.text, final.language)

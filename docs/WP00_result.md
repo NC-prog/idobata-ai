@@ -40,20 +40,21 @@
 
 ```
 uv run python -m src.main --mode voice \
-  --input-wav tests/fixtures/test_speech_ja.wav tests/fixtures/test_context_1.wav tests/fixtures/test_context_2.wav \
+  --input-wav tests/fixtures/visitor_greeting_ja.wav tests/fixtures/visitor_procedure_ja.wav tests/fixtures/visitor_smalltalk_ja.wav \
   --output-wav-dir <出力先>
 ```
 
 | 往復 | 聞き取り（ASR、検出言語 ja） | ASR 完了 | LLM 完了 | 音声準備完了 |
 |---|---|---|---|---|
-| 1 | これは H S R のレイテンシ測定用のテスト音声です。マーケティング部の田中です。 | 0.42s | 1.28s | 3.25s |
-| 2 | 売上は前年比百二十パーセントを達成しました。 | 0.32s | 1.07s | 3.52s |
-| 3 | 展開率について報告します。現在、全社の八十五パーセントまで導入が完了。 | 0.38s | 1.01s | 3.01s |
+| 1 | こんにちは。ちょっと寄ってみました。今日は少し時間があるんです。 | 0.27s | 1.10s | 2.28s |
+| 2 | 住民票の写しを取りたいんですけど、どこの窓口に行けばいいですか。 | 0.37s | 1.59s | 5.08s |
+| 3 | 最近急に寒くなりましたね。朝晩は特に冷えますよ。 | 0.31s | 1.37s | 4.06s |
 
 - 時間は **VAD が発話終了と判定した時点**から測った（実際の発話終了から `min_silence_ms`＝0.4 秒遅れる）。体感値は、ここにだいたい 0.4 秒を足したものになる。
-- 内訳: ASR 0.3〜0.4 秒、LLM 0.6〜0.9 秒（応答は 40〜65 トークン）、**VOICEVOX（CPU）の全文合成に 1.5〜2.5 秒**。いちばん大きいのは TTS（「4. 次にやるとよいこと」参照）。
+- 内訳: ASR 0.3〜0.4 秒、LLM 0.8〜1.2 秒、**VOICEVOX（CPU）の全文合成に 1.2〜3.5 秒**（応答が長いほど伸びる。2 往復目は 3 文で最長）。いちばん大きいのは TTS（「5. 次にやるとよいこと」参照）。
 - 往復ごとに応答 WAV（reply_01〜03.wav）ができている。自己発話ゲートの mute → 0.7 秒後の unmute もログで確認した。
-- テスト音声は townhall の会議用なので、内容は井戸端の想定とは合っていない。ペルソナどおり 2〜3 文で、思考タグ（`<think>`）は出ていない。
+- テスト音声は来訪者役の発話（挨拶・手続きの質問・雑談）を VOICEVOX で合成したもの（`scripts/gen_test_audio.py`、話者は応答側と別）。3 本とも ASR は原文どおり（句読点の差のみ）。応答はペルソナどおり 2〜3 文で、思考タグ（`<think>`）は出ていない。
+- 当初は townhall の会議用テスト音声で計測したが（音声開始 3.0〜3.5 秒）、社外秘の懸念があるため削除し、上記に差し替えて計測し直した。
 
 text モードの応答例（LLM 0.5〜1.1 秒）:
 
@@ -101,7 +102,7 @@ text モードの応答例（LLM 0.5〜1.1 秒）:
 
 ### テストデータ
 
-- townhall のテスト用 WAV は Git LFS 管理で、`GIT_LFS_SKIP_SMUDGE=1` で clone したためポインタしか無かった。git-lfs も入っていない。そこで GitHub の LFS batch API から 4 本だけ取得し（SHA-256 一致を確認）、**idobata-ai には LFS を使わず普通のファイルとして**入れた（計 約 900KB）。
+- テスト音声: 当初は townhall のテスト用 WAV（会議音声、Git LFS 管理）を取得して入れたが、社外秘の懸念から**削除し、`git filter-repo` で `feature/wp00-bootstrap` の履歴からも除去して force push した**（main には未マージ）。代わりに `scripts/gen_test_audio.py` で来訪者役の発話 3 本を VOICEVOX で合成し、LFS を使わず普通のファイルとして置いた（計 約 800KB、クレジットは `server/tests/fixtures/README.md`）。
 
 ## 3. 人間に確認してほしいこと
 
@@ -116,7 +117,7 @@ text モードの応答例（LLM 0.5〜1.1 秒）:
    - (b) LLM の `--max-model-len` を 4096 にして 0.40 に下げる（会話 6 ターン＋システムプロンプトなら 1,000 トークン未満なので足りる）
    - (c) このまま（0.80）
 3. **拠点の語彙 YAML の中身**（`server/context/*.yaml`）は仮。市・町の正式な課名と主要施設名に差し替えてほしい。
-4. **`server/tests/fixtures/*.wav` を普通のファイルとしてコミットしたこと**（townhall の会議用音声。社名・人名など社外秘に当たる内容が無いかを確認してほしい。リポジトリの公開・非公開に注意）。
+4. **テスト音声**は VOICEVOX 合成の来訪者役音声に差し替え済み（townhall の会議音声はブランチ履歴からも除去）。VOICEVOX のクレジット表記（`server/tests/fixtures/README.md`）で足りるか、公開時に確認してほしい。
 5. ペルソナの話しぶり: 相手に質問を返しすぎる傾向がある（「詳しく教えていただけますか？」が多い）。プロンプトの調整は WP03 の対話FSMと合わせてやるのがよさそう。
 
 ## 4. 次に人間がやる手順（音声モードの試し方）
@@ -150,14 +151,14 @@ uv run python -m src.main --mode voice
 # 6) 無人の確認をやり直すとき
 uv run pytest                          # unit（112 件）
 uv run pytest -m integration           # 実サービス往復（サービング起動中のみ）
-uv run python -m src.main --mode voice --input-wav tests/fixtures/test_speech_ja.wav --output-wav-dir /tmp/idobata-out
+uv run python -m src.main --mode voice --input-wav tests/fixtures/visitor_*.wav --output-wav-dir /tmp/idobata-out
 ```
 
 止めるとき: `docker compose -f deploy/standalone/docker-compose.yaml down`（GPU を約 12.6GB 使っているため、他の GPU 作業をする前に止める）。
 
 ## 5. 次にやるとよいこと（WP01 以降へのメモ、未着手）
 
-- **TTS を文ごとに分けて合成・再生する**: 今は応答全文を合成してから鳴らしているため、発話終了から声が出るまでの 3 秒前後のうち 1.5〜2.5 秒が VOICEVOX（CPU）の合成。最初の 1 文だけ先に合成すれば 1.5 秒前後まで縮む見込み。LLM のストリーミングと組み合わせればさらに縮む。
+- **TTS を文ごとに分けて合成・再生する**: 今は応答全文を合成してから鳴らしているため、発話終了から声が出るまでの 2.3〜5 秒のうち 1.2〜3.5 秒が VOICEVOX（CPU）の合成。最初の 1 文だけ先に合成すれば 1.5 秒前後まで縮む見込み。LLM のストリーミングと組み合わせればさらに縮む。
 - VOICEVOX の GPU 版は VRAM の予備を食うので、まず文分割を試す。
 - vLLM の `--enforce-eager` を外したいときは、torch.compile のキャッシュ（`/root/.cache/vllm`）もボリュームに逃がす（再起動のたびに約 27 秒コンパイルが走るのを防ぐ）。
 - ASR は「H S R」（正しくは ASR）のような略語の取り違えがある。townhall と同じく、固有名詞は LLM 側で補正する方針でよいと考える。
