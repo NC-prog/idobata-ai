@@ -1,7 +1,7 @@
 # テスト音声（fixtures）
 
 来訪者役の日本語発話を VOICEVOX で合成したもの。実在の人の録音は含まない。
-再生成: `uv run --project server python scripts/gen_test_audio.py`（VOICEVOX 起動中に）
+再生成: `uv run --project server python scripts/make_fixtures.py`（VOICEVOX 起動中に）
 
 | ファイル | 内容 | 話者 |
 |---|---|---|

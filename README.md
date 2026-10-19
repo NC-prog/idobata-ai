@@ -14,4 +14,20 @@
 | フロントAI | 現地GPU機（12〜24GB） | 人物検知（YOLO11-pose）、VAD、Qwen3-ASR、TTS、セッション |
 | バックエンドAI | RTX PRO 6000 | LLM（gpt-oss）、VLM、RAG、紹介状生成、職員パネル |
 
+## 起動（WP00：7560 単体の音声往復）
+
+```bash
+cp deploy/standalone/.env.example deploy/standalone/.env   # 初回のみ
+docker compose -f deploy/standalone/docker-compose.yaml --env-file deploy/standalone/.env up -d --build
+bash scripts/healthcheck.sh
+
+cd server
+uv sync
+uv run python -m src.main --list-devices                                   # 番号を確認
+uv run python -m src.main --mode voice --audio-device 0 --output-device 20  # 内蔵マイク（ALSA 直）＋内蔵スピーカー
+```
+
+マイクは ALSA 直（`hw:0,0`）を使う。PipeWire 経由の入力はノイズになるため当面使わない（[docs/WP00_result.md](docs/WP00_result.md) の 6-2）。
+詳しい手順と開発ルールは [CLAUDE.md](CLAUDE.md)。
+
 富士製作所合同会社 / 広島オープンアクセラレータ 2026（The Meet 2026）

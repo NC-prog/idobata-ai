@@ -51,7 +51,7 @@ bash scripts/healthcheck.sh
 cd server
 uv sync
 uv run python -m src.main --mode text
-uv run python -m src.main --mode voice                 # 内蔵マイク
+uv run python -m src.main --mode voice --audio-device 0 --output-device 20   # 内蔵マイク（ALSA 直）＋内蔵スピーカー
 uv run python -m src.main --list-devices
 uv run python -m src.main --mode voice --input-wav tests/fixtures/visitor_procedure_ja.wav --output-wav-dir /tmp/out
 
@@ -77,7 +77,7 @@ uv run ruff check
 CLAUDE.md
 deploy/standalone/        # docker-compose.yaml（ASR + LLM + VOICEVOX）、.env.example、vllm/Dockerfile
 scripts/healthcheck.sh    # 前提サービスの一括ヘルスチェック
-scripts/gen_test_audio.py # テスト音声（来訪者役）を VOICEVOX で合成
+scripts/make_fixtures.py  # テスト音声（来訪者役）を VOICEVOX で合成
 server/
 ├── context/<site>.yaml   # 拠点の地名・施設名・課名（ASR コンテキストバイアシング）
 ├── src/

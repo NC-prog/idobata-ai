@@ -4,8 +4,8 @@
 応答側（井戸端AI）の声は四国めたん（speaker 2）なので、来訪者役は別の話者にしている。
 
 使い方（VOICEVOX が 127.0.0.1:50021 で起動していること）:
-    uv run --project server python scripts/gen_test_audio.py
-    uv run --project server python scripts/gen_test_audio.py --out-dir /tmp/fixtures
+    uv run --project server python scripts/make_fixtures.py
+    uv run --project server python scripts/make_fixtures.py --out-dir /tmp/fixtures
 
 出力は VOICEVOX 既定の 24kHz / mono / PCM16 WAV。前後に無音を付け、VAD が発話区間を切り出せるようにする。
 音声の利用は VOICEVOX および各キャラクターの利用規約に従う（クレジットは fixtures/README.md）。

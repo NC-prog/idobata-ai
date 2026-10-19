@@ -11,6 +11,9 @@
 - **止まって報告すべき事項が 2 件**（1-9 該当）。詳細は「3. 人間に確認してほしいこと」:
   1. **VRAM が足りず配分を変えた**：ASR を 0.30 → **0.35** に上げた（0.30 では Qwen3-ASR-1.7B が起動しない）。残りの予備は 0.25 → 0.20。
   2. **Python からスピーカー・マイクを開けない**：PipeWire 自体はマイク・スピーカーとも認識しているが、`sounddevice` が使う **`libportaudio2` が未インストール**（入れるには sudo が要る）。このため完了条件 2 の「VOICEVOX 再生」と完了条件 3（実マイク）はまだ確認できていない。
+- **追記（同日夜、実機確認を受けた追加作業）**: libportaudio2 導入後の実機 voice モードで見つかった 2 件を「6. 追加作業」に記録した。
+  - **TTS 再生後にゲートが開かず 2 ターン目以降が全て捨てられる不具合**を修正（`sd.play()`/`sd.wait()` が戻らない → `OutputStream` を明示的に開いて流し切る方式に変更、再生タイムアウトとゲートの安全装置を追加）。実再生で 3 往復を確認済み。
+  - **PipeWire 経由のマイク取り込みがフルスケールのノイズになる**。当面は `--audio-device 0`（ALSA 直）で運用する。原因調査は WP01 バックログ。
 - 代替モデルは使っていない。`Qwen/Qwen3-8B-AWQ`（Qwen 公式）を取得・起動できた。vLLM v0.27.1 のまま、版上げは不要だった。
 
 ## 1. やったこと
@@ -53,7 +56,7 @@ uv run python -m src.main --mode voice \
 - 時間は **VAD が発話終了と判定した時点**から測った（実際の発話終了から `min_silence_ms`＝0.4 秒遅れる）。体感値は、ここにだいたい 0.4 秒を足したものになる。
 - 内訳: ASR 0.3〜0.4 秒、LLM 0.8〜1.2 秒、**VOICEVOX（CPU）の全文合成に 1.2〜3.5 秒**（応答が長いほど伸びる。2 往復目は 3 文で最長）。いちばん大きいのは TTS（「5. 次にやるとよいこと」参照）。
 - 往復ごとに応答 WAV（reply_01〜03.wav）ができている。自己発話ゲートの mute → 0.7 秒後の unmute もログで確認した。
-- テスト音声は来訪者役の発話（挨拶・手続きの質問・雑談）を VOICEVOX で合成したもの（`scripts/gen_test_audio.py`、話者は応答側と別）。3 本とも ASR は原文どおり（句読点の差のみ）。応答はペルソナどおり 2〜3 文で、思考タグ（`<think>`）は出ていない。
+- テスト音声は来訪者役の発話（挨拶・手続きの質問・雑談）を VOICEVOX で合成したもの（`scripts/make_fixtures.py`、話者は応答側と別）。3 本とも ASR は原文どおり（句読点の差のみ）。応答はペルソナどおり 2〜3 文で、思考タグ（`<think>`）は出ていない。
 - 当初は townhall の会議用テスト音声で計測したが（音声開始 3.0〜3.5 秒）、社外秘の懸念があるため削除し、上記に差し替えて計測し直した。
 
 text モードの応答例（LLM 0.5〜1.1 秒）:
@@ -102,7 +105,7 @@ text モードの応答例（LLM 0.5〜1.1 秒）:
 
 ### テストデータ
 
-- テスト音声: 当初は townhall のテスト用 WAV（会議音声、Git LFS 管理）を取得して入れたが、社外秘の懸念から**削除し、`git filter-repo` で `feature/wp00-bootstrap` の履歴からも除去して force push した**（main には未マージ）。代わりに `scripts/gen_test_audio.py` で来訪者役の発話 3 本を VOICEVOX で合成し、LFS を使わず普通のファイルとして置いた（計 約 800KB、クレジットは `server/tests/fixtures/README.md`）。
+- テスト音声: 当初は townhall のテスト用 WAV（会議音声、Git LFS 管理）を取得して入れたが、社外秘の懸念から**削除し、`git filter-repo` で `feature/wp00-bootstrap` の履歴からも除去して force push した**（main には未マージ）。代わりに `scripts/make_fixtures.py` で来訪者役の発話 3 本を VOICEVOX で合成し、LFS を使わず普通のファイルとして置いた（計 約 800KB、クレジットは `server/tests/fixtures/README.md`）。
 
 ## 3. 人間に確認してほしいこと
 
@@ -141,15 +144,17 @@ uv run python -m src.main --mode text
 #   /reset で履歴消去、/quit で終了
 
 # 4) voice モード（完了条件 3：3 往復以上、回り込みなし）
-uv run python -m src.main --mode voice
-#   既定デバイスで駄目なら: --audio-device <入力ID> --output-device <出力ID>
+uv run python -m src.main --mode voice --audio-device 0 --output-device 20
+#   0 = ALSA 直の内蔵マイク（48k→16k リサンプル）、20 = 内蔵スピーカー（PipeWire）。番号は --list-devices で確認
+#   PipeWire 経由のマイク（alsa_input… や既定）はノイズになるので使わない（「6. 追加作業」参照）
+#   .env の IDOBATA_AUDIO_INPUT_DEVICE / IDOBATA_AUDIO_OUTPUT_DEVICE に書けば引数は省略できる
 #   1 往復ごとに「[計測] 発話終了→ ASR x.xxs / LLM x.xxs / 音声開始 x.xxs」が出る
 #   内蔵マイク＋内蔵スピーカーは回り込みやすい。応答の終わりから 0.7 秒は聞かない（SpeechGate）
 
 # 5) 完了条件 5：ストップウォッチで「話し終わり → 声が出始める」を 3 回測り、本ファイルに追記する
 
 # 6) 無人の確認をやり直すとき
-uv run pytest                          # unit（112 件）
+uv run pytest                          # unit（123 件）
 uv run pytest -m integration           # 実サービス往復（サービング起動中のみ）
 uv run python -m src.main --mode voice --input-wav tests/fixtures/visitor_*.wav --output-wav-dir /tmp/idobata-out
 ```
@@ -162,3 +167,47 @@ uv run python -m src.main --mode voice --input-wav tests/fixtures/visitor_*.wav 
 - VOICEVOX の GPU 版は VRAM の予備を食うので、まず文分割を試す。
 - vLLM の `--enforce-eager` を外したいときは、torch.compile のキャッシュ（`/root/.cache/vllm`）もボリュームに逃がす（再起動のたびに約 27 秒コンパイルが走るのを防ぐ）。
 - ASR は「H S R」（正しくは ASR）のような略語の取り違えがある。townhall と同じく、固有名詞は LLM 側で補正する方針でよいと考える。
+
+## 6. 追加作業（同日夜、実機 voice モードの確認を受けて）
+
+### 6-1. TTS 再生後にゲートが開かない不具合の修正
+
+**症状**: 実機の voice モード（`--audio-device 0 --output-device 20`）で、`[GATE] mute` → `TTS 再生:` の後に `[GATE] unmute` と `[計測]` が出ず、2 ターン目以降の入力がすべてゲートで捨てられる。
+
+**原因**: `tts_client._play_wav()` の `sd.play()` ＋ `sd.wait()` が戻らない。修正前のコードで、疑似音声＋実再生（PipeWire の内蔵スピーカー）でも再現した（`TTS 再生: device=…` の直後で止まり、60 秒待っても進まない）。
+
+**対処**:
+- `_play_wav` は `sd.play`/`sd.wait`（グローバルストリーム）をやめ、`sd.OutputStream` を明示的に開いて 0.1 秒ずつ `write()` で流し切り、`stop()`（鳴らし切るまで待つ）→ `close()` する。デフォルトデバイスへのフォールバックは従来どおり。
+- `play()` は専用のデーモンスレッドで再生し、**WAV の実時間 + 2 秒**（`AudioOutputConfig.play_timeout_margin_sec`）で打ち切る。超えたら WARNING を出し、ストリームを別スレッドで `abort()`/`close()` して戻る（戻らない再生がイベントループやプロセス終了を塞がない）。
+- `SpeechGate` に安全装置: `mute(expected_sec=…)` で「想定再生時間 + 後マージン 0.7 秒 + 2 秒」（`SpeechGateConfig.safety_margin_sec`）後の自動 unmute を予約する。`schedule_unmute()` が先に来たらそちらが優先（安全装置は取り消し）。`main._speak()` は合成直後に WAV の長さを渡す。
+- 再生の開始・終了・経過秒を INFO で出す（`再生開始: device=…, x.xx秒` / `再生終了: device=…, 経過 x.xx秒（WAV x.xx秒）`。打ち切り時は `再生中断` を WARNING）。
+- 疑似音声モードは、ファイルごとに応答が終わり**ゲートが開くのを待ってから**次のファイルを流すようにした（閉じたまま流すと冒頭が捨てられうる）。
+
+**確認**（修正後、疑似音声 3 本を実再生）:
+
+```
+uv run python -m src.main --mode voice --output-device <内蔵スピーカー> \
+  --input-wav tests/fixtures/visitor_greeting_ja.wav tests/fixtures/visitor_procedure_ja.wav tests/fixtures/visitor_smalltalk_ja.wav
+```
+
+| 往復 | 再生（経過 / WAV） | unmute | ASR / LLM / 音声開始 |
+|---|---|---|---|
+| 1 挨拶 | 6.34 / 6.37 秒 | 出た | 0.27 / 0.80 / 2.14 秒 |
+| 2 住民票 | 10.61 / 10.62 秒 | 出た | 0.35 / 1.07 / 3.20 秒 |
+| 3 雑談 | 8.60 / 8.63 秒 | 出た | 0.34 / 0.95 / 2.08 秒 |
+
+- 3 往復とも `再生終了` → `[計測]` → `[GATE] unmute — 後マージン 0.7秒経過` が出た。`OutputStream` 方式では再生が普通に戻るので、タイムアウトと安全装置は発動していない（どちらも単体テストで、戻らないストリームを模して確認）。
+- **デバイス番号の注意**: 確認時は、止まっていた voice モードのプロセスが `hw:0,0` を掴んだままだったため、PortAudio の一覧から ALSA の内蔵デバイス群（7 個）が消えて番号がずれていた。人間側の `20`（`alsa_output.pci-0000_00_1f.3.analog-stereo`、PulseAudio API）は、この時こちらでは `13` だったので、**同じ出力先を 13 で指定して**確認した。`hw:0,0` を誰かが掴んでいると番号が変わるので、動かないときは `--list-devices` で確認し直すこと。
+
+### 6-2. PipeWire 経由のマイク取り込みがノイズになる（回避のみ、原因は WP01）
+
+**症状**: `--audio-device 22`（`alsa_input.pci-0000_00_1f.3.analog-stereo`）や PipeWire の既定デバイスで録ると、**RMS 0.85 / peak 1.0 のフルスケールのノイズ**になり、ASR が空を返す。`arecord -D hw:0,0` では声が録れる（ファン音は多い）。
+
+**回避策（当面の運用）**: `--audio-device 0`（ALSA 直の `hw:0,0`、48kHz を 16kHz にリサンプル）＋ `--output-device 20`（内蔵スピーカー）で使う。
+- `.env.example` に `IDOBATA_AUDIO_INPUT_DEVICE=0` / `IDOBATA_AUDIO_OUTPUT_DEVICE=20` を追加した（`config.py` が読む。CLI の `--audio-device` / `--output-device` が優先）。README の起動例も同じにした。
+- 番号は機体と、その時ほかのプロセスが `hw:0,0` を使っているかで変わる（6-1 の注意）。
+
+**WP01 バックログ（今は深追いしない）**:
+- 原因の仮説: `sounddevice` が PipeWire の ALSA プラグイン（または PulseAudio 互換層）を **float32 / 16kHz / 1ch** で開いたときに、形式の取り決めが食い違っている（例: int16 を float32 として読んでいる、チャネルのずれ）。生データを int16 で開き直す、48kHz/2ch で開いてアプリ側で変換する、`pw-record` と比べる、などで切り分ける。
+- デバイスを番号ではなく名前（の一部）で指定できるようにする（`hw:0,0` の占有で番号がずれる問題の対策）。
+
