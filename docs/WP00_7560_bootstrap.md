@@ -8,7 +8,7 @@
 Claude Code は sudo を使わない。以下が未了なら Claude Code は確認して報告し、その先に進まない。
 
 1. Docker Engine と NVIDIA Container Toolkit が入っていて、`docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi` が通る。ユーザー fuji が docker グループに入っている。
-2. データ用ボリューム。SN810（nvme0、Windows側）の空き領域から切り出したパーティションを `/workspace` にマウント（Z2と同じ考え方）。当面無理なら `/home/fuji` 直下で進めてよいが、その場合は Claude Code に「/workspace なし」と伝える。
+2. データ用ボリューム `/workspace` は**当面作らない**（2026-10-19 決定。`/home` に約560GB空きがあるため）。将来 SN810 の Windows 領域を縮小して切り出す手順は `docs/7560_workspace_volume.md` に残す。
 3. `git config --global user.name / user.email` が設定済み（メールは `NC-prog@users.noreply.github.com`。GitHub のメール非公開設定で push が弾かれるため）。
 4. GitHub への push 認証（`gh auth login` 済み、または SSH 鍵）。
 
@@ -16,7 +16,17 @@ Claude Code は sudo を使わない。以下が未了なら Claude Code は確�
 
 ---
 
-あなたは Dell Precision 7560（RTX A5000 16GB、Ubuntu 26.04.1）上で作業しています。sudo は使わないでください。sudo が必要な手順に当たったら、実行せずに手順を書き出して止まってください。
+あなたは Dell Precision 7560（RTX A5000 Laptop 16GB、Ubuntu 26.04.1、ドライバ 615.71.09 / CUDA 13.4）上で作業しています。sudo は使わないでください。sudo が必要な手順に当たったら、実行せずに手順を書き出して止まってください。
+
+**今回の前提（人間が確認済み）**
+- Docker 29.1.3 / Compose v2.40.3 / NVIDIA Container Toolkit は導入済みで、`docker run --rm --gpus all ... nvidia-smi` が通る。ユーザー fuji は docker グループに入っている。
+- `/workspace` は **ない**。データとモデルはホーム直下に置く：`HF_CACHE_DIR=$HOME/.cache/huggingface`、データは `$HOME/idobata-data`。`/home` は約 560GB 空いている。
+- 人間はこのあと離席する。**問い合わせは最小限**にし、以下の方針で自律的に進める：
+  - 「1-9. 止まって報告すべきこと」に該当する場合だけ止まる。それ以外の判断（ライブラリの版、ファイル名、テストの細部、代替モデルの選択）は自分で決め、決めた内容を最後の報告にまとめて書く。
+  - 止まる場合も、止まるまでにできる作業（コード・設定・テスト・ドキュメント）は全部終えてコミット・push してから止まる。
+  - モデルのダウンロード（Qwen3-ASR-1.7B 約4GB、Qwen3-8B-AWQ 約6GB、vLLM イメージ数GB）は時間がかかるので、最初に `docker compose pull` と `huggingface-cli download` をバックグラウンドで開始し、その間にコードの移植を進める。
+  - 「1-8. 完了条件」の 3（音声モードで人間が話しかける確認）と 5 のストップウォッチ計測は人間が戻ってから行う。代わりに `server/tests/fixtures/` の WAV（townhall から `test_speech_ja.wav` 等を持ってくる）を `--input-wav` で流す疑似音声モードを実装し、WAV → ASR → LLM → VOICEVOX（音声ファイル出力）まで自動で通ることを確認して完了条件 3 の代替とする。
+  - 作業の区切りごとにコミットし、最後に `docs/WP00_result.md` に「やったこと／決めたこと／人間に確認してほしいこと／次に人間がやる手順（音声モードの試し方）」を書いて push する。
 
 ### 1-1. リポジトリの準備
 
@@ -76,7 +86,7 @@ A5000 16GB の配分。`gpu-memory-utilization` は「GPU全体に対する割�
 | llm | 同じ vLLM イメージ、`Qwen/Qwen3-8B-AWQ`（Qwen 公式リポジトリ）。もし取得できなければコミュニティ版は使わず、`Qwen/Qwen3-4B` の bf16（約8GB）で代替して報告する。FP8 は A5000（Ampere）では使えない | 8001 | `--gpu-memory-utilization 0.45`（約7.2GB）、`--max-model-len 8192` | served-model-name `/models/llm`。思考モードは既定でオフ（`--reasoning-parser` は付けず、リクエスト側で `enable_thinking: false` を渡す） |
 | voicevox | `voicevox/voicevox_engine:cpu-latest` | 50021 | なし（CPU） | townhall の OPERATION.md と同じ |
 
-- HF キャッシュは `${HF_CACHE_DIR:-/workspace/hf-cache}` をマウント。`/workspace` が無い環境では `.env` で `HF_CACHE_DIR=$HOME/.cache/huggingface` にする。
+- HF キャッシュは `${HF_CACHE_DIR:-${HOME}/.cache/huggingface}` をマウント。将来 `/workspace` を切り出したら `.env` の 1 行で切り替えられるようにしておく。
 - 残り約4GB（0.25）は WP01 以降の YOLO11-pose と将来の多言語TTS のために空けておく。この WP で使い切らないこと。
 - 両 vLLM コンテナを同時に上げ、`nvidia-smi` で実使用量を記録して報告する（配分の見直し材料にする）。
 - `restart: unless-stopped`。healthcheck は townhall と同じ `curl /v1/models`。
