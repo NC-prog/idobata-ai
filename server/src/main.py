@@ -18,7 +18,7 @@ import asyncio
 import logging
 import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -32,7 +32,7 @@ from .config import ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue
 from .edge_bridge import EdgeBridge
 from .edge_server import EdgeServer
-from .knowledge import KnowledgeBase, Weather
+from .knowledge import KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .site_context import load_facility, load_site_words
 from .speech_gate import SpeechGate
@@ -130,6 +130,8 @@ class VoiceLoop:
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        # 知識パック（毎朝作り直され、再起動なしで差し替わる）
+        self._knowledge = KnowledgeStore(config.data_dir, config.site, config.knowledge)
         # 最後に確定した来訪者の発話の時刻（monotonic）。待機に戻ったら None
         self._last_utterance_at: float | None = None
 
@@ -142,10 +144,9 @@ class VoiceLoop:
         # 固有名詞の読みを先に登録する（プリウォームの合成より前に）
         await self._tts.sync_user_dict(load_site_words(config.site, config.asr.site_context_dir))
         await self._tts.prewarm()
-        kb = await asyncio.to_thread(
-            KnowledgeBase.load, config.data_dir, config.site, config.knowledge
-        )
-        self._dialogue.attach_knowledge(kb)
+        await asyncio.to_thread(self._knowledge.reload_if_changed)
+        self._dialogue.attach_knowledge(self._knowledge)
+        self._spawn(self._watch_knowledge(), "kb-watch")
         if self._edge is not None and self._edge_server is not None:
             self._edge.on_hello = self._on_edge_hello
             await self._edge.start()
@@ -441,7 +442,9 @@ class VoiceLoop:
 
     async def _show_sources(self) -> None:
         """応答が参考資料を使っていたら、出典のタイトルを出す（読み上げはしない）。"""
-        titles = list(dict.fromkeys(r.title for r in self._dialogue.last_cited))
+        titles = list(dict.fromkeys(
+            f"{r.label}「{r.title}」" if r.label else r.title for r in self._dialogue.last_cited
+        ))
         if not titles:
             return
         print(f"[出典] {' / '.join(titles)}")
@@ -470,6 +473,17 @@ class VoiceLoop:
         task = asyncio.create_task(greet(), name="edge-hello")
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    def _spawn(self, coro: Coroutine[Any, Any, None], name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _watch_knowledge(self) -> None:
+        """知識パックの差し替え（毎朝の作り直し）を、再起動なしで取り込む。"""
+        while True:
+            await asyncio.sleep(config.knowledge.reload_check_sec)
+            await asyncio.to_thread(self._knowledge.reload_if_changed)
 
     async def _send_state(self, value: str) -> None:
         if self._edge is not None:

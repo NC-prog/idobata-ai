@@ -227,7 +227,8 @@ class DialogueConfig:
     ascii_run_min: int = 3
     rephrase_max_tokens: int = 128
     rephrase_prompt: str = (
-        "次の文を、意味を変えずに日本語だけで言い直してください。英単語は日本語かカタカナにします。"
+        "次の文を、意味を変えずに日本語だけで言い直してください。英単語は日本語かカタカナにし、"
+        "中国語の漢字（簡体字など）は日本語の漢字にします。"
         "言い直した文だけを出力してください。"
     )
     # 参考資料を使ったときに応答末尾へ付けさせる印（読み上げ前に取り除き、字幕に出典を出す）
@@ -287,11 +288,15 @@ class DialogueConfig:
     foreign_reply: str = "申し訳ありません、外国語でのご案内は準備中です。"
     # 参考資料があるターンだけ【話し方の決まり】に足す（無いのに出典の一言を言わせない）
     source_rule: str = (
-        "（この資料を使って答えたときは、最後に「{source_phrase}」と添え、"
-        "そのあとに使った資料の番号を {marker_example} の形で書く）"
+        "（この資料を使って答えたときは、応答の最後に、使った資料の番号を {marker_example} の形で書く。"
+        "「ホームページに載っています」のような出典の一言はこちらで足すので書かない）"
     )
-    # 参考資料を使ったときに添える一言（URL は読み上げない）
-    source_phrase: str = "詳しくは{org}のホームページにも載っています"  # org は 市 / 町
+    # 参考資料を使った応答の最後に足す一言（URL は読み上げない）。labels は資料の出どころの言い方
+    source_sentence: str = "詳しくは{labels}にも載っています。"
+    # 出どころの言い方が無い資料（古いパック）の言い方。org は 市 / 町
+    default_source_label: str = "{org}のホームページ"
+    # LLM が自分で書いた出典の一言（こちらで足すので捨てる）
+    llm_source_sentence_pattern: str = r"^(?:詳しくは|くわしくは).{0,40}(?:ホームページ|サイト|お知らせ).{0,12}載っています"
     no_references_text: str = "なし"
 
 
@@ -318,6 +323,8 @@ class KnowledgeConfig:
     min_vector_score: float = 0.86
     min_vector_score_with_keyword: float = 0.80
     keyword_rank: int = 5
+    # 知識パックの差し替え（manifest.json の更新）を確かめる間隔（秒）
+    reload_check_sec: float = 60.0
     # 埋め込みは CPU（GPU の予備枠は YOLO11-pose 用に残す）
     embed_device: str = "cpu"
     embed_threads: int = 4
@@ -401,6 +408,10 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     audio_output = AudioOutputConfig(
         device_id=_parse_device_id(env, "IDOBATA_AUDIO_OUTPUT_DEVICE")
     )
+    edge = EdgeConfig(
+        ws_port=int(_parse_float(env, "IDOBATA_EDGE_WS_PORT", EdgeConfig.ws_port)),
+        http_port=int(_parse_float(env, "IDOBATA_EDGE_HTTP_PORT", EdgeConfig.http_port)),
+    )
     dialogue = DialogueConfig(
         idle_timeout_sec=_parse_float(
             env, "IDOBATA_IDLE_TIMEOUT_SEC", DialogueConfig.idle_timeout_sec
@@ -415,6 +426,7 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         audio_input=audio_input,
         audio_output=audio_output,
         dialogue=dialogue,
+        edge=edge,
     )
 
 

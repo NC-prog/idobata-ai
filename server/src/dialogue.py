@@ -17,12 +17,12 @@ import logging
 import re
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator
-from datetime import date
+from datetime import datetime
 from typing import Any, Protocol
 
 from .config import DialogueConfig, config
-from .knowledge import KnowledgeBase, Reference, Weather
-from .persona import build_system_prompt, build_turn_message
+from .knowledge import JST, Reference, SearchResult, Weather
+from .persona import build_system_prompt, build_turn_message, source_labels
 from .site_context import Facility
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,14 @@ class ChatBackend(Protocol):
         self, model: str, messages: list[dict[str, Any]], **kwargs: Any
     ) -> Iterator[str]:
         """チャット補完をストリーミングで実行し、content の断片を順に返す。"""
+        ...
+
+
+class Searcher(Protocol):
+    """知識パックの検索（KnowledgeBase / KnowledgeStore）。"""
+
+    def search(self, query: str) -> SearchResult:
+        """発話で参考資料を探す。"""
         ...
 
 
@@ -150,6 +158,17 @@ class _ThinkFilter:
 
 
 _END = object()
+
+
+def _is_non_japanese_kanji(ch: str) -> bool:
+    """CJK 統合漢字のうち、日本語の文字集合（cp932）に無いもの（「险」「这」など）。"""
+    if not ("\u4e00" <= ch <= "\u9fff"):
+        return False
+    try:
+        ch.encode("cp932")
+    except UnicodeEncodeError:
+        return True
+    return False
 _ZEN_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
@@ -162,9 +181,9 @@ class Dialogue:
         cfg: DialogueConfig | None = None,
         model: str | None = None,
         facility: Facility | None = None,
-        knowledge: KnowledgeBase | None = None,
+        knowledge: Searcher | None = None,
         weather: Weather | None = None,
-        today: Callable[[], date] = date.today,
+        now: Callable[[], datetime] = lambda: datetime.now(JST),
     ) -> None:
         self._llm = llm
         self._cfg = cfg or config.dialogue
@@ -172,10 +191,12 @@ class Dialogue:
         self._facility = facility
         self._kb = knowledge
         self._weather = weather
-        self._today = today
+        self._now = now
         self._ascii_re = re.compile(rf"[A-Za-zＡ-Ｚａ-ｚ]{{{self._cfg.ascii_run_min},}}")
         self._allow_ascii = {a.lower() for a in (facility.allow_ascii if facility else ())}
         self._banned = tuple(self._cfg.banned_phrases) + (facility.outside_places if facility else ())
+        self._llm_source_re = re.compile(self._cfg.llm_source_sentence_pattern)
+        self._mentions_source_re = re.compile(r"(?:ホームページ|サイト|お知らせ).{0,8}載って")
         # 直近のターンの検索結果（計測・出典表示用）
         self.last_search_ms: float | None = None
         self.last_references: list[Reference] = []
@@ -185,7 +206,7 @@ class Dialogue:
         # LLM ストリームを読むスレッド（タスクが GC で消えないよう参照を持つ）
         self._worker: asyncio.Future[None] | None = None
 
-    def attach_knowledge(self, knowledge: KnowledgeBase | None) -> None:
+    def attach_knowledge(self, knowledge: Searcher | None) -> None:
         """知識パックを後から付ける（読み込みに数秒かかるので起動処理の中で行う）。"""
         self._kb = knowledge
 
@@ -203,9 +224,9 @@ class Dialogue:
         self, text: str, language: str, refs: list[Reference] | None = None
     ) -> list[dict[str, Any]]:
         """LLM に渡す messages を組み立てる（システムプロンプトは毎ターン作り直す）。"""
-        today = self._today()
-        weather = self._weather.lines(today) if self._weather is not None else []
-        system = build_system_prompt(self._cfg, self._facility, today, weather)
+        now = self._now()
+        weather = self._weather.lines(now) if self._weather is not None else []
+        system = build_system_prompt(self._cfg, self._facility, now.date(), weather)
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for user, assistant in self._history:
             messages.append({"role": "user", "content": user})
@@ -269,6 +290,14 @@ class Dialogue:
                 sentences.append(tail)
                 yield tail
         self.last_cited = [refs[i - 1] for i in sorted(cited) if 0 < i <= len(refs)]
+        already = any(self._mentions_source_re.search(x) for x in sentences)
+        if self.last_cited and not already:
+            # 出典の一言は、使った資料の出どころから決めて足す（「観光協会のホームページ」など）。
+            # 応答がすでに「〇〇のホームページに載っています」と言っていれば重ねない
+            line = self._cfg.source_sentence.format(
+                labels=source_labels(self._cfg, self._facility, self.last_cited))
+            sentences.append(line)
+            yield line
         # 緊急連絡先の名前を言ったのに番号を言っていなければ、番号の文を足す（いちばん大事な事実なので）
         for line in self._missing_emergency_numbers("".join(sentences)):
             sentences.append(line)
@@ -309,6 +338,8 @@ class Dialogue:
         sentence = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", _SOURCE_MARK_RE.sub(take, raw)).strip()
         for old, new in self._cfg.leak_replacements:
             sentence = sentence.replace(old, new)
+        if self._llm_source_re.search(sentence):
+            return ""  # 出典の一言はこちらで足す
         if any(p in sentence for p in self._banned):
             logger.warning("言わないことにしている言い回しを含む文を読み上げずに捨てました")
             logger.debug("捨てた文: %s", sentence)
@@ -350,7 +381,10 @@ class Dialogue:
         return out
 
     def _has_foreign_word(self, sentence: str) -> bool:
-        return any(m.lower() not in self._allow_ascii for m in self._ascii_re.findall(sentence))
+        """英字の連なり（許可語以外）か、日本語の文字集合に無い漢字（中国語の簡体字など）があるか。"""
+        if any(m.lower() not in self._allow_ascii for m in self._ascii_re.findall(sentence)):
+            return True
+        return any(_is_non_japanese_kanji(ch) for ch in sentence)
 
     async def _stream(self, messages: list[dict[str, Any]]) -> AsyncIterator[str]:
         """同期のストリーミング API を別スレッドで回し、断片を非同期に受け取る。"""

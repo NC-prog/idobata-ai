@@ -87,6 +87,28 @@ class TestEdgeBridge:
             assert await bridge.wait_playback_ended("u3", 0, timeout=0.1) is False
         await bridge.stop()
 
+    async def test_second_edge_replaces_first(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        from src.edge_bridge import REPLACED_CLOSE_CODE
+
+        bridge, url = await _started_bridge()
+        hello = json.dumps({"type": "hello", "edge_id": "e", "sample_rate": 16000, "caps": {}})
+        pcm: list[bytes] = []
+        bridge.on_pcm = pcm.append
+        async with websockets.connect(url) as first, websockets.connect(url) as second:
+            await first.send(hello)
+            await _until(lambda: bridge.is_connected)
+            with caplog.at_level(logging.WARNING, logger="src.edge_bridge"):
+                await second.send(hello)
+                with pytest.raises(websockets.exceptions.ConnectionClosed) as exc:
+                    await asyncio.wait_for(first.recv(), 2.0)
+            assert exc.value.rcvd is not None and exc.value.rcvd.code == REPLACED_CLOSE_CODE
+            assert any("別のエッジ" in r.message for r in caplog.records)
+            await second.send(b"\x01\x02")
+            await _until(lambda: pcm == [b"\x01\x02"])
+        await bridge.stop()
+
     async def test_unknown_state_rejected(self) -> None:
         with pytest.raises(ValueError):
             await EdgeBridge("127.0.0.1", 0).send_state("dancing")

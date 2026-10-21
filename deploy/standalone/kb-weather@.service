@@ -1,0 +1,12 @@
+# 井戸端AI 天気（気象庁の予報 + アメダスの実況）だけの更新。%i は拠点
+[Unit]
+Description=idobata-ai weather update (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO__
+Environment=CUDA_VISIBLE_DEVICES=
+# 全体の作り直しの最中なら待たずに今回は飛ばす（次の毎時で取る）
+ExecStart=/usr/bin/flock --nonblock __DATA__/kb/.%i.lock __UV__ run --project kb python kb/build.py --site %i --weather-only

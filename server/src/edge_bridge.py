@@ -16,7 +16,8 @@
 - JSON ``speak`` + 直後にバイナリ（その文の WAV）
 - JSON ``sources``: ``{type, titles}`` 応答が使った参考資料の出典タイトル（字幕の下に薄く出す。WP03 で追加）
 
-音声を送ってくるエッジは 1 台（最後に hello したもの）とする。表示用の下りは全接続に送る。
+エッジは 1 台だけ。2 台目が hello したら WARNING を出し、前のエッジを close code 4001
+（REPLACED_CLOSE_CODE）で閉じる。閉じられたページは自動で再接続しない（取り合いにしない）。
 """
 
 from __future__ import annotations
@@ -32,6 +33,9 @@ import websockets
 from websockets.asyncio.server import Server, ServerConnection
 
 logger = logging.getLogger(__name__)
+
+# 別のエッジがつながったので閉じる、という close code（ページ側はこれを見て再接続しない）
+REPLACED_CLOSE_CODE = 4001
 
 # エッジの状態（アバターの見た目）
 STATES = ("idle", "listening", "thinking", "speaking")
@@ -61,6 +65,7 @@ class EdgeBridge:
         # 受信したうち、各発話で鳴らし終えた最大の文番号（待ちより先に届いた通知用）
         self._played: dict[str, int] = {}
         self.on_pcm: PcmHandler | None = None
+        self._close_task: asyncio.Future[None] | None = None
         self.on_hello: HelloHandler | None = None
 
     async def start(self) -> None:
@@ -118,6 +123,15 @@ class EdgeBridge:
             return
         kind = data.get("type")
         if kind == "hello":
+            previous = self._audio_client
+            if previous is not None and previous is not websocket:
+                logger.warning(
+                    "別のエッジがつながりました（edge_id=%s）。前のエッジ %s を閉じます",
+                    data.get("edge_id"), previous.remote_address,
+                )
+                self._close_task = asyncio.ensure_future(
+                    previous.close(REPLACED_CLOSE_CODE, "replaced by another edge")
+                )
             self._audio_client = websocket
             logger.info(
                 "エッジ hello: edge_id=%s sample_rate=%s caps=%s",

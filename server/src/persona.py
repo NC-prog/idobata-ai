@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from .config import DialogueConfig
 from .knowledge import Reference
@@ -48,11 +48,26 @@ def format_facts(facility: Facility | None) -> str:
 def format_references(refs: list[Reference], none_text: str) -> str:
     if not refs:
         return none_text
-    return "\n".join(f"[{i}] (出典: {r.title})\n{r.text}" for i, r in enumerate(refs, 1))
+    return "\n".join(
+        f"[{i}] (出典: {r.title}" + (f"／{r.label}" if r.label else "") + f")\n{r.text}"
+        for i, r in enumerate(refs, 1)
+    )
+
+
+def source_labels(cfg: DialogueConfig, facility: Facility | None, refs: list[Reference]) -> str:
+    """出典の一言の「〇〇」。使った資料の出どころを重ねずに「や」でつなぐ。"""
+    default = cfg.default_source_label.format(org=organization_word(facility))
+    labels = list(dict.fromkeys(r.label or default for r in refs))
+    return "や".join(labels)
 
 
 def format_today(today: date, weather_lines: list[str]) -> str:
     head = f"{today.year}年{today.month}月{today.day}日（{_WEEKDAYS[today.weekday()]}曜日）"
+    # 「今週末」を LLM に数えさせると間違える（WP03 の評価で 1 か月先の行事を「来週」と言った）
+    sat = today + timedelta(days=(5 - today.weekday()) % 7)
+    sun = sat + timedelta(days=1)
+    head += (f"。今週末は{sat.month}月{sat.day}日（土曜日）と{sun.month}月{sun.day}日（日曜日）"
+             if today.weekday() < 5 else f"。今日は週末（{_WEEKDAYS[today.weekday()]}曜日）")
     if not weather_lines:
         return f"{head}\n天気: 情報なし"
     return head + "\n天気: " + "".join(weather_lines)
@@ -87,9 +102,6 @@ def build_turn_message(
     """最新の来訪者メッセージ（参考資料 + 発話）。出典の付け方は参考資料があるときだけ書く。"""
     return cfg.turn_template.format(
         references=format_references(refs, cfg.no_references_text),
-        source_rule=cfg.source_rule.format(
-            source_phrase=cfg.source_phrase.format(org=organization_word(facility)),
-            marker_example=cfg.source_marker_example,
-        ) if refs else "",
+        source_rule=cfg.source_rule.format(marker_example=cfg.source_marker_example) if refs else "",
         text=text,
     )

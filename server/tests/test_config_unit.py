@@ -70,6 +70,13 @@ class TestBuildConfig:
         assert cfg.audio_output.device_id == "alsa_output.pci-0000_00_1f.3.analog-stereo"
 
 
+class TestEdgePorts:
+    def test_default_and_env(self) -> None:
+        assert build_config({}).edge.ws_port == 8765
+        cfg = build_config({"IDOBATA_EDGE_WS_PORT": "18765", "IDOBATA_EDGE_HTTP_PORT": "18080"})
+        assert (cfg.edge.ws_port, cfg.edge.http_port) == (18765, 18080)
+
+
 class TestIdleTimeout:
     def test_default_and_env(self) -> None:
         assert build_config({}).dialogue.idle_timeout_sec == 90.0

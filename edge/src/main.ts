@@ -7,7 +7,8 @@ import { Avatar } from "./avatar";
 import { FrontLink } from "./link";
 import type { DownMessage, SpeakMessage } from "./protocol";
 
-const WS_PORT = 8765;
+// WebSocket のポート。既定は 8765、ページの URL に ?ws=<番号> を付けると変えられる（試験用に別ポートで動かすとき）
+const WS_PORT = Number(new URLSearchParams(location.search).get("ws")) || 8765;
 const MODEL_URL = `${import.meta.env.BASE_URL}models/VRM1_Constraint_Twist_Sample.vrm`;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -15,8 +16,11 @@ const statusEl = $<HTMLDivElement>("status");
 const userCaption = $<HTMLParagraphElement>("caption-user");
 const assistantCaption = $<HTMLParagraphElement>("caption-assistant");
 const sourcesCaption = $<HTMLParagraphElement>("caption-sources");
+const previousUser = $<HTMLParagraphElement>("previous-user");
+const previousAssistant = $<HTMLParagraphElement>("previous-assistant");
 const startEl = $<HTMLDivElement>("start");
 const backgroundEl = $<HTMLDivElement>("background");
+const replacedEl = $<HTMLDivElement>("replaced");
 
 // ---------------------------------------------------------------- 描画
 const canvas = $<HTMLCanvasElement>("avatar");
@@ -53,7 +57,12 @@ const link = new FrontLink(`ws://${location.hostname}:${WS_PORT}`, {
     statusEl.textContent = "接続中";
     sendHello();
   },
-  onClose: () => {
+  onClose: (replaced) => {
+    if (replaced) {
+      statusEl.textContent = "休止中（別の画面がつながりました）";
+      replacedEl.hidden = false;
+      return;
+    }
     statusEl.textContent = "未接続（再接続を試みています）";
   },
   onMessage: handleMessage,
@@ -66,8 +75,11 @@ const player = new SpeechPlayer(playbackCtx, (utteranceId, lastSeq) => {
 
 let micAec = false;
 let pendingSpeak: SpeakMessage | null = null;
-// アバターの字幕は、文が鳴り始めたときにその文までを出す（届いた時点で先に出さない）
+// アバターの字幕は、鳴っている文だけを声に合わせて出す（届いた文を先に出さない）。
+// 来訪者が次に話したら、それまでの 1 往復（発話と応答の全文）を上に薄く残す
 const spokenTexts = new Map<string, string[]>();
+let currentUserText = "";
+let currentUtterance = "";
 let shownSegment = "";
 let lastSpeakAt = 0;
 // speak が来ていない応答（合成失敗など）だけ caption の本文をそのまま出す
@@ -103,7 +115,7 @@ function handleMessage(msg: DownMessage): void {
       break;
     case "caption":
       if (msg.role === "user") {
-        if (msg.final) userCaption.textContent = msg.text;
+        if (msg.final) onUserFinal(msg.text);
       } else if (performance.now() - lastSpeakAt > CAPTION_FALLBACK_MS) {
         assistantCaption.textContent = msg.text;
       }
@@ -135,15 +147,29 @@ function handleBinary(data: ArrayBuffer): void {
   );
 }
 
+/** 来訪者の発話が確定したら、ひとつ前のやりとりを上に移して、新しい発話を出す */
+function onUserFinal(text: string): void {
+  const reply = (spokenTexts.get(currentUtterance) ?? []).join("") || assistantCaption.textContent || "";
+  if (currentUserText || reply) {
+    previousUser.textContent = currentUserText;
+    previousAssistant.textContent = reply;
+  }
+  currentUserText = text;
+  userCaption.textContent = text;
+  assistantCaption.textContent = "";
+  shownSegment = "";
+}
+
+/** 鳴り始めた文に切り替える（文と文の間は直前の文を出したまま） */
 function updateAssistantCaption(): void {
   const seg = player.currentSegment();
   if (!seg) return;
   const key = `${seg.utteranceId}/${seg.seq}`;
   if (key === shownSegment) return;
   shownSegment = key;
-  const texts = spokenTexts.get(seg.utteranceId) ?? [];
-  assistantCaption.textContent = texts.slice(0, seg.seq + 1).join("");
-  // 古い発話の本文は持ち続けない
+  currentUtterance = seg.utteranceId;
+  assistantCaption.textContent = seg.text;
+  // 古い発話の本文は持ち続けない（ひとつ前の 1 往復の分だけは onUserFinal まで残す）
   for (const id of spokenTexts.keys()) if (id !== seg.utteranceId) spokenTexts.delete(id);
 }
 
@@ -165,6 +191,10 @@ async function start(): Promise<void> {
 }
 
 link.connect();
+$<HTMLButtonElement>("reclaim-button").addEventListener("click", () => {
+  replacedEl.hidden = true;
+  link.connect(); // hello すると、今度はこちらが音声を受け持つ（前の画面が休止する）
+});
 // 自動再生が許されている（キオスク起動のフラグ付き）ならそのまま始める。そうでなければボタンを出す
 if (playbackCtx.state === "running") {
   void start();

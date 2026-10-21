@@ -1,0 +1,15 @@
+# 井戸端AI 知識パックの全体の作り直し（systemd の user サービス、sudo 不要）。%i は拠点（etajima / akiota）
+# install-kb-timers.sh が __UV__ と __REPO__ を埋めて ~/.config/systemd/user/ に置く
+[Unit]
+Description=idobata-ai knowledge pack build (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO__
+# GPU の予備枠を使わない（埋め込みは CPU）
+Environment=CUDA_VISIBLE_DEVICES=
+# 同じ拠点のビルドを重ねない（天気の更新とも重ねない）
+ExecStart=/usr/bin/flock __DATA__/kb/.%i.lock __UV__ run --project kb python kb/build.py --site %i
+Nice=10

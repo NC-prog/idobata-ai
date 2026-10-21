@@ -57,10 +57,14 @@ def test_seed_scope_and_regex() -> None:
     assert not seed.in_scope(build.Page("u", "", "", [], "t", ["トップページ > 市政情報"]))
 
 
-def test_weather_keeps_jma_wording() -> None:
+def test_weather_keeps_jma_wording_and_uses_amedas() -> None:
     raw = json.loads((FIXTURES / "jma_340000_20261021.json").read_text(encoding="utf-8"))
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("latest_time.txt"):
+            return httpx.Response(200, text="2026-10-21T15:40:00+09:00")
+        if "/amedas/data/map/20261021154000.json" in req.url.path:
+            return httpx.Response(200, json={"67511": {"temp": [23.0, 0]}})
         return httpx.Response(200, json=raw)
 
     src = build.load_sources("etajima")
@@ -68,9 +72,24 @@ def test_weather_keeps_jma_wording() -> None:
         w: dict[str, Any] = build.build_weather(src, client)
     today, tomorrow = w["forecasts"]
     assert today["weather"] == raw[0]["timeSeries"][0]["areas"][0]["weathers"][0]  # 文言はそのまま
-    assert today["region"] == "広島県南部" and today["max"] == "28" and today["min"] == ""
-    assert tomorrow["max"] == "24" and tomorrow["min"] == "15"
+    assert today["region"] == "広島県南部"
+    assert today["pops"][0] == {"from": 12, "to": 18, "pop": 70}
+    assert "max" not in today  # 予報の代表点（広島）の気温は使わない
+    assert w["observation"] == {"station_id": "67511", "station": "呉", "place": "江田島",
+                                "in_site": False, "temp": 23.0, "observed_at": "2026-10-21T15:40+09:00"}
     assert w["source"] == "気象庁（広島地方気象台）"
+
+
+def test_amedas_missing_value_is_skipped() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("latest_time.txt"):
+            return httpx.Response(200, text="2026-10-21T15:40:00+09:00")
+        return httpx.Response(200, json={"67212": {"temp": [None, 5]}})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert build.build_observation(
+            {"station_id": "67212", "station_name": "加計", "place_name": "安芸太田"}, client
+        ) is None
 
 
 def test_redact_names() -> None:
@@ -82,8 +101,37 @@ def test_redact_names() -> None:
     assert r("講師は山田 太郎さんです。") == "講師は（氏名省略）さんです。"
     assert r("支部長 木村 隆（きむら たかし）") == "支部長 （氏名省略）"
     assert r("移住してきた山田 一郎さん・花子さんご一家") == "移住してきた（氏名省略）さんご一家"
+    assert r("ＭＣは小杉怜子さん、本名正憲さん") == "ＭＣは（氏名省略）さん、（氏名省略）さん"
+    assert r("浜田省吾さんの聖地") == "（氏名省略）さんの聖地"
+    assert r("- 三﨑　花子さん") == "- （氏名省略）さん"
     # 人名でないもの（課名・宛先・規則の文）は残す
     for keep in ["江田島市役所 市民課 宛", "市長が必要と認める書類", "江田島市福祉保健部　保健医療課　宛",
                  "教育長および教育委員は、町長が議会の同意を得て任命します。",
-                 "代表者の氏名を書いてください", "全身が撮影され、データ処理により"]:
+                 "代表者の氏名を書いてください", "全身が撮影され、データ処理により",
+                 "皆さんのご協力", "社協さんへ", "お客様各位", "ご家族の皆様",
+                 "ご利用者様", "民生委員さん", "参加事業者さん", "猪肉屋さん", "様々な行事"]:
         assert r(keep) == keep
+
+
+def test_versioned_pack_swap(tmp_path: Path) -> None:
+    root = tmp_path / "kb"
+    root.mkdir()
+    legacy = root / "etajima"
+    legacy.mkdir()
+    (legacy / "manifest.json").write_text("{}", encoding="utf-8")
+    cur = build.current_pack(root, "etajima")  # 古い実体ディレクトリは版に移ってリンクになる
+    assert (root / "etajima").is_symlink() and (cur / "manifest.json").is_file()
+    new = build.versions_dir(root, "etajima") / "20990101000000"
+    new.mkdir()
+    build.swap_link(root / "etajima", new)
+    assert (root / "etajima").resolve() == new.resolve()
+    extra = build.versions_dir(root, "etajima") / "20000101000000"
+    extra.mkdir()
+    build.prune_versions(root, "etajima")
+    assert len(list(build.versions_dir(root, "etajima").iterdir())) == build.KEEP_VERSIONS
+    assert new.exists()
+
+
+def test_clean_title() -> None:
+    assert build.clean_title("特産品ショップ「えたじまーれ」&nbsp;| 買う | 江田島市観光協会【公式】") == "特産品ショップ「えたじまーれ」"
+    assert build.clean_title("住民票などの窓口発行") == "住民票などの窓口発行"

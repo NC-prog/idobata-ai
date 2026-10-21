@@ -20,7 +20,7 @@ import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from .config import KnowledgeConfig
 logger = logging.getLogger(__name__)
 
 _LANCE_TABLE = "chunks"
+JST = timezone(timedelta(hours=9))
 # BM25 の文字 2-gram を作る前に落とす文字（空白・記号）
 _NON_TEXT_RE = re.compile(r"[\s#|*、。，．,.・「」『』（）()【】［］\[\]！？!?：:；;／/〜~ー－\-]+")
 
@@ -42,6 +43,9 @@ class Reference:
     text: str
     vector_score: float  # cos 類似度
     bm25_score: float
+    # 出どころ（official / semi / news）と、応答で出典を言うときの言い方（「観光協会のホームページ」など）
+    trust: str = ""
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -88,7 +92,7 @@ class _BM25:
 class KnowledgeBase:
     """知識パック 1 拠点ぶん。"""
 
-    def __init__(self, pack_dir: Path, cfg: KnowledgeConfig) -> None:
+    def __init__(self, pack_dir: Path, cfg: KnowledgeConfig, model: Any = None) -> None:
         import lancedb
         import pyarrow.parquet as pq  # type: ignore[import-untyped]
         import torch
@@ -112,9 +116,14 @@ class KnowledgeBase:
         self._vectors = np.array([order[r["id"]] for r in rows], dtype=np.float32)
         emb = self.manifest["embedding"]
         self._query_prefix = str(emb.get("query_prefix", ""))
-        torch.set_num_threads(cfg.embed_threads)
-        self._model = SentenceTransformer(str(emb["model"]), device=cfg.embed_device)
-        self._model.encode([self._query_prefix + "ウォームアップ"])
+        self.model_name = str(emb["model"])
+        if model is not None and getattr(model, "idobata_name", None) == self.model_name:
+            self._model = model  # 差し替えのときは埋め込みモデルを使い回す
+        else:
+            torch.set_num_threads(cfg.embed_threads)
+            self._model = SentenceTransformer(self.model_name, device=cfg.embed_device)
+            self._model.idobata_name = self.model_name
+            self._model.encode([self._query_prefix + "ウォームアップ"])
         logger.info(
             "知識パック: %s（%d チャンク、%s 生成、埋め込み %s）",
             pack_dir, len(rows), self.manifest.get("generated_at"), emb["model"],
@@ -166,7 +175,8 @@ class KnowledgeBase:
             if not text:
                 break
             refs.append(Reference(row["title"], row["source_url"], text, vscore,
-                                  bm_rank[doc][1] if doc in bm_rank else 0.0))
+                                  bm_rank[doc][1] if doc in bm_rank else 0.0,
+                                  str(row.get("trust") or ""), str(row.get("label") or "")))
             total += len(text)
             if len(refs) >= cfg.top_k or total >= cfg.max_chars:
                 break
@@ -185,6 +195,62 @@ class KnowledgeBase:
         return float(self._vectors[doc] @ vec)
 
 
+class KnowledgeStore:
+    """今の知識パックを持ち、manifest.json が変わったら読み直して差し替える（無停止）。
+
+    ``$DATA/kb/<site>`` はシンボリックリンクで、kb/build.py が新しい版を作ってから付け替える。
+    リンク先の実体のパスと manifest.json の更新時刻を見て、変わっていれば新しい版を読む。
+    読み込みは呼び出し側が別スレッドで行う（``reload_if_changed``）。検索中の古い版は
+    参照が残る限りそのまま使える（ディレクトリは build.py が直前の版まで残す）。
+    """
+
+    def __init__(self, data_dir: Path, site: str, cfg: KnowledgeConfig) -> None:
+        self._manifest = data_dir / "kb" / site / "manifest.json"
+        self._cfg = cfg
+        self._site = site
+        self.current: KnowledgeBase | None = None
+        self._loaded: tuple[str, float] | None = None
+        self._warned = False
+
+    def _key(self) -> tuple[str, float] | None:
+        try:
+            real = self._manifest.resolve(strict=True)
+            return str(real), real.stat().st_mtime
+        except OSError:
+            return None
+
+    def reload_if_changed(self) -> bool:
+        """新しい版があれば読み込んで差し替える（数秒かかるので別スレッドで呼ぶ）。"""
+        if not self._cfg.enabled:
+            return False
+        key = self._key()
+        if key is None:
+            if not self._warned:
+                logger.warning("知識パックがありません: %s（uv run --project kb python kb/build.py "
+                               "--site %s）", self._manifest.parent, self._site)
+                self._warned = True
+            return False
+        if key == self._loaded:
+            return False
+        try:
+            kb = KnowledgeBase(Path(key[0]).parent, self._cfg,
+                               model=self.current._model if self.current else None)
+        except Exception:
+            logger.exception("新しい知識パックを読み込めません（今の版を使い続けます）")
+            return False
+        replaced = self.current is not None
+        self.current, self._loaded = kb, key
+        if replaced:
+            logger.info("知識パックを差し替えました: %s", Path(key[0]).parent.name)
+        return True
+
+    def search(self, query: str) -> SearchResult:
+        kb = self.current  # 差し替えの途中でも、取った版で最後まで検索する
+        if kb is None:
+            return SearchResult([], 0.0)
+        return kb.search(query)
+
+
 class Weather:
     """weather.json（朝のバッチで差し替わる）を、更新されたら読み直して文にする。
 
@@ -197,8 +263,8 @@ class Weather:
         self._data: dict[str, Any] = {}
         self._warned = False
 
-    def lines(self, today: date) -> list[str]:
-        """今日・明日の予報の文（気象庁の文言のまま）。古い予報は出さない。"""
+    def lines(self, now: datetime) -> list[str]:
+        """今の気温（アメダス）と、今日・明日の予報の文。古いものは出さない。"""
         try:
             mtime = self.path.stat().st_mtime
             if mtime != self._mtime:
@@ -209,17 +275,40 @@ class Weather:
                 logger.warning("weather.json を読めません: %s", self.path)
                 self._warned = True
             return []
-        return format_weather(self._data, today)
+        return format_weather(self._data, now)
 
     @classmethod
     def for_site(cls, data_dir: Path, site: str) -> Weather:
         return cls(data_dir / "kb" / site / "weather.json")
 
 
-def format_weather(weather: dict[str, Any], today: date) -> list[str]:
-    """weather.json の予報を、今日・明日の文にする（発表日ではなく今日の日付で「今日」を決める）。"""
+def format_weather(
+    weather: dict[str, Any], now: datetime, max_obs_age_sec: float = 3 * 3600
+) -> list[str]:
+    """weather.json を、今の時刻に合わせた文にする。
+
+    - 気温: アメダス最寄り観測点の実況（max_obs_age_sec より古ければ言わない）。
+      観測点が拠点の中なら「安芸太田は今…」、外なら「江田島の近くの呉では今…」
+    - 予報: 一次細分区域の天気（気象庁の文言のまま）と、これからの降水確率。
+      「今日・明日」は発表日ではなく今日の日付で付け直し、古い予報は出さない
+    """
+    today = now.date()
     labels = {today: "今日", today + timedelta(days=1): "明日"}
     lines: list[str] = []
+    obs = weather.get("observation")
+    if obs:
+        try:
+            observed = datetime.fromisoformat(obs["observed_at"]).astimezone(JST)
+            age = (now.astimezone(JST) - observed).total_seconds()
+        except (KeyError, ValueError, TypeError):
+            age = float("inf")
+        if 0 <= age <= max_obs_age_sec:
+            temp = round(float(obs["temp"]))
+            when = f"{observed.hour}時{observed.minute:02d}分の観測"
+            if obs.get("in_site"):
+                lines.append(f"{obs['place']}は今{temp}度くらいです（{when}）。")
+            else:
+                lines.append(f"{obs['place']}の近くの{obs['station']}では今{temp}度くらいです（{when}）。")
     for f in weather.get("forecasts", []):
         try:
             d = date.fromisoformat(f["date"])
@@ -227,15 +316,14 @@ def format_weather(weather: dict[str, Any], today: date) -> list[str]:
             continue
         if d not in labels:
             continue
-        text = f"{labels[d]}（{d.month}月{d.day}日）の{f['region']}は「{f['weather']}」"
-        temps = []
-        if f.get("max"):
-            temps.append(f"最高気温は{f['max']}度")
-        if f.get("min"):
-            temps.append(f"最低気温は{f['min']}度")
-        if temps:
-            text += f"、{f['point']}の" + "、".join(temps)
-        lines.append(text + "の予報です。")
+        text = f"{labels[d]}（{d.month}月{d.day}日）の{f['region']}は「{f['weather']}」の予報です。"
+        pops = [p for p in f.get("pops") or [] if d > today or p["to"] > now.hour]
+        if pops and d == today:
+            text += "降水確率は、" + "、".join(
+                f"{p['from']}時から{p['to']}時が{p['pop']}パーセント" for p in pops) + "です。"
+        elif pops:
+            text += f"降水確率は最大{max(p['pop'] for p in pops)}パーセントです。"
+        lines.append(text)
     if lines and weather.get("source"):
-        lines.append(f"（{weather['source']}の発表）")
+        lines.append(f"（{weather['source']}の発表・観測）")
     return lines

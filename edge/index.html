@@ -10,11 +10,19 @@
     <div id="background"></div>
     <canvas id="avatar"></canvas>
     <div id="captions">
+      <div id="caption-previous" class="previous" aria-label="ひとつ前のやりとり">
+        <p id="previous-user" class="previous-line user"></p>
+        <p id="previous-assistant" class="previous-line"></p>
+      </div>
       <p id="caption-user" class="caption user"></p>
       <p id="caption-assistant" class="caption assistant"></p>
       <p id="caption-sources" class="caption sources"></p>
     </div>
     <div id="status" aria-live="polite">未接続</div>
+    <div id="replaced" hidden>
+      <p>別の画面がつながったため、この画面は休止しています。</p>
+      <button id="reclaim-button" type="button">この画面を使う</button>
+    </div>
     <div id="start" hidden>
       <button id="start-button" type="button">はじめる</button>
       <p>マイクの使用を許可してください</p>

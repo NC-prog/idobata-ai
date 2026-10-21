@@ -244,7 +244,9 @@ async def test_short_or_allowed_ascii_is_kept() -> None:
 async def test_source_marker_is_stripped_and_cited() -> None:
     from src.knowledge import Reference
 
-    refs = [Reference(f"資料{i}", f"https://example.jp/{i}", "本文", 0.9, 1.0) for i in (1, 2, 3)]
+    refs = [Reference("資料1", "https://example.jp/1", "本文", 0.9, 1.0, "official", "市のホームページ"),
+            Reference("資料2", "https://example.jp/2", "本文", 0.9, 1.0, "semi", "観光協会のホームページ"),
+            Reference("資料3", "https://example.jp/3", "本文", 0.9, 1.0, "semi", "観光協会のホームページ")]
 
     class FakeKB:
         def search(self, text: str) -> Any:
@@ -253,20 +255,21 @@ async def test_source_marker_is_stripped_and_cited() -> None:
             return SearchResult(refs, 12.0)
 
     class FakeWeather:
-        def lines(self, today: Any) -> list[str]:
+        def lines(self, now: Any) -> list[str]:
             return ["今日（10月21日）の広島県南部は「晴れ」の予報です。"]
 
     llm = StubLLM(["秋祭りは土曜日です[1]。", "詳しくは市のホームページにも載っています [出典:1，３]。"])
     d = Dialogue(llm, DialogueConfig(), knowledge=FakeKB(),  # type: ignore[arg-type]
                  weather=FakeWeather())  # type: ignore[arg-type]
     out = await _collect(d, "お祭りはありますか")
-    assert out == ["秋祭りは土曜日です。", "詳しくは市のホームページにも載っています。"]
+    # LLM が書いた出典の一言は捨て、使った資料の出どころから足し直す
+    assert out == ["秋祭りは土曜日です。", "詳しくは市のホームページや観光協会のホームページにも載っています。"]
     assert [r.title for r in d.last_cited] == ["資料1", "資料3"]
     assert d.last_search_ms == 12.0
     system = llm.calls[0][1][0]["content"]
     turn = llm.calls[0][1][-1]["content"]
-    assert "[1] (出典: 資料1)" in turn and "[1] (出典: 資料1)" not in system
-    assert "ホームページにも載っています" in turn
+    assert "[1] (出典: 資料1／市のホームページ)" in turn and "出典: 資料1" not in system
+    assert "[出典:1,3]" in turn
     assert "広島県南部は「晴れ」" in system
 
 
@@ -313,3 +316,14 @@ async def test_emergency_number_is_appended_when_missing() -> None:
                   DialogueConfig(), facility=fac)
     out = await _collect(d2, "なくした")
     assert not any("番号は" in x for x in out)  # 全角で言っていれば足さない
+
+
+async def test_chinese_simplified_kanji_is_rephrased() -> None:
+    llm = StubLLM(["介護保险の相談は高齢介護課です。"], rephrase="介護保険の相談は高齢介護課です。")
+    d = Dialogue(llm, DialogueConfig())
+    assert await _collect(d, "介護") == ["介護保険の相談は高齢介護課です。"]
+    assert len(llm.chat_calls) == 1
+    # 日本語の漢字（﨑 などの互換漢字を含む）や記号では言い直さない
+    llm2 = StubLLM(["にこ♡にこハウスは三﨑さんの近くです。"])
+    assert await _collect(Dialogue(llm2, DialogueConfig()), "a") == ["にこ♡にこハウスは三﨑さんの近くです。"]
+    assert llm2.chat_calls == []

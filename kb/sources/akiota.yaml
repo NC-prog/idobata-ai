@@ -1,9 +1,14 @@
 # 安芸太田町の知識パックのクロール定義（人間が編集する）
+# 中国新聞は robots.txt で AI のクローラ（ClaudeBot・GPTBot など）を明示的に拒否しているので入れない。公式 SNS も入れない。
 # サイトの構造（2026-10-21 確認）: /life/<大>/<中>/<小>/（くらし・子育て等）、/soshiki/<課>/<番号>.html、
 # /site/<サブサイト>/。robots.txt は無い（404）。観光は町のサイトが案内する「あきおおたから」
 # （cs-akiota.or.jp、一般社団法人 地域商社あきおおた。robots.txt で wp-admin 等以外は許可）。
 site: akiota
+default_trust: official
+default_label: 町のホームページ
 allow_domains:
+  - www.akiota-shakyo.jp
+  - dive-hiroshima.com
   - www.akiota.jp
   - cs-akiota.or.jp
 seeds:
@@ -27,10 +32,53 @@ seeds:
     depth: 1
     include: ["/news/"]
     exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
+    trust: semi
+    label: あきおおたからのホームページ
   - url: https://cs-akiota.or.jp/special/category/観光/
     depth: 1
     include: ["/special/"]
     exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
+    trust: semi
+    label: あきおおたからのホームページ
+  # 町の新着・重要なお知らせ・トピックス（RSS 1.0）。入札（list8）は入れない
+  - url: https://www.akiota.jp/rss/10/list1.xml
+    depth: 1
+    include: ["/soshiki/", "/site/", "/life/"]
+    exclude: *akiota_exclude
+  - url: https://www.akiota.jp/rss/10/list3.xml
+    depth: 1
+    include: ["/soshiki/", "/site/", "/life/"]
+    exclude: *akiota_exclude
+  - url: https://www.akiota.jp/rss/10/list6.xml
+    depth: 1
+    include: ["/soshiki/", "/site/", "/life/"]
+    exclude: *akiota_exclude
+  # 道の駅 来夢とごうち（建て替えで休館中、令和10年3月再開予定。案内はあきおおたからに載る）
+  - url: https://cs-akiota.or.jp/special/category/道の駅/
+    depth: 1
+    include: ["/special/", "/news/raimutogouchi"]
+    exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
+    trust: semi
+    label: 道の駅のお知らせ
+  # 安芸太田町社会福祉協議会
+  - url: https://www.akiota-shakyo.jp/wp-sitemap.xml
+    sitemap: true
+    depth: 1
+    include: ['^https://www\.akiota-shakyo\.jp/(news/\d+|event/\d+|gaiyo|jigyo(/[a-z]+)?|news|event)?/?$']
+    exclude: ['/(contact|event)_(confirm|complete)/', '/contact/', '/hello-world/', '/privacypolicy/', '/wp-', '/author/']
+    trust: semi
+    label: 社会福祉協議会のホームページ
+  # Dive! Hiroshima（県の観光サイト）。本文に「安芸太田町」を含む名所・行事だけ
+  - url: https://dive-hiroshima.com/sitemap.xml
+    sitemap: true
+    depth: 1
+    include: ['^https://dive-hiroshima\.com/(explore/\d+|events/events-\d+(-\d+)?)/$']
+    exclude: ['/(en|kr|tw|cn|fr|de|th)/', '/business/', '\?']
+    require_text: [安芸太田町]
+    max_fetches: 400
+    recheck_days: 7
+    trust: semi
+    label: 県の観光サイト
 exclude_breadcrumb_keywords: [議会, 会議録, 入札, 職員採用, 人事, 町長の部屋, 選挙]
 exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]
 weather:
@@ -38,10 +86,14 @@ weather:
   area_code: "340000"
   area_sub_code: "340020"    # 一次細分区域: 北部
   pref_name: 広島県
-  point_name: 庄原           # 北部の気温の地点は 庄原 のみ（安芸太田町からは離れている）
+  amedas:                    # 気温はアメダスの実況（予報の代表点 庄原 は町から遠いので使わない）
+    station_id: "67212"      # 加計（アメダス地点一覧 amedastable.json で確認）
+    station_name: 加計
+    place_name: 安芸太田
+    in_site: true            # 観測点が町の中 →「安芸太田は今〇度くらい」と言う
 crawl:
   rate_limit_sec: 1.0
   user_agent: "idobata-ai-kb/0.1 (+Fuji Seisakusho LLC; municipal lobby guide pilot)"
   respect_robots: true
-  max_pages: 500
-  max_fetches: 1500
+  max_pages: 1000
+  max_fetches: 2500

@@ -1,0 +1,10 @@
+# 毎時 05 分に天気を更新する（アメダスは 10 分ごと、府県予報は 5・11・17 時に発表）
+[Unit]
+Description=idobata-ai weather update (%i)
+
+[Timer]
+OnCalendar=*-*-* *:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -2,9 +2,12 @@
 
 import type { DownMessage, UpMessage } from "./protocol";
 
+/** 別のエッジがつながったのでフロントが閉じた（server/src/edge_bridge.py の REPLACED_CLOSE_CODE） */
+export const REPLACED_CLOSE_CODE = 4001;
+
 export interface LinkHandlers {
   onOpen: () => void;
-  onClose: () => void;
+  onClose: (replaced: boolean) => void;
   onMessage: (msg: DownMessage) => void;
   onBinary: (data: ArrayBuffer) => void;
 }
@@ -34,9 +37,11 @@ export class FrontLink {
       this.retryMs = RETRY_MIN_MS;
       this.handlers.onOpen();
     };
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       this.ws = null;
-      this.handlers.onClose();
+      const replaced = ev.code === REPLACED_CLOSE_CODE;
+      this.handlers.onClose(replaced);
+      if (replaced) return; // 取り合いにしない（ボタンで戻す）
       window.setTimeout(() => this.connect(), this.retryMs);
       this.retryMs = Math.min(this.retryMs * 2, RETRY_MAX_MS);
     };

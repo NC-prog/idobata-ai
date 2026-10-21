@@ -5,9 +5,17 @@
 # パンくず（exclude_breadcrumb_keywords）とタイトルで外す。どのページにも全分類へのナビがあるので、
 # seed ごとに scope_breadcrumbs（パンくずにその語を含むページだけ採用・展開）で範囲を絞る。
 # include / exclude は URL への正規表現。robots.txt は無い（404）。
-# 江田島市観光協会（etajima-kanko.com）はブラウザで描画するサイトで、HTML に本文が無いため対象外。
+# 江田島市観光協会（etajima-kanko.com）はブラウザで描画するサイトなので render: playwright で取る。
+# 中国新聞は robots.txt で AI のクローラを明示的に拒否しているので入れない。公式 SNS も入れない。
 site: etajima
+# 出典の言い方（seed で上書きできる）。trust は official（市町・県）/ semi（観光協会・社協など）/ news
+default_trust: official
+default_label: 市のホームページ
 allow_domains:
+  - etajima-kanko.com
+  - etajima-syakyo.org
+  - www.library.etajima.hiroshima.jp
+  - dive-hiroshima.com
   - www.city.etajima.hiroshima.jp
 seeds:
   # 暮らしのガイド（届出・証明、税金、健康・福祉、子育て・教育、保険・医療・年金、ごみ、生活、住まい、防犯、消費生活、防災、水道、市民センター）
@@ -87,6 +95,44 @@ seeds:
     depth: 1
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
+  # ---- 市以外の公的・準公的なソース（WP03 追加作業。robots.txt と利用条件を確認済み、docs/WP03_result.md）----
+  # 江田島市観光協会: ブラウザで描画するサイト（STUDIO）なので Playwright で描画する。sitemap から行事・お知らせ・名所
+  - url: https://etajima-kanko.com/sitemap.xml
+    sitemap: true
+    depth: 1
+    render: playwright
+    include: ['^https://etajima-kanko\.com/(event/[^/]+|news/detail/[^/]+|(view|eat|stay|shopping|experience|modelcourse)/detail/[^/]+|access(/taxi)?|rentalcycling|etajimare)$']
+    exclude: ['/(contact|member|privacypolicy)(/|$)', '/(tag|area|period)/', '/emohaku/']
+    max_fetches: 150
+    trust: semi
+    label: 観光協会のホームページ
+  # 江田島市社会福祉協議会（サイトポリシー: 出所を明示すれば引用・転載可）
+  - url: https://etajima-syakyo.org/sitemap.xml
+    sitemap: true
+    depth: 1
+    include: ['^https://etajima-syakyo\.org/(pages/\d+/?)?$']
+    trust: semi
+    label: 社会福祉協議会のホームページ
+  # 江田島市立図書館（各館の開館時間・休館日・行事）
+  - url: https://www.library.etajima.hiroshima.jp/sitemap.xml
+    sitemap: true
+    depth: 1
+    include: ['^https://www\.library\.etajima\.hiroshima\.jp/(info/info-[\d-]+|event/event-\d+|library|information|faq|minilibrary|collection|dayori)?/?$']
+    exclude: ['/search', '/contact', '/album', '/eventcalendar', '/wp-']
+    trust: official
+    label: 市立図書館のホームページ
+  # Dive! Hiroshima（広島県観光連盟と広島市の共同運営。旧ひろしま観光ナビ）。県全体なので、
+  # 本文に「江田島市」を含む名所・行事だけ採る。約 4,300 ページあるので 1 晩 400 件まで、取ったページは 7 日間取り直さない
+  - url: https://dive-hiroshima.com/sitemap.xml
+    sitemap: true
+    depth: 1
+    include: ['^https://dive-hiroshima\.com/(explore/\d+|events/events-\d+(-\d+)?)/$']
+    exclude: ['/(en|kr|tw|cn|fr|de|th)/', '/business/', '\?']
+    require_text: [江田島市]
+    max_fetches: 400
+    recheck_days: 7
+    trust: semi
+    label: 県の観光サイト
 # 個人名を含みうるページを外す（議会・会議録・入札・人事・職員採用・市長の部屋・選挙・監査）
 exclude_breadcrumb_keywords: [議会, 会議録, 入札, 契約, 職員採用, 人事, 市長の部屋, 秘書室, 選挙, 監査, 合併協議会]
 exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]
@@ -95,11 +141,15 @@ weather:
   area_code: "340000"        # 広島県（https://www.jma.go.jp/bosai/forecast/data/forecast/340000.json）
   area_sub_code: "340010"    # 一次細分区域: 南部
   pref_name: 広島県
-  point_name: 広島           # 気温の地点（南部は 広島 / 呉 / 福山）
+  amedas:                    # 気温はアメダスの実況（予報の代表点 広島 は拠点から遠いので使わない）
+    station_id: "67511"      # 呉（アメダス地点一覧 amedastable.json で確認。江田島島内に気温の観測点は無い。倉橋は雨量のみ）
+    station_name: 呉
+    place_name: 江田島
+    in_site: false           # 観測点が市の外 →「江田島の近くの呉では今〇度くらい」と言う
 crawl:
   rate_limit_sec: 1.0
   # HTTP ヘッダは ASCII のみ（指示書の「富士製作所; 自治体向け実証」をローマ字・英語にした）
   user_agent: "idobata-ai-kb/0.1 (+Fuji Seisakusho LLC; municipal lobby guide pilot)"
   respect_robots: true
-  max_pages: 500
-  max_fetches: 1500
+  max_pages: 1000
+  max_fetches: 2500
