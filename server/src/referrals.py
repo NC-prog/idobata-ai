@@ -58,9 +58,15 @@ def pick_tags(raw: Any, vocabulary: list[str], limit: int = 5) -> list[str]:
 _PHONE_RE = re.compile(r"(0\d{1,4})[-ー－‐\s、,の]{0,2}(\d{1,4})[-ー－‐\s、,の]{0,2}(\d{3,4})")
 
 
+# 全角数字と漢数字（一桁ずつ）を半角に
+_DIGITS = str.maketrans("０１２３４５６７８９〇零一二三四五六七八九", "0123456789" "00" "123456789")
+
+
 def find_phone(text: str) -> str | None:
     """来訪者の発話の中の電話番号（全角も）。言っていなければ None。"""
-    t = text.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    t = text.translate(_DIGITS)
+    # 一桁ずつ読んだ番号は ASR が「ゼロ九ゼロの一二三四…」と書く
+    t = re.sub(r"ゼロ|ぜろ|マル|まる", "0", t)
     m = _PHONE_RE.search(t)
     return "-".join(m.groups()) if m else None
 

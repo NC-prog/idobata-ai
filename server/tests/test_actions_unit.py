@@ -709,3 +709,9 @@ async def test_staff_panel_adds_asr_fix_and_shows_intake(tmp_path: Path) -> None
     assert fixes.apply("後期高齢写") == "後期高齢者"
     rows_csv = (tmp_path / "referrals" / "etajima").rglob("*.csv")
     assert any("来月" in p.read_text(encoding="utf-8-sig") for p in rows_csv) or ref
+
+
+def test_find_phone_spoken_forms() -> None:
+    assert find_phone("ゼロ九ゼロの一二三四の五六七八です。") == "090-1234-5678"
+    assert find_phone("090の1234の5678です") == "090-1234-5678"
+    assert find_phone("二十一日に来ました") is None
