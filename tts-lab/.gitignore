@@ -1,0 +1,4 @@
+.venv/
+__pycache__/
+# 評価用の合成音声はローカルのみ（compare.py で再生成できる）
+out/*/*.wav
