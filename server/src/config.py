@@ -295,11 +295,15 @@ class DialogueConfig:
     # banned_phrases を含む文は読み上げずに捨てる（WARNING）。来訪者に住所を聞き返さない、など
     banned_phrases: tuple[str, ...] = (
         "お住まいの市区町村", "お住まいの自治体", "お住まいの地域の役所", "お住まいの市町村",
+        # していないこと（職員を呼んだ・担当者が来る）を言わない（WP04 の行為の後に出た）
+        "お呼びします", "お呼びしますね", "担当者がそろい", "担当者が参ります", "担当者が来ます", "お待たせしました",
     )
     # プロンプトの見出しが漏れたときの言い換え
     # 応答の冒頭で来訪者の言葉をそのまま繰り返す文は読み上げない（8B の癖。一度出ると
     # 履歴に倣って続く）。ただし挨拶を返すのは自然なので残す
     echo_keep: tuple[str, ...] = ("こんにちは", "こんばんは", "おはようございます", "ありがとう")
+    # これまでの応答と同じ文（これ以上の長さ）は読み上げない
+    repeat_min_chars: int = 6
     leak_replacements: tuple[tuple[str, str], ...] = (
         ("【参考資料】", "手元の資料"), ("参考資料", "手元の資料"),
         ("【ここで分かっていること】", "こちらで分かっていること"),
@@ -390,7 +394,7 @@ class ActionsConfig:
     backchannel_prepare_budget_sec: float = 30.0
     templates_path: Path = SERVER_ROOT / "context" / "actions.yaml"
     # 使う行為（LLM に <propose:…> を出してよいと伝えるもの）
-    enabled: tuple[str, ...] = ("lookup", "refer")
+    enabled: tuple[str, ...] = ("lookup", "refer", "share")
     # 返事が分からないときに聞き直す回数（それでも分からなければ辞退扱い）
     max_reask: int = 1
     # LLM がタグを付け忘れたときの規則による補い（8B は付け忘れが多い）。
@@ -408,6 +412,11 @@ class ActionsConfig:
     )
     # 返事待ちに、返事らしくない長い発話（新しい話）が来たら、聞き直さずに辞退として普通に答える
     reply_max_chars: int = 12
+    # 覚えておく: 尋ねていない雑談で、地域の季節・畑・海の話をしたとき（個人の事情の語があれば付けない）
+    share_fallback_topic: str = (
+        r"水揚げ|獲れ|とれ(た|て|る)|釣れ|収穫|採れ|咲い|花が|紅葉|祭り|まつり|港|畑|田んぼ|みかん|牡蠣|"
+        r"カキ|魚|夕日|朝日|初雪|桜|渡り鳥|潮|実っ|柿"
+    )
     # つなぐ: 発話が手続き（ReferralConfig.procedure_pattern）の相談を求めているとき
     refer_fallback_cue: str = r"相談|聞きたいこと|困って|分からなくて|わからなくて|どうしたら"
 
@@ -467,6 +476,35 @@ class ReferralConfig:
 
 
 @dataclass(frozen=True)
+class TidbitConfig:
+    """覚えておく（今日の小ネタ。WP04 C）の設定。"""
+
+    retention_days: int = 7
+    # 書き直した一言の長さ（仕様は 20〜40 字。短い話は短くてよいので下は緩める）
+    min_chars: int = 10
+    max_chars: int = 45
+    rewrite_max_tokens: int = 120
+    rewrite_prompt: str = (
+        "来訪者が話した地域の話題を、ほかの来訪者に伝える匿名の一言（20〜40 字、です・ます調でなく"
+        "「〜だそうです」の形）に書き直してください。人名・住所・家族構成・体調・勤め先・年齢は入れない。"
+        "来訪者が言っていないことは足さない。"
+        '出力は JSON: {"text": "…"}'
+    )
+    # 規則で弾く語（書き直しに個人の事情が残っていたら保存しない）
+    banned_pattern: str = (
+        r"[一-龥々ァ-ヶ](さん|様|ちゃん|くん)|丁目|番地|号室|夫|妻|主人|嫁|息子|娘|孫|父|母|祖父|祖母|兄|姉|弟|妹|"
+        r"病|入院|手術|薬|体調|具合|介護|亡くな|葬|離婚|借金|\d{2,}-\d"
+    )
+    # 次の来訪者との雑談で、1 回の会話に 1 つまで紹介してよいと LLM に渡す文
+    offer_template: str = (
+        "【さっき来た方の話】{text}\n（雑談の流れに自然に合うときだけ、「さっき来た方が、〜って言ってましたよ」と"
+        "1 回だけ紹介してよい。合わなければ触れない）\n"
+    )
+    # 応答がこの割合以上、小ネタの文字 2-gram を含んでいたら「使った」とみなす
+    used_overlap: float = 0.4
+
+
+@dataclass(frozen=True)
 class StaffConfig:
     """職員パネル（/staff/、LAN 内のみ、Basic 認証）の設定。"""
 
@@ -520,6 +558,7 @@ class AppConfig:
     lookup: LookupConfig = field(default_factory=LookupConfig)
     referral: ReferralConfig = field(default_factory=ReferralConfig)
     staff: StaffConfig = field(default_factory=StaffConfig)
+    tidbit: TidbitConfig = field(default_factory=TidbitConfig)
     edge: EdgeConfig = field(default_factory=EdgeConfig)
 
 

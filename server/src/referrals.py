@@ -213,6 +213,69 @@ class VisitLog:
         return _remove_older(self.root, today - timedelta(days=VISIT_RETENTION_DAYS))
 
 
+class TidbitStore:
+    """匿名の小ネタ（本人が同意し、読み上げて確かめた一言だけ）。1 行 1 件、期限で消す。"""
+
+    def __init__(self, data_dir: Path, site: str, retention_days: int) -> None:
+        self.path = data_dir / "tidbits" / f"{site}.jsonl"
+        self.retention_days = retention_days
+
+    def add(self, text: str) -> dict[str, Any]:
+        item = {"id": uuid.uuid4().hex[:12],
+                "created_at": datetime.now(JST).isoformat(timespec="seconds"), "text": text}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        return item
+
+    def active(self) -> list[dict[str, Any]]:
+        """期限内のもの（新しい順）。"""
+        keep_from = datetime.now(JST) - timedelta(days=self.retention_days)
+        return [t for t in reversed(self._read()) if _parse_time(t.get("created_at")) >= keep_from]
+
+    def delete(self, tid: str) -> bool:
+        items = self._read()
+        rest = [t for t in items if t.get("id") != tid]
+        if len(rest) == len(items):
+            return False
+        self._write(rest)
+        return True
+
+    def cleanup(self) -> int:
+        items = self._read()
+        keep_from = datetime.now(JST) - timedelta(days=self.retention_days)
+        rest = [t for t in items if _parse_time(t.get("created_at")) >= keep_from]
+        if len(rest) != len(items):
+            self._write(rest)
+        return len(items) - len(rest)
+
+    def _read(self) -> list[dict[str, Any]]:
+        if not self.path.is_file():
+            return []
+        out = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                out.append(item)
+        return out
+
+    def _write(self, items: list[dict[str, Any]]) -> None:
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text("".join(json.dumps(t, ensure_ascii=False) + "\n" for t in items), encoding="utf-8")
+        tmp.replace(self.path)
+
+
+def _parse_time(value: Any) -> datetime:
+    try:
+        t = datetime.fromisoformat(str(value))
+    except ValueError:
+        return datetime.min.replace(tzinfo=JST)
+    return t if t.tzinfo else t.replace(tzinfo=JST)
+
+
 def _remove_older(root: Path, keep_from: date) -> int:
     """root の下の「日付」名のディレクトリ・ファイル（YYYY-MM-DD[.csv/.jsonl]）で keep_from より前を消す。"""
     if not root.is_dir():

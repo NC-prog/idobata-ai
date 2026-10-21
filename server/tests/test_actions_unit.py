@@ -20,6 +20,7 @@ from src.knowledge import JST, Reference
 from src.lookup import LookupResult, candidate_links, chunk_plain, score_label
 from src.referrals import (
     ReferralStore,
+    TidbitStore,
     VisitLog,
     find_phone,
     phone_for_speech,
@@ -76,7 +77,7 @@ def test_strip_leading_backchannel() -> None:
 class StubLLM:
     """chat_stream は決まった応答（文の配列）を順に返す。chat は構造化・検索語用。"""
 
-    def __init__(self, replies: list[list[str]], chat_reply: str = "{}") -> None:
+    def __init__(self, replies: list[list[str]], chat_reply: str | list[str] = "{}") -> None:
         self.replies = replies
         self.chat_reply = chat_reply
         self.stream_calls: list[list[dict[str, Any]]] = []
@@ -86,6 +87,8 @@ class StubLLM:
         yield from (self.replies.pop(0) if self.replies else ["そうなんですね。"])
 
     def chat(self, model: str, messages: list[dict[str, Any]], **kw: Any) -> str:
+        if isinstance(self.chat_reply, list):
+            return self.chat_reply.pop(0) if self.chat_reply else "{}"
         return self.chat_reply
 
 
@@ -101,7 +104,7 @@ class StubLookup:
 
 
 def _conv(llm: StubLLM, tmp_path: Path, lookup: Any = None, enabled: tuple[str, ...] = ("lookup", "refer"),
-          states: list[str] | None = None) -> Conversation:
+          states: list[str] | None = None, tidbits: TidbitStore | None = None) -> Conversation:
     d = Dialogue(llm, DialogueConfig(), facility=FAC, enabled_actions=enabled)
 
     async def on_state(v: str) -> None:
@@ -112,6 +115,7 @@ def _conv(llm: StubLLM, tmp_path: Path, lookup: Any = None, enabled: tuple[str, 
         d, llm, "/models/llm", ActionsConfig(enabled=enabled), ReferralConfig(), FAC, TAGS,
         lookup=lookup, referrals=ReferralStore(tmp_path, "etajima", 30, csv_export=True),
         visits=VisitLog(tmp_path, "etajima"), on_state=on_state, edge_id=lambda: "edge-1",
+        tidbits=tidbits,
     )
 
 
@@ -201,6 +205,12 @@ async def test_lookup_on_procedure_is_replaced_by_refer(tmp_path: Path) -> None:
     assert out[-1] == TEMPLATES["refer"]["propose"]  # 手続きの相談は調べるより、つなぐ
 
 
+async def test_refer_on_event_question_is_replaced_by_lookup(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["商工観光課へどうぞ。<propose:refer>"]]), tmp_path, StubLookup(LookupResult(found=False)))
+    out = await _say(c, "今週末は道の駅で何かやってますか")
+    assert out[-1] == TEMPLATES["lookup"]["propose"]
+
+
 async def test_missing_tag_is_filled_by_rules(tmp_path: Path) -> None:
     llm = StubLLM([["手元の資料にありませんので、商工観光課へお尋ねください。"], ["住民票は市民課です。"],
                    ["保健医療課でご案内します。"]])
@@ -222,6 +232,23 @@ async def test_lookup_on_smalltalk_is_dropped_and_new_topic_skips_reask(tmp_path
     # 返事ではなく別の話: 聞き直さず、その話に答える
     assert await _say(c, "こんにちは。ちょっと寄ってみました。") == ["ようこそ。"]
     assert c.phase == "listen"
+
+
+async def test_short_ack_after_action_gets_fixed_reply(tmp_path: Path) -> None:
+    llm = StubLLM([["保健医療課です。<propose:refer>"], ["担当者がそろいましたので、お呼びしますね。"]],
+                  chat_reply=_refer_json())
+    c = _conv(llm, tmp_path)
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    await _say(c, "お願い")
+    assert await _say(c, "うん") == [TEMPLATES["common"]["ack"]]  # LLM に続けさせない
+    assert len(llm.stream_calls) == 1
+
+
+async def test_refer_on_seasonal_smalltalk_becomes_share(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    c = _conv(StubLLM([["いいですね。<propose:refer>"]]), tmp_path, enabled=SHARE, tidbits=store)
+    out = await _say(c, "庭の柿がたくさん実ったんですよ")
+    assert out[-1] == TEMPLATES["share"]["propose"]
 
 
 async def test_refer_with_phone_is_read_back(tmp_path: Path) -> None:
@@ -397,3 +424,108 @@ async def test_gather_within_keeps_finished_and_cancels_slow() -> None:
 
     out = await _gather_within([fast(), slow()], 0.1)
     assert out[0] == "ok" and isinstance(out[1], TimeoutError)
+
+
+
+# ------------------------------------------------------------------
+# 覚えておく（今日の小ネタ。WP04 C）
+# ------------------------------------------------------------------
+
+SHARE = ("lookup", "refer", "share")
+
+
+def _tid(text: str) -> str:
+    return json.dumps({"text": text}, ensure_ascii=False)
+
+
+async def test_share_rewrites_confirms_and_saves(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    llm = StubLLM([["いいですね。<propose:share>"]], chat_reply=[_tid("今朝は大柿の港で牡蠣の水揚げがにぎやかだったそうです")])
+    c = _conv(llm, tmp_path, enabled=SHARE, tidbits=store)
+    out = await _say(c, "今朝、大柿の港で牡蠣の水揚げがすごかったよ")
+    assert out[-1] == TEMPLATES["share"]["propose"]
+    confirm = await _say(c, "うん")
+    assert confirm == [TEMPLATES["share"]["confirm_text"].format(text="今朝は大柿の港で牡蠣の水揚げがにぎやかだったそうです")]
+    assert c.phase == "confirm_share" and store.active() == []  # 確かめるまでは保存しない
+    assert await _say(c, "はい") == [TEMPLATES["share"]["done"]]
+    (item,) = store.active()
+    assert item["text"].startswith("今朝は大柿") and c.phase == "listen"
+    # 同じ話をもう一度しても、二重には預からない
+    c2 = _conv(StubLLM([["いいですね。<propose:share>"]]), tmp_path, enabled=SHARE, tidbits=store)
+    assert await _say(c2, "今朝は大柿の港で牡蠣の水揚げがにぎやかだったよ") == ["いいですね。"]
+
+
+async def test_share_rejected_at_confirmation_is_not_saved(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    llm = StubLLM([["いいですね。<propose:share>"]], chat_reply=[_tid("今朝は大柿の港で牡蠣の水揚げがにぎやかだったそうです")])
+    c = _conv(llm, tmp_path, enabled=SHARE, tidbits=store)
+    await _say(c, "今朝、大柿の港で牡蠣の水揚げがすごかったよ")
+    await _say(c, "うん")
+    assert await _say(c, "やっぱりやめて") == [TEMPLATES["share"]["declined"]]
+    assert store.active() == []
+
+
+async def test_share_rewrite_with_personal_details_is_dropped(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    llm = StubLLM([["いいですね。<propose:share>"]], chat_reply=[_tid("山田さんの息子が港で牡蠣をたくさん獲ったそうです")])
+    c = _conv(llm, tmp_path, enabled=SHARE, tidbits=store)
+    await _say(c, "うちの息子が牡蠣をたくさん獲ってきたよ")
+    assert await _say(c, "うん") == [TEMPLATES["share"]["failed"]]
+    assert store.active() == [] and c.phase == "listen"
+
+
+async def test_tidbit_offered_once_per_conversation_and_not_to_its_author(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    item = store.add("今朝は大柿の港で牡蠣の水揚げがにぎやかだったそうです")
+    llm = StubLLM([["さっき来た方が、大柿で牡蠣の水揚げがにぎやかだったって言ってましたよ。"], ["そうですね。"],
+                   ["そうですね。"]])
+    c = _conv(llm, tmp_path, enabled=SHARE, tidbits=store)
+    await _say(c, "今日はいい天気ですね")
+    assert "さっき来た方の話" in llm.stream_calls[0][-1]["content"]
+    await _say(c, "ほんとに気持ちいいですね")
+    assert "さっき来た方の話" not in llm.stream_calls[1][-1]["content"]  # 1 会話に 1 つまで
+    # 預けた本人の会話では、その小ネタを使わない
+    llm3 = StubLLM([["そうですね。"]])
+    c3 = _conv(llm3, tmp_path, enabled=SHARE, tidbits=store)
+    c3._ensure_session("ja")
+    assert c3._session is not None
+    c3._session.own_tidbits.append(item["id"])
+    await _say(c3, "今日はいい天気ですね")
+    assert "さっき来た方の話" not in llm3.stream_calls[0][-1]["content"]
+
+
+async def test_tidbit_not_offered_on_questions(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    store.add("今朝は大柿の港で牡蠣の水揚げがにぎやかだったそうです")
+    llm = StubLLM([["市民課です。"]])
+    c = _conv(llm, tmp_path, enabled=SHARE, tidbits=store)
+    await _say(c, "住民票はどこで取れますか")
+    assert "さっき来た方の話" not in llm.stream_calls[0][-1]["content"]
+
+
+def test_tidbit_retention_and_delete(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    old = {"id": "old1", "created_at": (datetime.now(JST) - timedelta(days=8)).isoformat(), "text": "古い話です"}
+    store.path.parent.mkdir(parents=True)
+    store.path.write_text(json.dumps(old, ensure_ascii=False) + "\n", encoding="utf-8")
+    new = store.add("新しい話です")
+    assert [t["id"] for t in store.active()] == [new["id"]]
+    assert store.cleanup() == 1
+    assert store.delete(new["id"]) and store.active() == [] and not store.delete("nope")
+
+
+async def test_staff_panel_lists_and_deletes_tidbits(tmp_path: Path) -> None:
+    from src.edge_server import StaffPanel, create_app
+
+    tidbits = TidbitStore(tmp_path, "etajima", 7)
+    item = tidbits.add("今朝は大柿の港で牡蠣の水揚げがにぎやかだったそうです")
+    panel = StaffPanel(ReferralStore(tmp_path, "etajima", 30, csv_export=False), VisitLog(tmp_path, "etajima"),
+                       StaffConfig(password="pw"), tidbits)
+    transport = httpx.ASGITransport(app=create_app(tmp_path / "none", panel), client=("192.168.1.20", 5000))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        assert (await c.get("/staff/api/tidbits")).status_code == 401
+        rows = (await c.get("/staff/api/tidbits", auth=("staff", "pw"))).json()
+        assert rows[0]["id"] == item["id"]
+        assert (await c.delete(f"/staff/api/tidbits/{item['id']}", auth=("staff", "pw"))).status_code == 200
+        assert (await c.get("/staff/api/tidbits", auth=("staff", "pw"))).json() == []
+        assert (await c.delete("/staff/api/tidbits/nope", auth=("staff", "pw"))).status_code == 404

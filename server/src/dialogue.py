@@ -259,7 +259,7 @@ class Dialogue:
         logger.info("対話履歴をクリアしました")
 
     def build_messages(
-        self, text: str, language: str, refs: list[Reference] | None = None
+        self, text: str, language: str, refs: list[Reference] | None = None, hint: str = ""
     ) -> list[dict[str, Any]]:
         """LLM に渡す messages を組み立てる（システムプロンプトは毎ターン作り直す）。"""
         now = self._now()
@@ -272,8 +272,9 @@ class Dialogue:
             messages.append({"role": "assistant", "content": assistant})
         content = text if language == "ja" else f"[language: {language}] {text}"
         # 履歴には発話だけを積む（参考資料は今のターンにだけ付ける）
+        # hint は今のターンにだけ添える材料（さっき来た方の小ネタなど）
         messages.append({"role": "user",
-                         "content": build_turn_message(self._cfg, self._facility, refs or [], content)})
+                         "content": hint + build_turn_message(self._cfg, self._facility, refs or [], content)})
         return messages
 
     @property
@@ -296,6 +297,7 @@ class Dialogue:
         text: str,
         language: str = "ja",
         extra_refs: list[Reference] | None = None,
+        hint: str = "",
     ) -> AsyncIterator[str]:
         """1 発話に対する応答を 1 文ずつ返す。
 
@@ -332,7 +334,7 @@ class Dialogue:
         refs = list(extra_refs) if extra_refs is not None else await self._search(text)
         if extra_refs is not None:
             self.last_references, self.last_search_ms = refs, None
-        messages = self.build_messages(text, language, refs)
+        messages = self.build_messages(text, language, refs, hint)
         logger.debug("発話 [%s]: %s", language, text)
         splitter = SentenceSplitter(
             self._cfg.sentence_terminators,
@@ -341,6 +343,9 @@ class Dialogue:
             self._cfg.first_chunk_min_chars,
         )
         think = _ThinkFilter()
+        # これまでの応答の文（同じ文を繰り返さない。短い返事の後に前の応答をそのまま言い直す癖がある）
+        previous = {_ECHO_IGNORE_RE.sub("", x) for _, reply in self._history
+                    for x in re.split(r"(?<=[。！？!?])", reply)}
         sentences: list[str] = []
         cited: set[int] = set()
         try:
@@ -349,6 +354,9 @@ class Dialogue:
                     sentence = await self._finish_sentence(raw, cited)
                     if sentence and not sentences and self._is_echo(sentence, text):
                         logger.info("来訪者の言葉を繰り返す文を読み上げずに捨てました")
+                        continue
+                    if sentence and self._is_repeat(sentence, previous):
+                        logger.info("これまでの応答と同じ文を読み上げずに捨てました")
                         continue
                     if sentence:
                         sentences.append(sentence)
@@ -384,6 +392,10 @@ class Dialogue:
         reply = "".join(sentences)
         self._history.append((text, reply))
         logger.debug("応答: %s", reply)
+
+    def _is_repeat(self, sentence: str, previous: set[str]) -> bool:
+        s = _ECHO_IGNORE_RE.sub("", sentence)
+        return len(s) >= self._cfg.repeat_min_chars and s in previous
 
     def _is_echo(self, sentence: str, user_text: str) -> bool:
         """応答の文が来訪者の言葉のおうむ返しか（挨拶を返すのは除く）。"""

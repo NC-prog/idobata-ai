@@ -26,7 +26,8 @@ from typing import Any
 
 import yaml
 
-from .config import ActionsConfig, ReferralConfig
+from .asr_client import ngram_overlap
+from .config import ActionsConfig, ReferralConfig, TidbitConfig
 from .dialogue import ChatBackend, Dialogue
 from .knowledge import JST
 from .lookup import Lookup
@@ -35,6 +36,7 @@ from .referrals import (
     CONTACT_PREFS,
     URGENCIES,
     ReferralStore,
+    TidbitStore,
     VisitLog,
     find_phone,
     phone_for_speech,
@@ -101,6 +103,9 @@ class Session:
     backchannel_count: int = 0
     proposals: list[dict[str, str | None]] = field(default_factory=list)
     referral_id: str | None = None
+    # 小ネタ: この会話で紹介したか（1 会話 1 つまで）、この会話で預かったもの（本人には返さない）
+    tidbit_used: bool = False
+    own_tidbits: list[str] = field(default_factory=list)
 
 
 StateHook = Callable[[str], Awaitable[None]]
@@ -123,6 +128,8 @@ class Conversation:
         visits: VisitLog | None = None,
         on_state: StateHook | None = None,
         edge_id: Callable[[], str] = lambda: "",
+        tidbits: TidbitStore | None = None,
+        tidbit_cfg: TidbitConfig | None = None,
     ) -> None:
         self.dialogue = dialogue
         self._llm = llm
@@ -136,9 +143,13 @@ class Conversation:
         self._visits = visits
         self._on_state = on_state
         self._edge_id = edge_id
+        self._tidbits = tidbits
+        self._tidbit_cfg = tidbit_cfg or TidbitConfig()
         self._words, self._templates = load_templates(cfg.templates_path)
         self._pending: Pending | None = None
         self._session: Session | None = None
+        # 直前のターンで行為が終わったか（次の短い相づちを決まった文で受ける）
+        self._after_action = False
         # 直近の紹介状の受付番号（字幕・表示用）
         self.last_receipt: str | None = None
 
@@ -198,6 +209,14 @@ class Conversation:
         if self._session.turns == 0:
             self._session.language = language
         self._session.turns += 1
+        after_action, self._after_action = self._after_action, False
+        if (after_action and self._pending is None and classify_reply(text, self._words) != "unclear"
+                and len(re.sub(r"[\s、。！？!?]", "", text)) <= self._cfg.reply_max_chars):
+            # 行為が終わった直後の「うん」「ありがとう」は決まった文で受ける
+            line = self._t("common", "ack")
+            yield line
+            self.dialogue.add_turn(text, line)
+            return
         if self._pending is not None and self._is_new_topic(text):
             # 提案には答えず別の話を始めた: 聞き直さずに辞退として、その話に普通に答える
             logger.info("返事待ちに別の話が来たので、提案を辞退扱いにします")
@@ -206,12 +225,18 @@ class Conversation:
         if self._pending is not None:
             async for s in self._on_reply(text):
                 yield s
+            self._after_action = self._pending is None
             return
 
         reply: list[str] = []
-        async for s in self.dialogue.respond(text, language):
+        offered = self._tidbit_to_offer(text)
+        hint = self._tidbit_cfg.offer_template.format(text=offered["text"]) if offered else ""
+        async for s in self.dialogue.respond(text, language, hint=hint):
             reply.append(s)
             yield s
+        if offered and self._session and self._tidbit_used(offered["text"], "".join(reply)):
+            self._session.tidbit_used = True
+            logger.info("さっきの方の小ネタを紹介しました")
         kind = self._adjust_proposal(self.dialogue.last_proposal, text, "".join(reply))
         if kind and self._available(kind):
             line = self._t(kind, "propose")
@@ -233,6 +258,17 @@ class Conversation:
         if kind == "lookup" and procedure and self._available("refer"):
             logger.info("手続き・相談の発話のため、提案を lookup から refer に置き換えます")
             return "refer"
+        if kind == "refer" and not procedure and re.search(self._cfg.share_fallback_topic, text):
+            # 季節・畑・海の雑談に付いた refer は合わない（覚えておくに合えばそちら）
+            logger.info("地域の雑談に付いた refer の提案を捨てます")
+            return "share" if self._share_fits(text) else None
+        if (kind == "refer" and not procedure and re.search(self._cfg.lookup_fallback_topic, text)
+                and self._available("lookup")):
+            logger.info("行事・営業の質問なので、提案を refer から lookup に置き換えます")
+            return "lookup"
+        if kind == "share" and self._known_tidbit(text):
+            logger.info("もう預かっている小ネタと同じ話なので share の提案を捨てます")
+            return None
         if (kind == "lookup" and not re.search(self._cfg.question_pattern, text.strip())
                 and not re.search(self._cfg.lookup_fallback_topic, text)):
             logger.info("尋ねていない発話への lookup の提案を捨てます")
@@ -242,11 +278,26 @@ class Conversation:
         if procedure and re.search(self._cfg.refer_fallback_cue, text) and self._available("refer"):
             logger.info("タグはありませんが、手続きの相談なので refer を提案します")
             return "refer"
+        if self._share_fits(text):
+            logger.info("タグはありませんが、地域の季節の話なので share を提案します")
+            return "share"
         if (not procedure and re.search(self._cfg.lookup_fallback_reply, reply)
                 and re.search(self._cfg.lookup_fallback_topic, text) and self._available("lookup")):
             logger.info("タグはありませんが、資料に無い行事・営業の質問なので lookup を提案します")
             return "lookup"
         return None
+
+    def _share_fits(self, text: str) -> bool:
+        """覚えておくの提案に合う雑談か（尋ねていない・手続きでない・個人の事情の語が無い・1 会話 1 回）。"""
+        if not self._available("share") or self._session is None:
+            return False
+        if any(p.get("action") == "share" for p in self._session.proposals):
+            return False
+        return (re.search(self._cfg.share_fallback_topic, text) is not None
+                and not self._known_tidbit(text)
+                and not re.search(self._cfg.question_pattern, text.strip())
+                and not re.search(self._ref_cfg.procedure_pattern, text)
+                and not re.search(self._tidbit_cfg.banned_pattern, text))
 
     def _available(self, kind: str) -> bool:
         if kind not in self._cfg.enabled or kind not in self._templates:
@@ -255,7 +306,7 @@ class Conversation:
             return self._lookup is not None and bool(self._lookup.sources)
         if kind == "refer":
             return self._referrals is not None
-        return kind == "share"
+        return kind == "share" and self._tidbits is not None
 
     def _t(self, action: str, key: str, **kw: Any) -> str:
         return self._templates.get(action, {}).get(key, "").format(**kw)
@@ -317,6 +368,8 @@ class Conversation:
             yield self._t(p.action, "acting")
             if self._on_state is not None:
                 await self._on_state("thinking")
+        elif self._on_state is not None:
+            await self._on_state("thinking")  # 書き直しの間（言葉は挟まない。すぐ確認の文が出る）
         if p.action == "lookup":
             self._pending = None
             async for s in self._do_lookup(p):
@@ -442,12 +495,71 @@ class Conversation:
     # ---- 覚えておく（今日の小ネタ。WP04 C）-------------------------------
 
     async def _do_share(self, p: Pending) -> AsyncIterator[str]:
-        self._pending = None
-        yield self._t("share", "failed")
+        """来訪者の話を匿名の一言に書き直し、読み上げて確かめる（保存は確認の後）。"""
+        text = await self._rewrite_tidbit(p)
+        if text is None:
+            self._pending = None
+            self._outcome("failed")
+            yield self._t("share", "failed")
+            return
+        p.phase, p.share_text, p.reasks = "confirm_share", text, 0
+        yield self._t("share", "confirm_text", text=text)
 
     async def _finish_share(self, p: Pending, ok: bool) -> AsyncIterator[str]:
         self._pending = None
-        yield self._t("share", "done" if ok else "declined")
+        if not ok or self._tidbits is None or not p.share_text:
+            self._outcome("declined")
+            yield self._t("share", "declined")
+            return
+        try:
+            item = self._tidbits.add(p.share_text)
+        except OSError:
+            logger.exception("小ネタを保存できませんでした")
+            yield self._t("share", "failed")
+            return
+        if self._session is not None:
+            self._session.own_tidbits.append(item["id"])
+        logger.info("小ネタを預かりました: %s", item["id"])
+        yield self._t("share", "done")
+
+    async def _rewrite_tidbit(self, p: Pending) -> str | None:
+        cfg = self._tidbit_cfg
+        # 提案のきっかけになった発話と、その前の来訪者の発話（直近 2 つ）から書き直す
+        users = [u for u, _ in self.dialogue.history][-2:]
+        source = "\n".join(dict.fromkeys([*users, p.user_text]))
+        data = await self._chat_json(cfg.rewrite_prompt, source, cfg.rewrite_max_tokens)
+        text = str((data or {}).get("text") or "").strip().strip("「」").rstrip("。")
+        if not (cfg.min_chars <= len(text) <= cfg.max_chars):
+            logger.info("小ネタの書き直しが長さの範囲外でした（%d 字）", len(text))
+            return None
+        if re.search(cfg.banned_pattern, text) or find_phone(text):
+            logger.info("小ネタの書き直しに個人の事情を含みうる語があったので使いません")
+            logger.debug("書き直し: %s", text)
+            return None
+        return text
+
+    def _tidbit_to_offer(self, text: str) -> dict[str, Any] | None:
+        """雑談のターンで、この会話でまだ紹介していなければ、ほかの方の小ネタを 1 つ渡す。"""
+        if self._tidbits is None or self._session is None or self._session.tidbit_used:
+            return None
+        if (re.search(self._cfg.question_pattern, text.strip())
+                or re.search(self._ref_cfg.procedure_pattern, text)):
+            return None  # 尋ねごと・手続きの話には混ぜない
+        for item in self._tidbits.active():
+            if item.get("id") not in self._session.own_tidbits:
+                return item
+        return None
+
+    def _known_tidbit(self, text: str) -> bool:
+        """もう預かっている小ネタと同じ話か（同じ話を二重に積まない）。"""
+        if self._tidbits is None:
+            return False
+        return any(ngram_overlap(t["text"], text) >= self._tidbit_cfg.used_overlap
+                   for t in self._tidbits.active())
+
+    def _tidbit_used(self, tidbit: str, reply: str) -> bool:
+        return ("さっき来た方" in reply
+                or ngram_overlap(tidbit, reply) >= self._tidbit_cfg.used_overlap)
 
 
 def _pick(value: Any, allowed: tuple[str, ...], default: str) -> str:

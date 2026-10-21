@@ -38,7 +38,7 @@ from .edge_server import EdgeServer, StaffPanel
 from .knowledge import KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
-from .referrals import ReferralStore, VisitLog, load_tags
+from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
 from .site_context import load_facility, load_site_words, referral_csv_enabled
 from .speech_gate import SpeechGate
 from .speech_output import (
@@ -128,6 +128,7 @@ class VoiceLoop:
         self._referrals = ReferralStore(config.data_dir, config.site, config.referral.retention_days,
                                         csv_export=referral_csv_enabled(config.site))
         self._visits = VisitLog(config.data_dir, config.site)
+        self._tidbits = TidbitStore(config.data_dir, config.site, config.tidbit.retention_days)
         self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query)
         self._conversation = Conversation(
             self._dialogue, llm, config.llm.chat_model, config.actions, config.referral, facility,
@@ -135,6 +136,7 @@ class VoiceLoop:
             lookup=self._lookup,
             referrals=self._referrals, visits=self._visits,
             on_state=self._send_state, edge_id=self._edge_id,
+            tidbits=self._tidbits, tidbit_cfg=config.tidbit,
         )
         self._llm = llm
         self._backchannels = (BackchannelBank(config.actions.backchannel_path)
@@ -156,7 +158,7 @@ class VoiceLoop:
         if edge or config.staff.password:
             self._edge_server = EdgeServer(
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir,
-                staff=StaffPanel(self._referrals, self._visits, config.staff),
+                staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits),
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）
@@ -177,9 +179,9 @@ class VoiceLoop:
             await self._backchannels.prepare(self._tts, config.actions.backchannel_prepare_budget_sec)
         if "lookup" in config.actions.enabled:
             await self._lookup.prepare()
-        removed = self._referrals.cleanup() + self._visits.cleanup()
+        removed = self._referrals.cleanup() + self._visits.cleanup() + self._tidbits.cleanup()
         if removed:
-            logger.info("保存期間を過ぎた紹介状・来訪記録を %d 日分消しました", removed)
+            logger.info("保存期間を過ぎた紹介状・来訪記録・小ネタを %d 件消しました", removed)
         await asyncio.to_thread(self._knowledge.reload_if_changed)
         self._dialogue.attach_knowledge(self._knowledge)
         self._spawn(self._watch_knowledge(), "kb-watch")

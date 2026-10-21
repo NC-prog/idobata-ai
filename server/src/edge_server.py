@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 from .config import StaffConfig
 from .knowledge import JST
-from .referrals import ReferralStore, VisitLog, today_stats
+from .referrals import ReferralStore, TidbitStore, VisitLog, today_stats
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +49,12 @@ class StatusUpdate(BaseModel):
 class StaffPanel:
     """職員パネルの中身（紹介状・来訪記録）。"""
 
-    def __init__(self, referrals: ReferralStore, visits: VisitLog, cfg: StaffConfig) -> None:
+    def __init__(self, referrals: ReferralStore, visits: VisitLog, cfg: StaffConfig,
+                 tidbits: TidbitStore | None = None) -> None:
         self.referrals = referrals
         self.visits = visits
         self.cfg = cfg
+        self.tidbits = tidbits
 
 
 def _is_lan(host: str | None) -> bool:
@@ -105,6 +107,16 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
         if ref is None:
             raise HTTPException(404, "紹介状がありません")
         return asdict(ref)
+
+    @app.get("/staff/api/tidbits", dependencies=auth)
+    async def list_tidbits() -> list[dict[str, Any]]:
+        return panel.tidbits.active() if panel.tidbits is not None else []
+
+    @app.delete("/staff/api/tidbits/{tid}", dependencies=auth)
+    async def delete_tidbit(tid: str) -> dict[str, bool]:
+        if panel.tidbits is None or not panel.tidbits.delete(tid):
+            raise HTTPException(404, "小ネタがありません")
+        return {"deleted": True}
 
     @app.get("/staff/api/stats", dependencies=auth)
     async def stats(day: str | None = None) -> dict[str, Any]:

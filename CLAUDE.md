@@ -136,7 +136,7 @@ server/
 │   ├── backchannel.py    # 相槌（事前合成、発話の種類で選ぶ）
 │   ├── actions.py        # 同意付きの行為（提案 → 返事 → 実行）と来訪記録
 │   ├── lookup.py         # 調べる（許可ドメインだけ・5 秒で打ち切り・見つからなければ夜のビルドに回す）
-│   ├── referrals.py      # 紹介状（受付番号・保存・期限・安芸太田は CSV）、来訪記録、今日の集計
+│   ├── referrals.py      # 紹介状（受付番号・保存・期限・安芸太田は CSV）、来訪記録、小ネタ、今日の集計
 │   ├── caption_feed.py   # 字幕配信（WP03 で使用予定）
 │   ├── announcer.py      # テンプレート発話（未使用）
 │   └── main.py           # text / voice の 2 モード、--edge

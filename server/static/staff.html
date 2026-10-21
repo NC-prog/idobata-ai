@@ -11,6 +11,7 @@
   .stats { display:flex; flex-wrap:wrap; gap:16px; margin-bottom:16px; font-size:14px; }
   .stats div { background:#fff; border:1px solid var(--line); border-radius:6px; padding:8px 12px; }
   .stats b { font-size:20px; }
+  h2 { font-size:16px; margin-top:24px; }
   table { border-collapse:collapse; width:100%; background:#fff; font-size:14px; }
   th, td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
   tr.needs td { background:var(--pending); }
@@ -30,6 +31,8 @@
   <tbody id="rows"></tbody>
 </table>
 <p class="mut">要約は来訪者の言葉の要約です（職員が読む前提で表示しています）。__POLL_SEC__ 秒ごとに更新します。</p>
+<h2>今日の小ネタ <span class="mut">（来訪者が同意した匿名の一言。次の来訪者との雑談で 1 回に 1 つまで使います。7 日で消えます）</span></h2>
+<ul id="tidbits"></ul>
 <script>
 const STATUSES = ["未対応", "対応中", "完了"];
 const ROLES = ["", "窓口", "担当課"];
@@ -47,11 +50,21 @@ function select(options, value, onchange) {
   return `<select onchange="${onchange}">` + options.map((o) => `<option ${o === (value ?? "") ? "selected" : ""}>${esc(o)}</option>`).join("") + "</select>";
 }
 
+async function delTidbit(id) {
+  if (!confirm("この小ネタを消しますか？")) return;
+  await fetch(`api/tidbits/${id}`, {method: "DELETE"});
+  load();
+}
+
 async function load() {
-  const [refs, st] = await Promise.all([
+  const [refs, st, tbs] = await Promise.all([
     fetch(`api/referrals?day=${dayEl.value}`).then((r) => r.json()),
     fetch(`api/stats?day=${dayEl.value}`).then((r) => r.json()),
+    fetch("api/tidbits").then((r) => r.json()),
   ]);
+  document.getElementById("tidbits").innerHTML = tbs.map((t) =>
+    `<li>${esc(t.text)} <span class="mut">${esc(t.created_at.slice(5, 16).replace("T", " "))}</span>
+     <button onclick='delTidbit("${esc(t.id)}")'>消す</button></li>`).join("") || `<li class="mut">ありません</li>`;
   document.getElementById("stats").innerHTML =
     `<div>来訪者 <b>${st.visits}</b></div><div>紹介状 <b>${st.referrals}</b></div>` +
     `<div>要対応で未完了 <b>${st.pending_action}</b></div>` +
