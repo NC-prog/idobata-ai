@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Any
 
 import pytest
 
 from src.config import DialogueConfig
 from src.dialogue import Dialogue, SentenceSplitter, _ThinkFilter
+from src.knowledge import JST
+
+
+def _NOON() -> datetime:
+    return datetime(2026, 10, 21, 12, 0, tzinfo=JST)
 
 
 class StubLLM:
@@ -65,7 +71,7 @@ async def test_respond_uses_system_prompt_and_disables_thinking() -> None:
 
 async def test_yields_sentence_by_sentence_and_keeps_full_reply_in_history() -> None:
     llm = StubLLM(["こんにちは。今日は", "寒いですね？", "お体", "に気をつけて"])
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "やあ") == ["こんにちは。", "今日は寒いですね？", "お体に気をつけて"]
     await _collect(d, "次")
     _, messages, _ = llm.calls[-1]
@@ -88,7 +94,7 @@ async def test_history_keeps_only_recent_turns() -> None:
 
 async def test_non_japanese_gets_fixed_reply_without_llm() -> None:
     llm = StubLLM()
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "Where is the city hall?", language="en") == [
         "申し訳ありません、外国語でのご案内は準備中です。"
     ]
@@ -110,7 +116,7 @@ async def test_llm_failure_returns_fallback_without_history() -> None:
 
 async def test_failure_midway_keeps_spoken_sentences_only() -> None:
     llm = StubLLM(["一文目です。二文", "目の途中"], fail_after=2)
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "こんにちは") == ["一文目です。"]
     await _collect(d, "次")
     assert llm.calls[-1][1][2]["content"] == "一文目です。"
@@ -125,7 +131,7 @@ async def test_empty_reply_returns_fallback() -> None:
 
 async def test_empty_input_is_ignored() -> None:
     llm = StubLLM()
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "   ") == []
     assert llm.calls == []
 
@@ -210,7 +216,7 @@ def test_think_filter_passes_plain_text() -> None:
 
 async def test_sentence_with_english_word_is_rephrased_once() -> None:
     llm = StubLLM(["窓口でcheckしてください。", "以上です。"], rephrase="窓口で確認してください。")
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "a") == ["窓口で確認してください。", "以上です。"]
     assert len(llm.chat_calls) == 1
     assert llm.chat_calls[0][1]["content"] == "窓口でcheckしてください。"
@@ -225,7 +231,7 @@ async def test_sentence_still_english_after_rephrase_is_dropped(
     import logging
 
     llm = StubLLM(["Please wait。", "少々お待ちください。"], rephrase="Please wait.")
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     with caplog.at_level(logging.WARNING, logger="src.dialogue"):
         assert await _collect(d, "a") == ["少々お待ちください。"]
     assert any("読み上げません" in r.message for r in caplog.records)
@@ -275,7 +281,7 @@ async def test_source_marker_is_stripped_and_cited() -> None:
 
 async def test_no_kb_means_no_references() -> None:
     llm = StubLLM()
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     await _collect(d, "a")
     system = llm.calls[0][1][0]["content"]
     turn = llm.calls[0][1][-1]["content"]
@@ -288,7 +294,7 @@ async def test_no_kb_means_no_references() -> None:
 async def test_banned_phrase_sentence_is_dropped_and_leaks_rewritten() -> None:
     llm = StubLLM(["まずはお住まいの市区町村に確認してください。", "【参考資料】には載っていません。",
                    "保健医療課でご案内します。"])
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "国保") == ["手元の資料には載っていません。", "保健医療課でご案内します。"]
 
 
@@ -320,12 +326,12 @@ async def test_emergency_number_is_appended_when_missing() -> None:
 
 async def test_chinese_simplified_kanji_is_rephrased() -> None:
     llm = StubLLM(["介護保险の相談は高齢介護課です。"], rephrase="介護保険の相談は高齢介護課です。")
-    d = Dialogue(llm, DialogueConfig())
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "介護") == ["介護保険の相談は高齢介護課です。"]
     assert len(llm.chat_calls) == 1
     # 日本語の漢字（﨑 などの互換漢字を含む）や記号では言い直さない
     llm2 = StubLLM(["にこ♡にこハウスは三﨑さんの近くです。"])
-    assert await _collect(Dialogue(llm2, DialogueConfig()), "a") == ["にこ♡にこハウスは三﨑さんの近くです。"]
+    assert await _collect(Dialogue(llm2, DialogueConfig(), now=_NOON), "a") == ["にこ♡にこハウスは三﨑さんの近くです。"]
     assert llm2.chat_calls == []
 
 
@@ -412,3 +418,58 @@ async def test_bracketless_source_marker_is_stripped() -> None:
 
     d = Dialogue(StubLLM(["登録する印鑑が要ります。出典:1"]), DialogueConfig(), knowledge=KB())
     assert await _collect(d, "印鑑登録") == ["登録する印鑑が要ります。", "詳しくは市のホームページにも載っています。"]
+
+
+async def test_leading_echo_of_visitor_is_dropped() -> None:
+    llm = StubLLM(["最近、急に寒くなりましたね。", "お体に気をつけてくださいね。"])
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
+    out = await _collect(d, "最近、急に寒くなりましたね。朝晩は特に冷えますよ。")
+    assert out == ["お体に気をつけてくださいね。"]
+
+
+async def test_greeting_back_is_not_treated_as_echo() -> None:
+    llm = StubLLM(["こんにちは。", "ようこそ。"])
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
+    assert await _collect(d, "こんにちは。ちょっと寄ってみました。") == ["こんにちは。", "ようこそ。"]
+
+
+async def test_help_offer_and_checkin_once_and_not_after_questions() -> None:
+    llm = StubLLM(["市民課です。", "最近、お変わりありませんか？"])
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
+    assert await _collect(d, "住民票はどこですか") == ["市民課です。"]  # 尋ねられた直後は言わない
+    llm2 = StubLLM(["いいですね。", "最近、お変わりありませんか？"])
+    d2 = Dialogue(llm2, DialogueConfig(), now=_NOON)
+    assert await _collect(d2, "今日は暖かいですね") == ["いいですね。", "最近、お変わりありませんか？"]
+    llm2.deltas = ["そうですね。", "お変わりはありませんか？"]
+    assert await _collect(d2, "散歩してきました") == ["そうですね。"]  # 1 会話 1 回
+
+
+def test_ends_with_closing() -> None:
+    from src.dialogue import ends_with_closing
+
+    cfg = DialogueConfig()
+    assert ends_with_closing("市民課です。いつでもお気軽にお声がけください。", cfg)
+    assert ends_with_closing("寒いですね。お体に気を付けてください。詳しくは市のホームページにも載っています。", cfg)
+    assert not ends_with_closing("寒いですね。お住まいの近くは、もう紅葉していますか？", cfg)
+
+
+
+@pytest.mark.parametrize(("hour", "greeting"), [
+    (4, "こんばんは"), (5, "おはようございます"), (9, "おはようございます"), (10, "こんにちは"),
+    (16, "こんにちは"), (17, "こんばんは"), (23, "こんばんは"),
+])
+def test_greeting_by_time_of_day(hour: int, greeting: str) -> None:
+    from src.timeofday import greeting_for
+
+    assert greeting_for(datetime(2026, 10, 21, hour, 30, tzinfo=JST)) == greeting
+
+
+async def test_wrong_greeting_is_replaced_and_prompt_has_greeting() -> None:
+    def evening() -> datetime:
+        return datetime(2026, 10, 21, 20, 45, tzinfo=JST)
+
+    llm = StubLLM(["おはようございます。", "今日はどうされましたか？"])
+    d = Dialogue(llm, DialogueConfig(), now=evening)
+    assert await _collect(d, "やあ") == ["こんばんは。", "今日はどうされましたか？"]
+    _, messages, _ = llm.calls[-1]
+    assert "「こんばんは」と言う" in messages[0]["content"]

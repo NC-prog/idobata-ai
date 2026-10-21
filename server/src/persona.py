@@ -96,13 +96,24 @@ def organization_word(facility: Facility | None) -> str:
     return city[-1] if city and city[-1] in "市町村" else "市"
 
 
+def format_propose_rules(cfg: DialogueConfig, enabled: tuple[str, ...]) -> str:
+    rules = [f"  - <propose:{k}>: {cond}\n" for k, cond in cfg.propose_conditions if k in enabled]
+    return cfg.propose_rule_head + "".join(rules) if rules else ""
+
+
 def build_system_prompt(
     cfg: DialogueConfig,
     facility: Facility | None,
     today: date,
     weather_lines: list[str],
+    avatar_name: str = "",
+    enabled_actions: tuple[str, ...] = (),
+    greeting: str = "こんにちは",
 ) -> str:
-    """システムプロンプト（固定事実 + 決まり + 今日）。参考資料は入れない（build_turn_message）。"""
+    """システムプロンプト（固定事実 + 決まり + 今日）。参考資料は入れない（build_turn_message）。
+
+    挨拶は時間帯（1 日 3 回だけ変わる）なので、プレフィックスキャッシュはほぼ効いたまま。
+    """
     return cfg.persona_template.format(
         facility_name=facility.name if facility else "市役所",
         city=(facility.address_city or facility.name) if facility else "この市",
@@ -110,6 +121,9 @@ def build_system_prompt(
         location_phrase=facility.location_phrase if facility else "ロビー",
         facts=format_facts(facility),
         today=format_today(today, weather_lines),
+        avatar_name=avatar_name or "（未定）",
+        propose_rules=format_propose_rules(cfg, enabled_actions),
+        greeting=greeting,
     )
 
 

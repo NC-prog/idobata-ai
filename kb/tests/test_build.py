@@ -170,3 +170,12 @@ def test_embed_reuse_skips_unchanged_text(tmp_path: Path, monkeypatch: Any) -> N
                         types.SimpleNamespace(SentenceTransformer=boom))
     stats = build.embed_and_save(chunks, tmp_path, reuse)
     assert stats == {"embedded": 0, "reused": len(chunks)}
+
+
+def test_read_queue_dedupes(tmp_path: Path) -> None:
+    root = tmp_path
+    path = build.queue_path(root, "etajima")
+    path.write_text('{"query": "道の駅 イベント"}\n{"query": "道の駅 イベント"}\nbroken\n{"query": "秋祭り"}\n',
+                    encoding="utf-8")
+    assert build.read_queue(root, "etajima") == ["道の駅 イベント", "秋祭り"]
+    assert build._overlap("秋祭り", "能美の秋祭りを開催します") == 1.0

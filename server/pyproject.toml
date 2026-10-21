@@ -19,6 +19,8 @@ dependencies = [
     "pyarrow>=26.0.0",
     "sentence-transformers>=3",
     "transformers>=4.48",
+    "trafilatura>=2.3.1",
+    "playwright>=1.64.0",
 ]
 
 [dependency-groups]

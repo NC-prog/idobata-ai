@@ -81,3 +81,6 @@ facility:
   emergency_lines:
     - name: マイナンバー総合フリーダイヤル（マイナンバーカードを紛失したときの一時利用停止。24時間365日・通話無料。音声ガイダンスで2番）
       number: 0120-95-0178
+
+# 紹介状を kintone（サイボウズ）取り込み用の CSV にも書く（referrals/<site>/<date>.csv、UTF-8 BOM）
+referral_csv: true

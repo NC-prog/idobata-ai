@@ -134,6 +134,8 @@ class Sources:
     respect_robots: bool
     max_pages: int
     max_fetches: int
+    # 調べる（WP04）の取得先。翌朝、来訪者の検索語（seed_queue）をここで探す
+    lookup: list[dict[str, Any]] = field(default_factory=list)
 
 
 def load_sources(site: str) -> Sources:
@@ -147,6 +149,7 @@ def load_sources(site: str) -> Sources:
         exclude_breadcrumb_keywords=list(data.get("exclude_breadcrumb_keywords", [])),
         default_trust=str(data.get("default_trust", "official")),
         default_label=str(data.get("default_label", "")),
+        lookup=[dict(x) for x in data.get("lookup") or []],
         weather=dict(data.get("weather", {})),
         rate_limit_sec=float(crawl.get("rate_limit_sec", 1.0)),
         user_agent=str(crawl.get("user_agent", "idobata-ai-kb/0.1")),
@@ -505,6 +508,66 @@ def crawl(src: Sources, crawler: Crawler, daily: bool = False) -> list[Page]:
                             and not seed.matches(seed.exclude, link)):
                         queue.append((link, depth + 1))
     return list(pages.values())
+
+
+QUEUE_MAX_PAGES_PER_QUERY = 3
+QUEUE_LINKS_PER_SOURCE = 10
+QUEUE_MIN_OVERLAP = 0.5
+
+
+def queue_path(root: Path, site: str) -> Path:
+    """来訪者が「調べて」と言って見つからなかった検索語（server/src/lookup.py が積む）。"""
+    return root / f"{site}.seed_queue.jsonl"
+
+
+def read_queue(root: Path, site: str) -> list[str]:
+    path = queue_path(root, site)
+    if not path.is_file():
+        return []
+    queries: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            q = str(json.loads(line).get("query") or "").strip()
+        except json.JSONDecodeError:
+            continue
+        if q and q not in queries:
+            queries.append(q)
+    return queries
+
+
+def _overlap(query: str, text: str) -> float:
+    q = {query[i:i + 2] for i in range(len(query) - 1) if " " not in query[i:i + 2]}
+    return len(q & {text[i:i + 2] for i in range(len(text) - 1)}) / len(q) if q else 0.0
+
+
+def pages_for_queries(src: Sources, crawler: Crawler, queries: list[str]) -> list[Page]:
+    """seed_queue の検索語を lookup の取得先で探し、本文が検索語に近いページを返す。"""
+    from urllib.parse import quote
+
+    found: dict[str, Page] = {}
+    for query in queries:
+        hits = 0
+        for entry in src.lookup:
+            url = str(entry["url"])
+            url = url.replace("{q}", quote(query)) if entry.get("type") == "search" else url
+            listing = crawler.fetch(url, str(entry.get("render", "")))
+            if listing is None:
+                continue
+            for link in [u for u in listing.links if crawler.allowed_domain(u) and u != url][:QUEUE_LINKS_PER_SOURCE]:
+                page = crawler.fetch(link, str(entry.get("render", "")))
+                if page is None or not page.text or _excluded(page, src):
+                    continue
+                if _overlap(query, f"{page.title}\n{page.text}") >= QUEUE_MIN_OVERLAP:
+                    page.trust = str(entry.get("trust") or src.default_trust)
+                    page.label = str(entry.get("label") or src.default_label)
+                    found.setdefault(page.url, page)
+                    hits += 1
+                    if hits >= QUEUE_MAX_PAGES_PER_QUERY:
+                        break
+            if hits >= QUEUE_MAX_PAGES_PER_QUERY:
+                break
+        logger.info("夜に回された検索語 1 件: %d ページ", hits)  # 検索語そのものはログに出さない
+    return list(found.values())
 
 
 def pages_from_cache(pack: Path, crawler: Crawler, src: Sources) -> list[Page]:
@@ -962,10 +1025,15 @@ def main() -> int:
     crawler = Crawler(src, root / "cache" / args.site)
     t0 = time.monotonic()
     try:
+        queries: list[str] = []
         if args.from_cache:
             pages = pages_from_cache(pack, crawler, src)
         else:
             pages = crawl(src, crawler, daily=args.daily)
+            queries = read_queue(root, args.site) if args.daily else []
+            if queries:
+                pages += [p for p in pages_for_queries(src, crawler, queries)
+                          if p.url not in {x.url for x in pages}]
     finally:
         crawler.close()
     logger.info("取得完了: 採用 %d ページ, %s, %.0f 秒", len(pages), crawler.stats, time.monotonic() - t0)
@@ -980,6 +1048,8 @@ def main() -> int:
                     "（チャンクにならないページ %(no_chunks)d）", merge_stats)
         if not merge_stats["changed"] and not merge_stats["new"]:
             logger.info("変わったページがないので、版は作り直しません")
+            if queries:
+                queue_path(root, args.site).unlink(missing_ok=True)
             return 0
     else:
         chunks = make_chunks(pages)
@@ -1005,6 +1075,7 @@ def main() -> int:
         "chunks": len(chunks),
         "fetched_pages": len(pages),
         "daily_merge": merge_stats,
+        "queued_queries": len(queries),
         "embedding_stats": embed_stats,
         "embedding": {"model": EMBED_MODEL, "query_prefix": QUERY_PREFIX,
                       "doc_prefix": DOC_PREFIX, "normalized": True},
@@ -1018,6 +1089,9 @@ def main() -> int:
     })
     staging.rename(version)
     swap_link(root / args.site, version)
+    if queries:  # 探した検索語は消す（見つからなかったものも、もう一度は積まない）
+        queue_path(root, args.site).unlink(missing_ok=True)
+        logger.info("夜に回された検索語 %d 件を処理しました", len(queries))
     prune_versions(root, args.site)
     logger.info("知識パック: %s → %s（%d ページ, %d チャンク）", root / args.site, version.name,
                 n_pages, len(chunks))

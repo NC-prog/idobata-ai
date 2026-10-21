@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 # 語彙ではない節（拠点の固定事実など）
-_NON_VOCAB_KEYS = frozenset({"facility", "allow_ascii", "outside_places"})
+_NON_VOCAB_KEYS = frozenset({"facility", "allow_ascii", "outside_places", "referral_csv"})
 
 
 @dataclass(frozen=True)
@@ -101,6 +101,8 @@ class SiteWord:
     reading: str | None = None
     # アクセント核の位置。None なら VOICEVOX 登録時に既定値を使う
     accent: int | None = None
+    # ASR の語彙に入れるか（False は VOICEVOX の辞書だけ）
+    asr: bool = True
 
 
 def _load_yaml(site: str, context_dir: Path) -> dict[str, Any]:
@@ -114,6 +116,14 @@ def _load_yaml(site: str, context_dir: Path) -> dict[str, Any]:
         logger.exception("拠点コンテキストの読み込みに失敗: %s", path)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def referral_csv_enabled(site: str, context_dir: Path | None = None) -> bool:
+    """紹介状を kintone 取り込み用の CSV にも書く拠点か（拠点 YAML の referral_csv: true）。"""
+    from .config import config as _config
+
+    data = _load_yaml(site, context_dir or _config.asr.site_context_dir)
+    return bool(data.get("referral_csv"))
 
 
 def load_facility(site: str, context_dir: Path) -> Facility | None:
@@ -160,8 +170,10 @@ def load_site_words(site: str, context_dir: Path) -> list[SiteWord]:
     """拠点の YAML から語を読む（表記の重複は先勝ち）。
 
     ファイルが無い・壊れている場合は空リストを返す（ASR・TTS は語彙なしで動く）。
-    facility 節の課名も語彙に含める（ASR のバイアシング用）。
+    facility 節の課名と、手続きの常用語（``procedures.yaml``、全拠点共通。先頭に置く）も語彙に含める。
     """
+    from .procedures import load_procedures  # procedures は SiteWord を使うので、ここで読む
+
     data = _load_yaml(site, context_dir)
     words: list[SiteWord] = []
     seen: set[str] = set()
@@ -179,7 +191,9 @@ def load_site_words(site: str, context_dir: Path) -> list[SiteWord]:
                 continue
             seen.add(word.surface)
             words.append(word)
-    return words
+    # 手続きの常用語は先頭に置く（後ろに置くと Qwen3-ASR のバイアシングが効かず「国保」→「国宝」になった）
+    procedure_words = [w for w in load_procedures(context_dir).words() if w.surface not in seen]
+    return procedure_words + words
 
 
 def _parse_item(item: Any) -> SiteWord | None:

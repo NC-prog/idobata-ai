@@ -115,6 +115,13 @@ class ASRConfig:
     echo_ngram: int = 2
     # これより短い出力（句読点・空白を除く）は判定しない（「はい」の繰り返しを捨てない）
     echo_min_chars: int = 8
+    # 出力に拠点の語彙がこの数以上含まれていたら、語彙の一覧の吐き出しとして破棄する
+    vocabulary_dump_min_words: int = 6
+
+    # 提案の返事待ち（うん・はい・いらない）は会話の言語に固定して聞き取る（WP04）。
+    # 言語判定に任せると「うん」→「嗯」、「はい」→「Hi.」になる。ASR サーバ側に
+    # deploy/standalone/asr/chat_template.jinja（force_language 対応）が要る
+    force_language_on_reply: bool = True
 
 
 @dataclass(frozen=True)
@@ -152,6 +159,9 @@ class VADConfig:
     min_speech_ms: int = 250
     min_silence_ms: int = 400
     pre_roll_ms: int = 30
+    # 発話開始を検出する前の音声もセグメントに含める長さ（ミリ秒）。Silero は立ち上がりの
+    # 後で start を出すので、無いと語頭が欠ける（「うん」→「分」、「国保」→「国宝」。WP04）
+    segment_preroll_ms: int = 300
     max_segment_sec: float = 7.0
     sample_rate: int = 16000
     frame_size: int = 512
@@ -237,13 +247,20 @@ class DialogueConfig:
     source_marker_example: str = "[出典:1,3]"
     # システムプロンプト（固定事実層 + 参考資料 + 今日）。{...} は persona.py が埋める
     persona_template: str = (
-        "あなたは{location_phrase}にいる案内役です。名前はまだありません。\n"
+        "あなたは{location_phrase}にいる案内役です。呼び名は「{avatar_name}」です。\n"
         "来訪者の話を急かさず聞きます。敬語ですが硬くありません。\n"
         "【ここで分かっていること】\n"
         "{facts}\n"
         "【話し方の決まり】\n"
         "- 日本語だけで話す。英単語を混ぜない。\n"
+        "- 挨拶はいまの時間帯に合わせて「{greeting}」と言う。ほかの時間帯の挨拶は使わない。\n"
         "- 一度に長く話さない。返答は2〜3文にする。相槌や言い換えで受け止め、助言は求められてからにする。\n"
+        "- 答えたら、相手が話したければ話せるように、話を広げる問いを一つ添える"
+        "（例：「最近、お変わりありませんか」「お住まいの近くは、もう紅葉していますか」）。"
+        "問いは相手の話に合わせて毎回自分で考え、例の言い方をそのまま使い回さない。"
+        "手続きを答えたときは、その手続きや暮らしに沿った問いにする（例：「お引っ越しは落ち着かれましたか」）。"
+        "「お気軽にどうぞ」「いつでもどうぞ」「お気をつけて」のような締めの決まり文句で終わらせない。\n"
+        "- 「お困りのことはありませんか」のような問いかけは、同じ会話で1回まで。雑談が一区切りしたときだけにする。\n"
         "- 音声で読み上げるので、箇条書き・記号・絵文字・URL は使わない。\n"
         "- 手続きの要件・期限・持ち物・手順・金額は、【参考資料】にあるときだけ言う。"
         "無いときは「（担当の課）でご案内しますので、お声がけください」と言う。推測で手順を言わない。\n"
@@ -273,6 +290,7 @@ class DialogueConfig:
         "- 分からないことは分からないと言う。\n"
         "- 日本語以外で話しかけられたら、日本語で「{foreign_reply}」と短く伝える。\n"
         "- 【参考資料】は来訪者の発話の前に毎回付けて渡す。無いときは「なし」と書いてある。\n"
+        "{propose_rules}"
         "【今日】\n"
         "{today}"
     )
@@ -284,8 +302,15 @@ class DialogueConfig:
     # banned_phrases を含む文は読み上げずに捨てる（WARNING）。来訪者に住所を聞き返さない、など
     banned_phrases: tuple[str, ...] = (
         "お住まいの市区町村", "お住まいの自治体", "お住まいの地域の役所", "お住まいの市町村",
+        # していないこと（職員を呼んだ・担当者が来る）を言わない（WP04 の行為の後に出た）
+        "お呼びします", "お呼びしますね", "担当者がそろい", "担当者が参ります", "担当者が来ます", "お待たせしました",
     )
     # プロンプトの見出しが漏れたときの言い換え
+    # 応答の冒頭で来訪者の言葉をそのまま繰り返す文は読み上げない（8B の癖。一度出ると
+    # 履歴に倣って続く）。ただし挨拶を返すのは自然なので残す
+    echo_keep: tuple[str, ...] = ("こんにちは", "こんばんは", "おはようございます", "ありがとう")
+    # これまでの応答と同じ文（これ以上の長さ）は読み上げない
+    repeat_min_chars: int = 6
     leak_replacements: tuple[tuple[str, str], ...] = (
         ("【参考資料】", "手元の資料"), ("参考資料", "手元の資料"),
         ("【ここで分かっていること】", "こちらで分かっていること"),
@@ -304,6 +329,20 @@ class DialogueConfig:
     facility_question_pattern: str = r"どこ|ありますか|あります？|ある？|場所|行きたい|使いたい|使えますか|探して"
     # 緊急連絡先の名前だけ言って番号を言わなかったときに足す文
     emergency_number_sentence: str = "{name}の番号は、{number}です。"
+    # 同意付きの行為を提案してよい状況を、応答の最後のタグで知らせてもらう（WP04）。行為ごとの条件
+    propose_rule_head: str = (
+        "- 次の状況のときだけ、応答のいちばん最後にタグを 1 つ付ける（タグは読み上げない。"
+        "提案の言葉は自分で言わない。こちらで言う）:\n"
+    )
+    propose_conditions: tuple[tuple[str, str], ...] = (
+        ("lookup", ("行事・催し・施設・お知らせ・営業日を知りたがっているのに、【参考資料】に答えが無いとき。"
+                    "手続き・相談・困りごとには付けない（それは refer）")),
+        ("refer", ("手続き（保険・税・住民票・子育て・介護など）の相談で、担当の課が【ここで分かっていること】から"
+                   "分かるとき。または困りごとの打ち明けで相談先があるとき（子育て・介護・生活の困りごとなど）。"
+                   "雑談では付けない")),
+        ("share", ("行事・季節・畑・魚・天気などの雑談で、来訪者が話したことに個人の事情が含まれず、"
+                   "ほかの来訪者に教えても差し支えないとき")),
+    )
     # 日本語以外の発話への返事（多言語は site プロファイルで後日）。LLM を通さずこの文を返す
     foreign_reply: str = "申し訳ありません、外国語でのご案内は準備中です。"
     # 参考資料があるターンだけ【話し方の決まり】に足す（無いのに出典の一言を言わせない）
@@ -318,6 +357,22 @@ class DialogueConfig:
     # LLM が自分で書いた出典の一言（こちらで足すので捨てる）
     llm_source_sentence_pattern: str = r"^(?:詳しくは|くわしくは).{0,40}(?:ホームページ|サイト|お知らせ).{0,12}載っています"
     no_references_text: str = "なし"
+    # 時間帯の挨拶（開始の時、挨拶）。最後の帯は日付をまたいで最初の帯の前まで続く（src/timeofday.py）
+    greeting_bands: tuple[tuple[int, str], ...] = (
+        (5, "おはようございます"), (10, "こんにちは"), (17, "こんばんは"),
+    )
+    # 「お困りのことはありませんか」の類（同じ会話で 1 回まで、尋ねられた直後には言わない。規則でも止める）
+    help_offer_pattern: str = (
+        r"(お困り|困って(い|る)?)の?こと|お手伝いできること|ご用(件|事)は|何かご(用|相談)|ご相談ごと"
+    )
+    # 「最近、お変わりありませんか」の類（8B が毎回そのまま使い回すので、雑談のターンだけ・1 会話 1 回）
+    checkin_pattern: str = r"お変わり(あり|ない|は)"
+    visitor_question_pattern: str = r"[か？?][。]?$|ますか|ですか|どこ|いつ|何|なに|どう|教えて"
+    # 応答の最後が締めの定型（「お気をつけて」「いつでもどうぞ」）で終わっているかの判定（評価セットで数える）
+    closing_pattern: str = (
+        r"(お気軽に|いつでも|遠慮なく)(どうぞ|お声がけ|お尋ね|ご相談|お話|おっしゃ)|気を(つけ|付け)|"
+        r"ご自愛|お大事に|お待ちしてい|楽しんでください|何かあれば|何かありましたら|お手伝いできることがあれば"
+    )
 
 
 @dataclass(frozen=True)
@@ -348,6 +403,177 @@ class KnowledgeConfig:
     # 埋め込みは CPU（GPU の予備枠は YOLO11-pose 用に残す）
     embed_device: str = "cpu"
     embed_threads: int = 4
+
+
+@dataclass(frozen=True)
+class ActionsConfig:
+    """相槌と、同意付きの行為（調べる・つなぐ・覚えておく）の設定（WP04）。"""
+
+    # アバターの呼び名（仮。市民公募で決める前提）。環境変数 IDOBATA_AVATAR_NAME
+    avatar_name: str = "いどちゃん"
+    backchannel_enabled: bool = True
+    backchannel_path: Path = SERVER_ROOT / "context" / "backchannel.yaml"
+    # 相槌の事前合成にかけてよい時間（秒）。超えたら残りは使うときに合成する
+    backchannel_prepare_budget_sec: float = 30.0
+    templates_path: Path = SERVER_ROOT / "context" / "actions.yaml"
+    # 使う行為（LLM に <propose:…> を出してよいと伝えるもの）
+    enabled: tuple[str, ...] = ("lookup", "refer", "share")
+    # 返事が分からないときに聞き直す回数（それでも分からなければ辞退扱い）
+    max_reask: int = 1
+    # LLM がタグを付け忘れたときの規則による補い（8B は付け忘れが多い）。
+    # 調べる: 応答が「資料に無い」と言い、発話が行事・営業などを尋ねているとき
+    lookup_fallback_reply: str = (
+        r"資料に(は)?(ありません|載っていません|見当たりません)|情報が(ありません|見当たりません)|"
+        r"手元に(は)?(ありません|情報が)|分かりません|わかりません|把握して(い)?ません"
+    )
+    lookup_fallback_topic: str = (
+        r"行事|イベント|催し|祭り|まつり|やって(い)?ます|営業|開いて(い)?ます|休み|定休|お知らせ|何時まで"
+    )
+    # 調べるの提案は、発話が尋ねているか行事・営業の話のときだけ受け付ける（雑談に付いたタグは捨てる）
+    question_pattern: str = (
+        r"[かは？?][。]?$|ますか|ですか|どこ|いつ|何|なに|どう|教えて|知りたい|ある[の？?]|やって"
+    )
+    # 返事待ちに、返事らしくない長い発話（新しい話）が来たら、聞き直さずに辞退として普通に答える
+    reply_max_chars: int = 12
+    # 覚えておく: 尋ねていない雑談で、地域の季節・畑・海の話をしたとき（個人の事情の語があれば付けない）
+    share_fallback_topic: str = (
+        r"水揚げ|獲れ|とれ(た|て|る)|釣れ|収穫|採れ|咲い|花が|紅葉|祭り|まつり|港|畑|田んぼ|みかん|牡蠣|"
+        r"カキ|魚|夕日|朝日|初雪|桜|渡り鳥|潮|実っ|柿"
+    )
+    # つなぐ: 発話が手続き（ReferralConfig.procedure_pattern）の相談を求めているとき
+    refer_fallback_cue: str = r"相談|聞きたいこと|困って|困った|分からなくて|わからなくて|どうしたら"
+
+
+@dataclass(frozen=True)
+class LookupConfig:
+    """調べる（lookup）の設定。取得先は kb/sources/<site>.yaml の lookup。"""
+
+    sources_dir: Path = REPO_ROOT / "kb" / "sources"
+    # 合計でこの秒数で打ち切る
+    timeout_sec: float = 5.0
+    # 一覧・検索結果の取得の持ち時間（これまでに返ったものだけ使う）と、本文の取得を打ち切る余裕
+    list_timeout_sec: float = 2.5
+    margin_sec: float = 0.3
+    # 一覧・検索結果から読みに行くページ数
+    max_pages: int = 3
+    max_chars: int = 1000
+    # 読んだ本文が見つかったとみなす BM25 の最低点（実測で決める）
+    min_score: float = 2.0
+    query_max_tokens: int = 32
+    query_prompt: str = (
+        "来訪者の発話から、市役所のホームページで調べるための検索語を作ってください。"
+        "場所・行事・手続き・施設の名前だけを 2〜4 語、空白で区切って出力します。"
+        "本人の事情・氏名・体調・家族の話・連絡先は含めません。検索語だけを出力してください。"
+    )
+    # 一般の検索エンジン（既定 OFF。環境変数 IDOBATA_LOOKUP_WEB_SEARCH=1 で ON）
+    web_search_enabled: bool = False
+    web_search_url: str = "https://html.duckduckgo.com/html/?q={q}"
+    web_search_results: int = 3
+    user_agent: str = "idobata-ai-lookup/0.1 (+Fuji Seisakusho LLC; municipal lobby guide pilot)"
+
+
+@dataclass(frozen=True)
+class ReferralConfig:
+    """紹介状（本人が同意したものだけを保存する）の設定。"""
+
+    # 保存期間（日）。起動時に古いものを消す。環境変数 IDOBATA_REFERRAL_RETENTION_DAYS
+    retention_days: int = 30
+    summary_max_tokens: int = 300
+    # 要約から落とす文（来訪者の言葉ではなく、案内役の側の経緯）。来訪者が言っていない課名を含む文も落とす
+    summary_meta_pattern: str = (
+        r"(伝達|紹介|案内|説明|対応|連絡)(を|して)?(依頼|希望|求め|もらう|してもらう|お願い|が必要)|"
+        r"担当の課(へ|に)|案内役|ことになりました"
+    )
+    assistant_note_max_chars: int = 80
+    # 紹介状を作る範囲: 提案のきっかけの発話の前後この往復数（いまの話題の中だけ）
+    window_turns: int = 2
+    # 同意の後の聞き取り（手続きごとの項目は procedures.yaml の intake）
+    intake_max_questions: int = 3
+    intake_phrase_max_tokens: int = 200
+    intake_phrase_prompt: str = (
+        "役所のロビーの案内役として、来訪者に次の項目を順に伺います。各項目を、やさしい話し言葉の短い質問"
+        "（1 文、40 字以内、です・ます調）にしてください。項目に無いことは聞かない。"
+        "項目に選択肢（「Aか Bか」や括弧の中の例）があれば、質問にもそのまま入れる。"
+        '出力は JSON: {"questions": ["…", "…"]}'
+    )
+    # 答えたくない・分からないとき（次へ進む。強制しない）
+    skip_pattern: str = (
+        r"いいから|分からない|わからない|分かんない|わかんない|知らない|言いたくない|答えたくない|"
+        r"言わなくて|パス|飛ばして|次へ|結構です|いいです|大丈夫です|けっこうです"
+    )
+    # 番地まで伺うのは転入・転居の手続きのときだけ
+    full_address_pattern: str = r"転入|転居|引っ越して(き|来)"
+    # 地区の答えから番地を落とす（番地を伺っていないとき）
+    address_number_pattern: str = r"[0-9０-９一二三四五六七八九十〇百千]+\s*(丁目|番地|番|号|-|－|の).*$"
+    # お名前の答えから外す言い回し
+    name_strip_pattern: str = (
+        r"^(私は|わたしは|僕は|ぼくは|名前は|なまえは)|(と申します|といいます|と言います|って言います|"
+        r"でございます|です|だよ|よ)$|[、。\s]"
+    )
+    name_max_chars: int = 15
+    # 連絡方法の答えの判定（順に見る）
+    contact_rules: tuple[tuple[str, str], ...] = (
+        (r"電話|でんわ|携帯|連絡して", "電話"),
+        (r"待|ここで|窓口", "窓口で待つ"),
+        (r"後日|また来|今度|あらため|改めて|明日", "後日来庁"),
+    )
+    # LLM が lookup を提案しても、発話が手続き・相談ならつなぐ（refer）に置き換える
+    # （8B は手続きの相談にも lookup を付けがちなため、規則で補正する）
+    procedure_pattern: str = (
+        r"手続き?|切り?替え|申請|届け?出|届|証明書|相談|困って|困った|困りごと|聞きたいこと|"
+        r"国保|国民健康保険|保険証|年金|介護|児童手当|住民票|戸籍|転入|転出|引っ越し|税金|納付|"
+        r"生活保護|障害"
+    )
+    structure_prompt: str = (
+        "以下の【来訪者の言葉】と【案内役が言ったこと】から、担当の課へ伝える紹介状を JSON で作ってください。"
+        "category は 手続き / 相談 / 意見 / その他 のどれか。"
+        "summary は【来訪者の言葉】だけを 1〜2 文で要約する。来訪者が言っていないこと"
+        "（案内役の勧め・案内した課・「伝達を依頼した」のような経緯）は書かない。推測で足さない。"
+        "assistant_note は【案内役が言ったこと】のうち職員に役立つ案内があれば 1 行で（無ければ空文字）。"
+        "urgency は 急ぐ / 通常。contact_pref は 窓口で待つ / 電話 / 後日来庁 / 未定。"
+        "name と phone は、来訪者が自分で言った場合だけ書き、言っていなければ null。"
+        'JSON だけを出力: {"category":"","summary":"","assistant_note":"","urgency":"",'
+        '"contact_pref":"","name":null,"phone":null}'
+    )
+
+
+@dataclass(frozen=True)
+class TidbitConfig:
+    """覚えておく（今日の小ネタ。WP04 C）の設定。"""
+
+    retention_days: int = 7
+    # 書き直した一言の長さ（仕様は 20〜40 字。短い話は短くてよいので下は緩める）
+    min_chars: int = 10
+    max_chars: int = 45
+    rewrite_max_tokens: int = 120
+    rewrite_prompt: str = (
+        "来訪者が話した地域の話題を、ほかの来訪者に伝える匿名の一言（20〜40 字、です・ます調でなく"
+        "「〜だそうです」の形）に書き直してください。人名・住所・家族構成・体調・勤め先・年齢は入れない。"
+        "来訪者が言っていないことは足さない。"
+        '出力は JSON: {"text": "…"}'
+    )
+    # 規則で弾く語（書き直しに個人の事情が残っていたら保存しない）
+    banned_pattern: str = (
+        r"[一-龥々ァ-ヶ](さん|様|ちゃん|くん)|丁目|番地|号室|夫|妻|主人|嫁|息子|娘|孫|父|母|祖父|祖母|兄|姉|弟|妹|"
+        r"病|入院|手術|薬|体調|具合|介護|亡くな|葬|離婚|借金|\d{2,}-\d"
+    )
+    # 次の来訪者との雑談で、1 回の会話に 1 つまで紹介してよいと LLM に渡す文
+    offer_template: str = (
+        "【さっき来た方の話】{text}\n（雑談の流れに自然に合うときだけ、「さっき来た方が、〜って言ってましたよ」と"
+        "1 回だけ紹介してよい。合わなければ触れない）\n"
+    )
+    # 応答がこの割合以上、小ネタの文字 2-gram を含んでいたら「使った」とみなす
+    used_overlap: float = 0.4
+
+
+@dataclass(frozen=True)
+class StaffConfig:
+    """職員パネル（/staff/、LAN 内のみ、Basic 認証）の設定。"""
+
+    user: str = "staff"
+    # 環境変数 IDOBATA_STAFF_PASSWORD。空ならパネルは使えない
+    password: str = ""
+    poll_sec: int = 10
 
 
 @dataclass(frozen=True)
@@ -390,6 +616,11 @@ class AppConfig:
     speech_gate: SpeechGateConfig = field(default_factory=SpeechGateConfig)
     dialogue: DialogueConfig = field(default_factory=DialogueConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
+    actions: ActionsConfig = field(default_factory=ActionsConfig)
+    lookup: LookupConfig = field(default_factory=LookupConfig)
+    referral: ReferralConfig = field(default_factory=ReferralConfig)
+    staff: StaffConfig = field(default_factory=StaffConfig)
+    tidbit: TidbitConfig = field(default_factory=TidbitConfig)
     edge: EdgeConfig = field(default_factory=EdgeConfig)
 
 
@@ -431,7 +662,16 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     edge = EdgeConfig(
         ws_port=int(_parse_float(env, "IDOBATA_EDGE_WS_PORT", EdgeConfig.ws_port)),
         http_port=int(_parse_float(env, "IDOBATA_EDGE_HTTP_PORT", EdgeConfig.http_port)),
+        # 職員パネルを LAN から見るときは 0.0.0.0（アクセスは LAN 内のアドレスだけに絞る）
+        http_host=env.get("IDOBATA_EDGE_HTTP_HOST", EdgeConfig.http_host).strip() or EdgeConfig.http_host,
     )
+    actions = ActionsConfig(
+        avatar_name=env.get("IDOBATA_AVATAR_NAME", "").strip() or ActionsConfig.avatar_name)
+    lookup = LookupConfig(
+        web_search_enabled=env.get("IDOBATA_LOOKUP_WEB_SEARCH", "").strip().lower() in ("1", "true", "yes"))
+    referral = ReferralConfig(retention_days=int(_parse_float(
+        env, "IDOBATA_REFERRAL_RETENTION_DAYS", ReferralConfig.retention_days)))
+    staff = StaffConfig(password=env.get("IDOBATA_STAFF_PASSWORD", "").strip())
     dialogue = DialogueConfig(
         idle_timeout_sec=_parse_float(
             env, "IDOBATA_IDLE_TIMEOUT_SEC", DialogueConfig.idle_timeout_sec
@@ -447,6 +687,10 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         audio_output=audio_output,
         dialogue=dialogue,
         edge=edge,
+        actions=actions,
+        lookup=lookup,
+        referral=referral,
+        staff=staff,
     )
 
 

@@ -18,6 +18,7 @@ import asyncio
 import logging
 import sys
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Coroutine
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -26,15 +27,20 @@ from typing import Any
 import httpx
 import numpy as np
 
-from .asr_client import ASRClient, load_site_vocabulary
+from .actions import Conversation
+from .asr_client import ASRClient, language_name, load_site_vocabulary
 from .audio_input import EdgeAudioInput, MicrophoneInput, WavFileInput, list_audio_devices
-from .config import ConfigError, DeviceSpec, config, parse_device
+from .backchannel import BackchannelBank, BackchannelClip, strip_leading_backchannel
+from .config import SERVER_ROOT, ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue
 from .edge_bridge import EdgeBridge
-from .edge_server import EdgeServer
+from .edge_server import EdgeServer, StaffPanel
 from .knowledge import KnowledgeStore, Weather
 from .llm_client import LLMClient
-from .site_context import load_facility, load_site_words
+from .lookup import Lookup, close_browser
+from .procedures import AsrFixes, load_procedures
+from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
+from .site_context import load_facility, load_site_words, referral_csv_enabled
 from .speech_gate import SpeechGate
 from .speech_output import (
     EdgeSpeaker,
@@ -43,6 +49,7 @@ from .speech_output import (
     SpokenSentence,
     WavDirWriter,
 )
+from .timeofday import greeting_for
 from .tts_client import TTSClient
 from .vad import SpeechEventType, VADBackend, create_vad
 
@@ -62,6 +69,7 @@ class TurnTiming:
 
     t_speech_end: float
     t_asr_done: float = 0.0
+    t_backchannel: float = 0.0  # 相槌の再生開始（WP04）
     t_first_sentence: float = 0.0
     t_audio_start: float = 0.0
     t_llm_done: float = 0.0
@@ -76,6 +84,7 @@ class TurnTiming:
 
         return (
             f"ASR {at(self.t_asr_done)} / "
+            f"相槌開始 {at(self.t_backchannel)} / "
             f"検索 {'-' if self.search_ms is None else f'{self.search_ms:.0f}ms'} / "
             f"LLM 1文目確定 {at(self.t_first_sentence)} / "
             f"音声開始 {at(self.t_audio_start)} / "
@@ -108,11 +117,34 @@ class VoiceLoop:
             )
         )
         # 拠点の固定事実（facility）はプロンプトに直書き。知識パックは run() で読む（数秒かかる）
+        llm = LLMClient()
+        facility = load_facility(config.site, config.asr.site_context_dir)
         self._dialogue = Dialogue(
-            LLMClient(),
-            facility=load_facility(config.site, config.asr.site_context_dir),
+            llm,
+            facility=facility,
             weather=Weather.for_site(config.data_dir, config.site),
+            avatar_name=config.actions.avatar_name,
+            enabled_actions=config.actions.enabled,
         )
+        # 同意付きの行為（調べる・つなぐ）と来訪記録（WP04）
+        self._referrals = ReferralStore(config.data_dir, config.site, config.referral.retention_days,
+                                        csv_export=referral_csv_enabled(config.site))
+        self._visits = VisitLog(config.data_dir, config.site)
+        self._tidbits = TidbitStore(config.data_dir, config.site, config.tidbit.retention_days)
+        self._asr_fixes = AsrFixes(config.asr.site_context_dir, config.data_dir)
+        self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query)
+        self._conversation = Conversation(
+            self._dialogue, llm, config.llm.chat_model, config.actions, config.referral, facility,
+            load_tags(SERVER_ROOT / "context" / "tags.yaml"),
+            lookup=self._lookup,
+            referrals=self._referrals, visits=self._visits,
+            on_state=self._send_state, edge_id=self._edge_id,
+            tidbits=self._tidbits, tidbit_cfg=config.tidbit,
+            procedures=load_procedures(config.asr.site_context_dir),
+        )
+        self._llm = llm
+        self._backchannels = (BackchannelBank(config.actions.backchannel_path)
+                              if config.actions.backchannel_enabled else None)
         self._gate = SpeechGate(
             post_margin_sec=config.speech_gate.post_margin_sec,
             safety_margin_sec=config.speech_gate.safety_margin_sec,
@@ -126,8 +158,13 @@ class VoiceLoop:
         self._edge_server: EdgeServer | None = None
         if edge:
             self._edge = EdgeBridge(config.edge.ws_host, config.edge.ws_port)
+        # エッジのページと職員パネル（/staff/）は同じ HTTP サーバ。職員パネルだけでも立てる
+        if edge or config.staff.password:
             self._edge_server = EdgeServer(
-                config.edge.http_host, config.edge.http_port, config.edge.static_dir
+                config.edge.http_host, config.edge.http_port, config.edge.static_dir,
+                staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits,
+                                 tuple(d.name for d in (facility.departments if facility else ())),
+                                 self._asr_fixes),
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）
@@ -144,12 +181,20 @@ class VoiceLoop:
         # 固有名詞の読みを先に登録する（プリウォームの合成より前に）
         await self._tts.sync_user_dict(load_site_words(config.site, config.asr.site_context_dir))
         await self._tts.prewarm()
+        if self._backchannels is not None:
+            await self._backchannels.prepare(self._tts, config.actions.backchannel_prepare_budget_sec)
+        if "lookup" in config.actions.enabled:
+            await self._lookup.prepare()
+        removed = self._referrals.cleanup() + self._visits.cleanup() + self._tidbits.cleanup()
+        if removed:
+            logger.info("保存期間を過ぎた紹介状・来訪記録・小ネタを %d 件消しました", removed)
         await asyncio.to_thread(self._knowledge.reload_if_changed)
         self._dialogue.attach_knowledge(self._knowledge)
         self._spawn(self._watch_knowledge(), "kb-watch")
-        if self._edge is not None and self._edge_server is not None:
+        if self._edge is not None:
             self._edge.on_hello = self._on_edge_hello
             await self._edge.start()
+        if self._edge_server is not None:
             await self._edge_server.start()
         self._print_banner()
         idle_watch = asyncio.create_task(self._watch_idle(), name="idle-watch")
@@ -205,11 +250,11 @@ class VoiceLoop:
             if text in ("/quit", "/q", "/exit"):
                 break
             if text == "/reset":
-                self._dialogue.reset()
-                print("[履歴を消去しました]")
+                await self._conversation.end_session()
+                print("[会話を区切りました]")
                 continue
             self._last_utterance_at = time.monotonic()
-            await self._send_caption(text, role="user")
+            await self._send_caption(self._shown_user_text(text), role="user")
             await self._send_state("thinking")
             await self._respond_and_speak(text, "ja", None)
 
@@ -266,6 +311,9 @@ class VoiceLoop:
         segment_frames: list[np.ndarray] = []
         t_speech_start = 0.0
         was_muted = False
+        preroll_len = max(1, config.vad.segment_preroll_ms * config.vad.sample_rate
+                          // (1000 * config.vad.frame_size))
+        preroll: deque[np.ndarray] = deque(maxlen=preroll_len)
 
         async for frame in frames:
             # --- 自己発話ゲート（townhall と同じ） ---
@@ -278,6 +326,7 @@ class VoiceLoop:
                         )
                         vad.reset()
                     segment_frames = []
+                    preroll.clear()  # ミュート前の音（自分の声の直前）を次の発話に混ぜない
                     was_muted = True
                 continue
             if was_muted:
@@ -287,7 +336,8 @@ class VoiceLoop:
             event = vad.process_frame(frame)
             if event is not None:
                 if event.event_type == SpeechEventType.SPEECH_START:
-                    segment_frames = [frame]
+                    segment_frames = [*preroll, frame]
+                    preroll.clear()
                     t_speech_start = event.timestamp_sec
                     await self._send_state("listening")
                 elif event.event_type == SpeechEventType.SPEECH_END:
@@ -296,6 +346,8 @@ class VoiceLoop:
                     segment_frames = []
             elif vad.in_speech:
                 segment_frames.append(frame)
+            else:
+                preroll.append(frame)
 
     async def _on_segment(self, frames: list[np.ndarray], t_speech_start: float) -> None:
         """1 セグメントを ASR に掛け、確定テキストが出たら応答タスクを起こす。"""
@@ -304,8 +356,12 @@ class VoiceLoop:
         await self._send_state("thinking")
         final_text = ""
         language = "ja"
+        # 提案の返事待ちは短い発話（うん・はい）が多く、言語判定を誤りやすいので会話の言語に固定する
+        force = (language_name(self._conversation.language)
+                 if config.asr.force_language_on_reply and self._conversation.expects_short_reply
+                 else None)
         async for chunk in self._asr.transcribe_segment(
-            frames, t_speech_start, sample_rate=config.vad.sample_rate
+            frames, t_speech_start, sample_rate=config.vad.sample_rate, force_language=force
         ):
             if chunk.is_final:
                 final_text = chunk.text
@@ -317,8 +373,10 @@ class VoiceLoop:
 
         self._last_utterance_at = time.monotonic()
         self._asr.push_rolling_context(final_text)
-        print(f"[聞き取り:{language}] {final_text}")
-        await self._send_caption(final_text, role="user")
+        final_text = self._asr_fixes.apply(final_text)
+        shown = self._shown_user_text(final_text)
+        print(f"[聞き取り:{language}] {shown}")
+        await self._send_caption(shown, role="user")
         # 応答生成中も音声フレームの消費を止めない（マイクのキューが詰まらないように）
         task = asyncio.create_task(
             self._respond_and_speak(final_text, language, timing), name="turn"
@@ -341,7 +399,7 @@ class VoiceLoop:
         if last is None or now - last < timeout or self._turn_lock.locked():
             return False  # 応答中は区切らない（終わってから次の確認で区切る）
         self._last_utterance_at = None
-        self._dialogue.reset()
+        await self._conversation.end_session()  # 来訪記録を 1 行書いて、履歴を消す
         if self._asr is not None:
             self._asr.clear_rolling_context()
         logger.info("最後の発話から %.0f秒経ったため会話を区切りました（次の発話から新しい会話）",
@@ -381,9 +439,29 @@ class VoiceLoop:
             sink = self._open_sink()
             seq = 0
             muted = False
+            backchannel_word = ""
             try:
+                # 相槌: 聞き取りの確定直後、LLM の 1 文目を待たずに鳴らす（音声モードだけ）
+                if timing is not None and self._backchannels is not None:
+                    clip = await self._pick_backchannel(text)
+                    if clip is not None:
+                        self._gate.mute()
+                        muted = True
+                        timing.t_backchannel = timing.t_audio_start = time.monotonic()
+                        remaining = await sink.push(
+                            SpokenSentence(utterance_id, seq, clip.text, clip.wav, clip.query))
+                        seq += 1
+                        self._gate.mute(expected_sec=remaining)
+                        self._conversation.note_backchannel()
+                        backchannel_word = clip.text
                 while (sentence := await sentences.get()) is not None:
-                    print(f"[井戸端AI] {sentence}")
+                    if backchannel_word:  # 「はい、…」を相槌と重ねない
+                        sentence = strip_leading_backchannel(sentence, backchannel_word)
+                        backchannel_word = ""
+                        if not sentence:
+                            continue
+                    shown = self._conversation.redact(sentence)  # 読み上げは本物、画面とコンソールは伏せる
+                    print(f"[井戸端AI] {shown}")
                     try:
                         wav, query = await self._tts.synthesize_with_query(sentence)
                     except httpx.HTTPError:
@@ -396,7 +474,7 @@ class VoiceLoop:
                             timing.t_audio_start = time.monotonic()
                     try:
                         remaining = await sink.push(
-                            SpokenSentence(utterance_id, seq, sentence, wav, query)
+                            SpokenSentence(utterance_id, seq, shown, wav, query)
                         )
                     except Exception:
                         logger.warning("音声を流せません。この文はスキップします。", exc_info=True)
@@ -431,7 +509,7 @@ class VoiceLoop:
     ) -> None:
         """LLM の応答を文に切って out に積む。最後に None を積む。"""
         try:
-            async for sentence in self._dialogue.respond(text, language):
+            async for sentence in self._conversation.respond(text, language):
                 if timing is not None and not timing.t_first_sentence:
                     timing.t_first_sentence = time.monotonic()
                 await out.put(sentence)
@@ -450,6 +528,33 @@ class VoiceLoop:
         print(f"[出典] {' / '.join(titles)}")
         if self._edge is not None:
             await self._edge.send_json({"type": "sources", "titles": titles})
+
+    async def _pick_backchannel(self, text: str) -> BackchannelClip | None:
+        assert self._backchannels is not None
+        if self._conversation.phase != "listen":
+            return None  # 提案への返事（「うん」など）には相槌を打たない
+        chosen = self._backchannels.choose(text, greeting_for())
+        if chosen is None:
+            return None
+        return await self._backchannels.get(self._tts, *chosen)
+
+    async def _make_lookup_query(self, text: str) -> str | None:
+        """調べるための検索語（LLM が作る。本人の事情・氏名は含めない。ログに出さない）。"""
+        try:
+            raw = await asyncio.to_thread(
+                self._llm.chat, config.llm.chat_model,
+                [{"role": "system", "content": config.lookup.query_prompt},
+                 {"role": "user", "content": text}],
+                max_tokens=config.lookup.query_max_tokens, temperature=0.0,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+        except Exception:
+            logger.warning("検索語を作れませんでした", exc_info=True)
+            return None
+        return self._dialogue.safe_query(raw)
+
+    def _edge_id(self) -> str:
+        return self._edge.edge_id if self._edge is not None else ""
 
     def _open_sink(self) -> SpeechSink:
         """1 応答ぶんの出力先を作る。"""
@@ -485,6 +590,11 @@ class VoiceLoop:
             await asyncio.sleep(config.knowledge.reload_check_sec)
             await asyncio.to_thread(self._knowledge.reload_if_changed)
 
+    def _shown_user_text(self, text: str) -> str:
+        """字幕・コンソールに出す来訪者の言葉（氏名・地区・電話番号の答えは「お名前：伺いました」）。"""
+        label = self._conversation.private_label
+        return f"{label}：伺いました" if label else self._conversation.redact(text)
+
     async def _send_state(self, value: str) -> None:
         if self._edge is not None:
             await self._edge.send_state(value)
@@ -495,6 +605,8 @@ class VoiceLoop:
 
     async def _shutdown(self) -> None:
         await self._drain_turns()
+        await self._conversation.end_session()
+        await close_browser()
         if self._asr is not None:
             await self._asr.close()
         await self._tts.close()

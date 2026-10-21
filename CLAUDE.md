@@ -44,7 +44,21 @@
 - Qwen3 の思考モードは既定オフ（サーバに `--reasoning-parser` を付けず、リクエストで `chat_template_kwargs.enable_thinking=false`）
 - 拠点（`IDOBATA_SITE=etajima|akiota`）で `server/context/<site>.yaml` を選ぶ。語彙（ASR バイアシング・VOICEVOX 辞書）と
   `facility`（施設名・開庁時間・課と担当と階・緊急連絡先。**市町の公式サイトで確認したものだけ**）を持つ
-- 知識パックは `~/idobata-data/kb/<site>/`（`kb/build.py` で作る。窓口機はネットに出ないので、作るのはネットにつながる機体）
+- 知識パックは `~/idobata-data/kb/<site>/`（`kb/build.py` で作る）
+- ネットワーク: **窓口機から許可ドメインへの取得は可。会話・音声・映像は送らない**（2026-10-21 改定）。
+  外に出るのは知識パックの取得と、「調べる」（WP04）の検索語だけ。許可ドメインは `kb/sources/<site>.yaml`。
+  一般のウェブ検索（`IDOBATA_LOOKUP_WEB_SEARCH`）は既定オフ
+- 同意付きの行為（WP04）: LLM が応答の末尾に `<propose:lookup|refer|share>` を付け、決まった文で提案し、
+  返事は規則で判定する（`server/context/actions.yaml`）。相槌は `server/context/backchannel.yaml`、
+  紹介状のタグは統制語彙 `server/context/tags.yaml`。紹介状の担当課は規則だけで決める（`server/context/procedures.yaml` の
+  別名表で発話と `facility.departments[].handles` を突き合わせ、一意でなければ「未特定」で保存して職員が職員パネルで付ける。
+  来訪者に課を聞き返さない・LLM に課を推測させない）。procedures.yaml は ASR の語彙（先頭に置く）・VOICEVOX 辞書・
+  聞き取り間違いの対応表（asr_fixes。職員パネルから足した行は `~/idobata-data/asr_fixes.jsonl`）にも使う。
+  紹介状の同意の後は、手続きごとの聞き取り（procedures.yaml の intake、最大 3 問）→ お名前・地区・連絡方法を伺う。
+  **氏名・地区・電話番号は字幕・エッジ画面・コンソール・ログに出さない**（「お名前：伺いました」と伏せる。保存は紹介状 JSON だけ）
+- 挨拶は時間帯で変える（`src/timeofday.py`。5〜10 時 おはようございます、10〜17 時 こんにちは、17 時以降 こんばんは）。
+  応答・相槌・定型文（`{greeting}`）・アナウンスで同じ判定を使い、LLM が別の時間帯の挨拶を言ったら読み上げ前に直すASR は返事待ちの間だけ言語を固定する
+  （`deploy/standalone/asr/chat_template.jinja` の `force_language`）
 
 ## 起動・テスト
 
@@ -67,10 +81,19 @@ CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajim
 CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajima --daily   # 更新の速い区画だけ（差分）
 bash ../deploy/standalone/install-kb-timers.sh   # 自動更新（毎朝 6:00 差分・毎週日曜 3:00 全体・毎時 05 分天気。有効化済み）
 uv run python -m tests.eval.run --site etajima   # 評価セット 20 問（LLM と知識パックを使う）
+uv run python -m tests.eval.run --site etajima --set smalltalk   # 雑談 10 問（締めの定型で終わる割合を数える）
 
 # エッジ（ブラウザ）モード: マイク・スピーカー・アバターはブラウザ側
 (cd ../edge && npm ci && npm run build)    # 初回と edge/ を変えたとき。成果物は server/static/edge/
 uv run python -m src.main --mode voice --edge   # → Chrome で http://localhost:8080/edge/ を開き「はじめる」
+
+# WP04: 職員パネル・行為（.env で設定。職員パネルは IDOBATA_STAFF_PASSWORD を入れたときだけ有効）
+#   IDOBATA_AVATAR_NAME=いどちゃん          アバターの呼び名（仮）
+#   IDOBATA_STAFF_PASSWORD=...              /staff/ の Basic 認証（ユーザー staff）。LAN からだけ開ける
+#   IDOBATA_EDGE_HTTP_HOST=0.0.0.0          職員の PC から /staff/ を開くとき（既定は 127.0.0.1）
+#   IDOBATA_REFERRAL_RETENTION_DAYS=30      紹介状の保存日数（起動時に古いものを消す。0 で前日以前を消す）
+#   IDOBATA_LOOKUP_WEB_SEARCH=0             一般のウェブ検索（既定オフ。評価では使わない）
+uv run python -m src.main --mode voice --edge   # → 職員は http://<窓口機>:8080/staff/ （10 秒ごとに更新）
 
 # 品質
 uv run pytest
@@ -85,6 +108,7 @@ uv run ruff check
 
 ## コーディング規約
 
+- **報告・コミットメッセージ・結果文書（docs/WP*_result.md）は日本語で書く**
 - 型ヒント必須（mypy strict が通ること）
 - docstring・コメントは日本語でよい
 - 設定は `server/src/config.py` に集約（dataclass）。マジックナンバー散在禁止
@@ -117,11 +141,17 @@ server/
 │   ├── speech_output.py  # 応答音声の出力先（LocalSpeaker / WavDirWriter / EdgeSpeaker）
 │   ├── lipsync.py        # audio_query → 口形の時系列（音素同期の口パク）
 │   ├── edge_bridge.py    # エッジとの WebSocket（JSON + PCM/WAV バイナリ、8765）
-│   ├── edge_server.py    # エッジページの静的配信（FastAPI、8080 /edge/）
+│   ├── edge_server.py    # エッジページの静的配信（FastAPI、8080 /edge/）と職員パネル（/staff/、Basic 認証・LAN のみ）
+│   ├── backchannel.py    # 相槌（事前合成、発話の種類で選ぶ）
+│   ├── actions.py        # 同意付きの行為（提案 → 返事 → 実行）と来訪記録
+│   ├── lookup.py         # 調べる（許可ドメインだけ・5 秒で打ち切り・見つからなければ夜のビルドに回す）
+│   ├── referrals.py      # 紹介状（受付番号・保存・期限・安芸太田は CSV）、来訪記録、小ネタ、今日の集計
+│   ├── procedures.py     # 手続きの常用語（procedures.yaml）と担当課の規則による決定
 │   ├── caption_feed.py   # 字幕配信（WP03 で使用予定）
 │   ├── announcer.py      # テンプレート発話（未使用）
 │   └── main.py           # text / voice の 2 モード、--edge
 ├── static/edge/          # edge/ のビルド成果物（git 管理外）
+├── static/staff.html     # 職員パネル
 └── tests/
 kb/                       # 知識パックのビルド（sources/<site>.yaml、build.py、README.md。pack/ は git 管理外）
 edge/                     # エッジページ（Vite + TypeScript、three.js + @pixiv/three-vrm）
@@ -150,7 +180,10 @@ edge/                     # エッジページ（Vite + TypeScript、three.js + 
 - Ollama（localhost:11434）を参照する、Whisper / faster-whisper を依存に追加する
 - `pip install` を直接実行する（uv を使う。`uv add` / `uv run`）
 - `sudo` を使う（必要な手順に当たったら、実行せず手順を書き出して止まる）
-- 会話ログ・音声・映像をディスクに保存する（会話はプロセス内のみ。録音しない。フレームを保存しない）
+- 会話ログ・音声・映像をディスクに保存する（会話はプロセス内のみ。録音しない。フレームを保存しない）。
+  **例外（WP04）: 本人が同意した紹介状（`~/idobata-data/referrals/`、既定 30 日）と匿名の小ネタ
+  （`tidbits/`、7 日）、本文を含まない匿名の来訪記録（`visits/`、1 年）だけは保存してよい**。
+  保持期間は設定で持ち、起動時に期限切れを消す
 - `192.168.11.3`（townhall の社内サーバ）をコード・設定・文書に書く
 - Live2D 関連（モデル・SDK・Unity プロジェクト）を持ち込む。アバターは three.js + three-vrm（WP01）
 - `~/src/townhall-assistant` を変更する

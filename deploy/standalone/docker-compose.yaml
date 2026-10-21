@@ -67,6 +67,12 @@ services:
       - "1024"
       - "--limit-mm-per-prompt"
       - '{"audio": 1}'
+      # 返事待ちの間だけ言語を固定できるテンプレート（force_language を足しただけ）
+      - "--chat-template"
+      - "/templates/asr_chat_template.jinja"
+    volumes:  # <<: の volumes は上書きされるので HF キャッシュも書く
+      - "${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/root/.cache/huggingface"
+      - ./asr/chat_template.jinja:/templates/asr_chat_template.jinja:ro
 
   llm:
     <<: *vllm-common

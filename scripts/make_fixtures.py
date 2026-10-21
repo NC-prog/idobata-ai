@@ -1,6 +1,6 @@
 """井戸端AI のテスト音声（server/tests/fixtures/*.wav）を VOICEVOX で合成する。
 
-来訪者役の発話 3 本（挨拶・手続きの質問・雑談）を作る。会議音声など実在の録音は使わない。
+来訪者役の発話（挨拶・手続きの質問・雑談、WP04 の行為の往復）を作る。会議音声など実在の録音は使わない。
 応答側（井戸端AI）の声は四国めたん（speaker 2）なので、来訪者役は別の話者にしている。
 
 使い方（VOICEVOX が 127.0.0.1:50021 で起動していること）:
@@ -62,6 +62,41 @@ UTTERANCES: tuple[Utterance, ...] = (
         speaker_id=13,
         speaker_name="青山龍星",
         text="最近、急に寒くなりましたね。朝晩は特に冷えますよ。",
+    ),
+    # WP04: 同意付き行為（調べる・つなぐ）の往復。春日部つむぎの「うん」は ASR が聞き取れない
+    # （「が」「がん」になる）ので、別の話者にしている
+    Utterance(
+        filename="visitor_event_ja.wav",
+        speaker_id=14,
+        speaker_name="冥鳴ひまり",
+        text="今週末は道の駅で何かやってますか。",
+    ),
+    Utterance(filename="visitor_yes_ja.wav", speaker_id=14, speaker_name="冥鳴ひまり", text="うん。"),
+    Utterance(filename="visitor_no_ja.wav", speaker_id=14, speaker_name="冥鳴ひまり", text="いらない。"),
+    Utterance(
+        filename="visitor_kokuho_ja.wav",
+        speaker_id=11,
+        speaker_name="玄野武宏",
+        text="国保の切り替えで聞きたいことがあって。",
+    ),
+    Utterance(filename="visitor_onegai_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="お願いします。"),
+    # WP04: 紹介状の聞き取り（同意の後）。名前・電話番号は架空
+    Utterance(filename="visitor_intake_reason_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="会社を退職したので。"),
+    Utterance(filename="visitor_intake_when_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="来月からです。"),
+    Utterance(filename="visitor_intake_self_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="本人です。"),
+    Utterance(filename="visitor_name_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="山田です。"),
+    Utterance(filename="visitor_hai_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="はい。"),
+    Utterance(filename="visitor_area_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="能美町です。"),
+    Utterance(filename="visitor_contact_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="電話でお願いします。"),
+    Utterance(filename="visitor_phone_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="ゼロキューゼロの、イチニーサンヨンの、ゴーロクナナハチです。"),
+    Utterance(
+        filename="visitor_trouble_ja.wav",
+        speaker_id=13,
+        speaker_name="青山龍星",
+        text="ちょっと困ったことがあって。",
     ),
 )
 

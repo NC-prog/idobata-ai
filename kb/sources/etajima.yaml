@@ -198,3 +198,13 @@ crawl:
   respect_robots: true
   max_pages: 1000
   max_fetches: 2500
+
+# ---- 調べる（WP04 A-3）。来訪者が同意したときに、その場で見に行く先（許可ドメインだけ）----
+# type: search はサイト内検索（{q} に検索語）、type: list は一覧・フィード（リンクの文言で選ぶ）。
+# 市のサイト内検索は Google のカスタム検索（外部）なので使わない。一覧・フィードで探す
+lookup:
+  - {name: 市の新着のお知らせ, type: list, url: "https://www.city.etajima.hiroshima.jp/cms/atom/news"}
+  - {name: 市の行事, type: list, url: "https://www.city.etajima.hiroshima.jp/cms/atom/events"}
+  - {name: 市の催し・イベントカレンダー, type: list, url: "https://www.city.etajima.hiroshima.jp/cms/calendars"}
+  - {name: 観光協会のイベント, type: list, url: "https://etajima-kanko.com/event", render: playwright, trust: semi, label: 観光協会のホームページ}
+  - {name: 市立図書館のサイト内検索, type: search, url: "https://www.library.etajima.hiroshima.jp/?s={q}", trust: official, label: 市立図書館のホームページ}

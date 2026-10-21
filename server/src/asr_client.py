@@ -105,6 +105,14 @@ def _detect_language(raw: str) -> str | None:
     return None
 
 
+def language_name(code: str) -> str | None:
+    """ISO 639-1 コードを ASR の言語名（force_language に渡す形）に変換する。未知なら None。"""
+    for name, c in _LANG_NAME_TO_CODE.items():
+        if c == code:
+            return name.capitalize()
+    return None
+
+
 def _language_code(detected: str | None) -> str:
     """ASR の言語名を ISO 639-1 コードに変換する。
 
@@ -145,7 +153,7 @@ def load_site_vocabulary(site: str, context_dir: Path) -> list[str]:
     YAML の書式は ``site_context.load_site_words`` を参照（読み付きの語は表記だけを使う）。
     ファイルが無い・壊れている場合は空リストを返す（ASR は語彙なしで動く）。
     """
-    return [w.surface for w in load_site_words(site, context_dir)]
+    return [w.surface for w in load_site_words(site, context_dir) if w.asr]
 
 
 class ASRClient:
@@ -157,6 +165,7 @@ class ASRClient:
 
         # 静的コンテキスト（拠点の語彙、set_static_context で設定）
         self._static_context: str = ""
+        self._vocabulary: list[str] = []
 
         # ローリングコンテキスト（直前の確定転写バッファ）
         self._rolling_segments: list[str] = []
@@ -171,8 +180,10 @@ class ASRClient:
         """
         if not self._cfg.context_biasing or not vocabulary:
             self._static_context = ""
+            self._vocabulary = []
             return
 
+        self._vocabulary = list(vocabulary)
         self._static_context = "Proper nouns: " + ", ".join(vocabulary)
         logger.info("ASR 静的コンテキスト設定: %d 語, %d 文字",
                     len(vocabulary), len(self._static_context))
@@ -217,6 +228,7 @@ class ASRClient:
         audio_frames: list[np.ndarray],
         t_speech_start: float,
         sample_rate: int = 16000,
+        force_language: str | None = None,
     ) -> AsyncIterator[TranscriptChunk]:
         """音声セグメントをストリーミング文字起こしする。
 
@@ -224,6 +236,8 @@ class ASRClient:
             audio_frames: VAD で蓄積された音声フレームのリスト
             t_speech_start: 発話開始時の monotonic 時刻
             sample_rate: サンプリングレート
+            force_language: 言語を固定する場合の言語名（例: "Japanese"）。返事待ちの短い発話用。
+                ASR サーバのテンプレート（deploy/standalone/asr/chat_template.jinja）が要る
 
         Yields:
             TranscriptChunk (partial/final)
@@ -237,7 +251,9 @@ class ASRClient:
         messages: list[dict[str, Any]] = []
 
         # システムプロンプト（コンテキストバイアシング）
-        system_prompt = self._build_system_prompt()
+        # 言語を固定する返事待ち（うん・はい）は語彙が要らない。短い音声に語彙を添えると、
+        # 語彙の一覧をそのまま吐き出すことがある
+        system_prompt = None if force_language else self._build_system_prompt()
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
 
@@ -257,8 +273,11 @@ class ASRClient:
             "messages": messages,
             "temperature": self._cfg.temperature,
         }
+        if force_language:
+            payload["chat_template_kwargs"] = {"force_language": force_language}
 
-        collected = ""
+        # 言語を固定したときは、言語ヘッダーがプロンプト側にあるので出力に現れない
+        collected = f"language {force_language}<asr_text>" if force_language else ""
         language = DEFAULT_LANGUAGE
         language_checked = False
 
@@ -322,11 +341,14 @@ class ASRClient:
 
         # ストリーム完了 → final チャンク
         final_text = _clean_streaming_text(collected)
-        if final_text and self._is_context_echo(final_text):
+        if final_text and self._is_vocabulary_dump(final_text):
+            logger.warning("ASR 出力が語彙の一覧のため破棄しました（コンテキストの吐き出しの疑い）")
+        elif final_text and self._is_context_echo(final_text):
             logger.warning(
                 "ASR 出力が直前の確定転写とほぼ同じため破棄しました（コンテキストの吐き出しの疑い）"
             )
-            logger.debug("破棄した ASR 出力: %s", final_text)
+            # 本文は出さない（氏名・電話番号の答えかもしれない。WP04）
+            logger.debug("破棄した ASR 出力: %d 文字", len(final_text))
         elif final_text:
             self._recent_finals.append(final_text)
             yield TranscriptChunk(
@@ -338,6 +360,11 @@ class ASRClient:
             )
         else:
             logger.warning("ASR が空のテキストを返しました")
+
+    def _is_vocabulary_dump(self, text: str) -> bool:
+        """静的コンテキストの語彙を並べただけの出力か（短い・曖昧な音声で起きる）。"""
+        hits = sum(1 for w in self._vocabulary if w in text)
+        return hits >= self._cfg.vocabulary_dump_min_words
 
     def _is_context_echo(self, text: str) -> bool:
         """直前の確定転写のいずれか（またはそれらをつなげたもの）の焼き直しか。"""
