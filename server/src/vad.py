@@ -51,6 +51,10 @@ class VADBackend(Protocol):
         """内部状態をリセットする。"""
         ...
 
+    def set_threshold(self, threshold: float) -> None:
+        """発話判定のしきい値を変える（返事待ちの間だけ下げる。WP05）。"""
+        ...
+
 
 class SileroVAD:
     """Silero VAD をラップする実装。
@@ -184,6 +188,10 @@ class SileroVAD:
     def in_speech(self) -> bool:
         """現在発話中かどうか。"""
         return self._in_speech
+
+    def set_threshold(self, threshold: float) -> None:
+        """発話判定のしきい値を変える（発話の終わりは しきい値 − 0.15 で判定される）。"""
+        self._iterator.threshold = threshold
 
 
 def create_vad(cfg: VADConfig) -> SileroVAD:

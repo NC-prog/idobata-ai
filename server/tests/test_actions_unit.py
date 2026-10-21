@@ -68,8 +68,9 @@ def test_backchannel_rules_rotate_and_skip_short_replies() -> None:
     first = bank.choose("住民票はどこで取れますか")
     second = bank.choose("いつ開いてますか")
     assert first is not None and second is not None and first[0] != second[0]  # 同じ相槌を続けない
-    assert bank.choose("母が亡くなって、つらくて") == ("ええ", 0.6)  # 打ち明けは間を長く
-    assert bank.choose("今日は寒いですね")[0] in ("ええ", "ほんとに")  # type: ignore[index]
+    assert bank.choose("母が亡くなって、つらくて") == ("そうでしたか", 0.6)  # 打ち明けは間を長く
+    assert bank.choose("今日は寒いですね")[0] in ("そうですか", "なるほど", "ほんとに")  # type: ignore[index]
+    assert all(w != "ええ" for w, _ in bank.all_variants())  # 「ええ」は実機で不自然だった（WP05）
 
 
 def test_strip_leading_backchannel() -> None:

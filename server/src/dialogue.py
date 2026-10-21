@@ -22,7 +22,7 @@ from typing import Any, Protocol
 
 from .config import DialogueConfig, config
 from .knowledge import JST, Reference, SearchResult, Weather
-from .persona import build_system_prompt, build_turn_message, source_labels, this_weekend
+from .persona import Persona, build_system_prompt, build_turn_message, source_labels, this_weekend
 from .site_context import Facility
 from .timeofday import fix_greeting, greeting_for
 
@@ -46,6 +46,10 @@ _SOURCE_MARK_RE = re.compile(
 
 # 印を取ったあとに残る句読点の前の空白
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"[ \u3000]+([。、！？!?])")
+# 読み上げない括弧書き（全角・半角。入れ子は外側ごと）
+_PAREN_RE = re.compile(r"[（(][^（）()]*[）)]|[（(][^（）()]*[（(][^（）()]*[）)][^（）()]*[）)]")
+# おうむ返しを捨てた後に残る、文の頭の助詞・つなぎ
+_LEADING_PARTICLE_RE = re.compile(r"^(と聞かれると|とおっしゃると)[、,]?\s*|^(って|とは|は|が|を|に|も)[、,]\s*")
 # 来訪者の言葉の繰り返しを比べるときに無視する文字
 _ECHO_IGNORE_RE = re.compile(r"[\s、。，．,.！？!?「」『』…ー〜~]")
 
@@ -200,6 +204,11 @@ def _is_non_japanese_kanji(ch: str) -> bool:
 _ZEN_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
+def speech_text(sentence: str) -> str:
+    """読み上げる文（括弧書きは字幕だけに残し、読み上げない）。"""
+    return re.sub(r"\s+", " ", _PAREN_RE.sub("", sentence)).strip()
+
+
 def ends_with_closing(reply: str, cfg: DialogueConfig) -> bool:
     """応答の最後の文（こちらで足す出典の一言は除く）が締めの定型か。"""
     sentences = [x for x in re.split(r"(?<=[。！？!?])", reply) if x.strip()]
@@ -223,6 +232,7 @@ class Dialogue:
         now: Callable[[], datetime] = lambda: datetime.now(JST),
         avatar_name: str = "",
         enabled_actions: tuple[str, ...] = (),
+        persona: Persona | None = None,
     ) -> None:
         self._llm = llm
         self._cfg = cfg or config.dialogue
@@ -232,6 +242,7 @@ class Dialogue:
         self._weather = weather
         self._avatar_name = avatar_name
         self._enabled_actions = enabled_actions
+        self._persona = persona
         # 直近の応答が出した行為の提案（<propose:…>）。無ければ None
         self.last_proposal: str | None = None
         self._now = now
@@ -276,7 +287,7 @@ class Dialogue:
         weather = self._weather.lines(now) if self._weather is not None else []
         system = build_system_prompt(self._cfg, self._facility, now.date(), weather,
                                      self._avatar_name, self._enabled_actions,
-                                     greeting_for(now, self._cfg))
+                                     greeting_for(now, self._cfg), self._persona)
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for user, assistant in self._history:
             messages.append({"role": "user", "content": user})
@@ -345,6 +356,14 @@ class Dialogue:
         refs = list(extra_refs) if extra_refs is not None else await self._search(text)
         if extra_refs is not None:
             self.last_references, self.last_search_ms = refs, None
+        place = self._unknown_place(text, refs)
+        if place is not None:
+            # 地区・町の様子を聞かれたのに資料が無い: 様子を作らず、教えてもらう（人物像の「土地勘がまだ薄い」）
+            reply = self._cfg.unknown_place_reply.format(place=place)
+            logger.info("資料の無い地区の様子を聞かれたので、教えてもらう文で返します")
+            self._history.append((text, reply))
+            yield reply
+            return
         messages = self.build_messages(text, language, refs, hint)
         logger.debug("発話 [%s]: %s", language, text)
         splitter = SentenceSplitter(
@@ -358,13 +377,18 @@ class Dialogue:
         previous = {_ECHO_IGNORE_RE.sub("", x) for _, reply in self._history
                     for x in re.split(r"(?<=[。！？!?])", reply)}
         sentences: list[str] = []
+        dropped_echo = False
         cited: set[int] = set()
         try:
             async for delta in self._stream(messages):
                 for raw in splitter.feed(think.feed(delta)):
                     sentence = await self._finish_sentence(raw, cited)
                     if self._drop(sentence, text, sentences, previous):
+                        dropped_echo = dropped_echo or not sentences
                         continue
+                    if dropped_echo and not sentences:
+                        # おうむ返しの断片を捨てた後の続き（「は、保健医療課で…」）の頭の助詞を外す
+                        sentence = _LEADING_PARTICLE_RE.sub("", sentence)
                     if sentence:
                         sentences.append(sentence)
                         yield sentence
@@ -376,13 +400,16 @@ class Dialogue:
             # 言いかけの残りは捨て、言えた文だけを履歴に積む
         else:
             tail = await self._finish_sentence(splitter.flush(), cited)
+            if tail and dropped_echo and not sentences:
+                tail = _LEADING_PARTICLE_RE.sub("", tail)
             # 何も言っていないときの最後の文は捨てない（応答が空になる）
             if tail and (not sentences or not self._drop(tail, text, sentences, previous)):
                 sentences.append(tail)
                 yield tail
         self.last_cited = [refs[i - 1] for i in sorted(cited) if 0 < i <= len(refs)]
         already = any(self._mentions_source_re.search(x) for x in sentences)
-        if self.last_cited and not already:
+        # 出典の一言は、応答が資料の中身を実際に使ったときだけ（雑談に関係の薄い資料の番号が付いても足さない）
+        if self.last_cited and not already and self._uses_references(sentences, self.last_cited):
             # 出典の一言は、使った資料の出どころから決めて足す（「観光協会のホームページ」など）。
             # 応答がすでに「〇〇のホームページに載っています」と言っていれば重ねない
             line = self._cfg.source_sentence.format(
@@ -401,10 +428,66 @@ class Dialogue:
         self._history.append((text, reply))
         logger.debug("応答: %s", reply)
 
+    def _fix_department_floor(self, sentence: str) -> str:
+        """「1階の保健医療課」「税務課（2階）」「市民課は2階」の階を、施設の事実の階に直す。"""
+        for d in (self._facility.departments if self._facility else ()):
+            if not d.floor or d.name not in sentence:
+                continue
+            n, floor = re.escape(d.name), d.floor.replace("\\", "")
+            fixed = re.sub(rf"[0-9０-９一二三四五]階(の|にある)({n})", rf"{floor}\g<1>\g<2>", sentence)
+            fixed = re.sub(rf"({n})(（|\(|は|が)[0-9０-９一二三四五]階", rf"\g<1>\g<2>{floor}", fixed)
+            if fixed != sentence:
+                logger.info("課の階を施設の事実に直しました（%s）", d.name)
+                sentence = fixed
+        return sentence
+
+    def _department_directions(self, sentence: str) -> bool:
+        """課の名前と道順の言い方が同じ文にあるか（道順は作らない決まり）。"""
+        if not re.search(self._cfg.direction_pattern, sentence):
+            return False
+        return any(d.name in sentence for d in (self._facility.departments if self._facility else ()))
+
+    def _unknown_place(self, text: str, refs: list[Reference]) -> str | None:
+        """「〇〇ってどんなところ？」で参考資料が無ければ、その地名（無ければ「そちら」）。"""
+        if refs:
+            return None
+        m = re.search(self._cfg.place_question_pattern, text)
+        if m is None:
+            return None
+        return m.group("place").strip("、。 ") or "そちら"
+
+    def _contradicts_persona(self, sentence: str) -> bool:
+        return self._persona is not None and any(c in sentence for c in self._persona.contradictions)
+
+    def _unasked_self_intro(self, sentence: str, user_text: str) -> bool:
+        name = self._avatar_name
+        if not name or re.search(self._cfg.name_question_pattern, user_text):
+            return False
+        return re.fullmatch(rf"(はい、)?{re.escape(name)}(です|と申します|といいます)[。！!]?", sentence.strip()) is not None
+
+    def _uses_references(self, sentences: list[str], refs: list[Reference]) -> bool:
+        reply = _ECHO_IGNORE_RE.sub("", "".join(sentences))
+        body = _ECHO_IGNORE_RE.sub("", "".join(f"{r.title}{r.text}" for r in refs))
+        n = self._cfg.source_overlap_ngram
+        grams = {reply[i:i + n] for i in range(len(reply) - n + 1)}
+        if not grams:
+            return False
+        hit = sum(1 for g in grams if g in body) / len(grams)
+        if hit < self._cfg.source_min_overlap:
+            logger.info("応答が資料の中身をほとんど使っていないので、出典の一言は足しません（%.2f）", hit)
+            return False
+        return True
+
     def _drop(self, sentence: str, text: str, said: list[str], previous: set[str]) -> bool:
         """読み上げない文か（おうむ返し・これまでと同じ文・重ねた「お困りのことは」の類）。"""
         if not sentence:
             return False
+        if self._contradicts_persona(sentence):
+            logger.info("人物像と食い違う文（生まれ・育ちなど）を読み上げずに捨てました")
+            return True
+        if self._unasked_self_intro(sentence, text):
+            logger.info("聞かれていないのに名乗る文を読み上げずに捨てました")
+            return True
         if not said and self._is_echo(sentence, text):
             logger.info("来訪者の言葉を繰り返す文を読み上げずに捨てました")
             return True
@@ -504,10 +587,18 @@ class Dialogue:
         raw = _PROPOSE_RE.sub(propose, raw)
         sentence = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", _SOURCE_MARK_RE.sub(take, raw)).strip()
         sentence = fix_greeting(sentence, greeting_for(self._now(), self._cfg), self._cfg)
+        if self._avatar_name:  # 「いどちゃん: こんばんは」のような話者名は外す
+            # 「いどちゃん: …」「いどちゃんは、…」「いどちゃん物忘れが…」の頭の名前を外す（「いどちゃんです」は残す）
+            name = re.escape(self._avatar_name)
+            sentence = re.sub(rf"^{name}\s*(?:[:：、]|[はも]、)\s*|^{name}(?=[一-龥ァ-ヶ])", "", sentence)
         for old, new in self._cfg.leak_replacements:
             sentence = sentence.replace(old, new)
         if self._llm_source_re.search(sentence):
             return ""  # 出典の一言はこちらで足す
+        sentence = self._fix_department_floor(sentence)
+        if self._department_directions(sentence):
+            logger.info("課への道順を作った文を読み上げずに捨てました")
+            return ""
         unknown = self._unknown_facility_location(sentence)
         if unknown is not None:
             logger.info("館内の設備（%s）の場所を作った文を差し替えます", unknown)

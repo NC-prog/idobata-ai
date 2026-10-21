@@ -190,6 +190,11 @@ class Conversation:
         return "listen" if self._pending is None else self._pending.phase
 
     @property
+    def session_language(self) -> str | None:
+        """会話が始まっていればその言語（最初の発話の言語）。始まっていなければ None。"""
+        return self._session.language if self._session is not None and self._session.turns else None
+
+    @property
     def language(self) -> str:
         """返事待ちの行為の言語（無ければ会話の言語、まだ無ければ ja）。"""
         if self._pending is not None:
@@ -339,12 +344,17 @@ class Conversation:
         return None
 
     def _share_fits(self, text: str) -> bool:
-        """覚えておくの提案に合う雑談か（尋ねていない・手続きでない・個人の事情の語が無い・1 会話 1 回）。"""
+        """覚えておくの提案に合う雑談か（尋ねていない・手続きでない・個人の事情の語が無い・1 会話 1 回）。
+
+        地域の季節の話題か、案内役が「教えていただけますか」と聞き返したのに来訪者が答えたとき（WP05）。
+        """
         if not self._available("share") or self._session is None:
             return False
         if any(p.get("action") == "share" for p in self._session.proposals):
             return False
-        return (re.search(self._cfg.share_fallback_topic, text) is not None
+        taught = bool(self._turns) and re.search(self._cfg.teach_request_pattern, self._turns[-1][1]) is not None
+        long_enough = len(re.sub(r"[\s、。！？!?]", "", text)) > self._cfg.reply_max_chars
+        return ((re.search(self._cfg.share_fallback_topic, text) is not None or (taught and long_enough))
                 and not self._known_tidbit(text)
                 and not re.search(self._cfg.question_pattern, text.strip())
                 and not re.search(self._ref_cfg.procedure_pattern, text)

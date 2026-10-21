@@ -250,7 +250,7 @@ async def test_short_or_allowed_ascii_is_kept() -> None:
 async def test_source_marker_is_stripped_and_cited() -> None:
     from src.knowledge import Reference
 
-    refs = [Reference("資料1", "https://example.jp/1", "本文", 0.9, 1.0, "official", "市のホームページ"),
+    refs = [Reference("資料1", "https://example.jp/1", "秋祭りは土曜日です。", 0.9, 1.0, "official", "市のホームページ"),
             Reference("資料2", "https://example.jp/2", "本文", 0.9, 1.0, "semi", "観光協会のホームページ"),
             Reference("資料3", "https://example.jp/3", "本文", 0.9, 1.0, "semi", "観光協会のホームページ")]
 
@@ -410,7 +410,7 @@ async def test_past_event_refs_dropped_for_date_questions() -> None:
 async def test_bracketless_source_marker_is_stripped() -> None:
     from src.knowledge import Reference, SearchResult
 
-    ref = Reference("印鑑登録の手続き", "u", "本文", 0.9, 1.0, "official", "市のホームページ")
+    ref = Reference("印鑑登録の手続き", "u", "登録する印鑑が要ります。", 0.9, 1.0, "official", "市のホームページ")
 
     class KB:
         def search(self, q: str) -> SearchResult:
@@ -473,3 +473,68 @@ async def test_wrong_greeting_is_replaced_and_prompt_has_greeting() -> None:
     assert await _collect(d, "やあ") == ["こんばんは。", "今日はどうされましたか？"]
     _, messages, _ = llm.calls[-1]
     assert "「こんばんは」と言う" in messages[0]["content"]
+
+
+
+async def test_source_sentence_only_when_reply_uses_reference() -> None:
+    from src.knowledge import Reference
+
+    ref = Reference("おはなしむら", "u", "絵本の読み聞かせを図書館で行います。", 0.81, 1.0, "official", "市のホームページ")
+
+    class KB:
+        def search(self, query: str) -> Any:
+            from src.knowledge import SearchResult
+            return SearchResult([ref], 1.0)
+
+    d = Dialogue(StubLLM(["お孫さんが来るのは楽しみですね。[出典:1]"]), DialogueConfig(), knowledge=KB(), now=_NOON)
+    assert await _collect(d, "孫が今度遊びに来るんです") == ["お孫さんが来るのは楽しみですね。"]  # 雑談に出典を付けない
+
+
+def test_speech_text_drops_parentheses() -> None:
+    from src.dialogue import speech_text
+
+    assert speech_text("子育て支援課（にこ♡にこハウス）で受け付けます。") == "子育て支援課で受け付けます。"
+    assert speech_text("市民課(1階)です。") == "市民課です。"
+
+
+async def test_fragment_after_dropped_echo_loses_leading_particle() -> None:
+    llm = StubLLM(["土地勘がないなら、", "は、保健医療課（2階）でご案内しますよ。"])
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
+    out = await _collect(d, "土地勘がないなら、国民健康保険の場所は分からないでしょう")
+    assert out == ["保健医療課（2階）でご案内しますよ。"]
+    d2 = Dialogue(StubLLM(["はい、市民課です。"]), DialogueConfig(), now=_NOON)
+    assert "".join(await _collect(d2, "住民票はどこですか")) == "はい、市民課です。"  # 「はい」は残す
+
+
+async def test_unasked_self_intro_and_speaker_label_are_removed() -> None:
+    d = Dialogue(StubLLM(["いどちゃんです。", "ここは1階ロビーです。"]), DialogueConfig(), now=_NOON,
+                 avatar_name="いどちゃん")
+    assert await _collect(d, "ここはどこですか") == ["ここは1階ロビーです。"]
+    d2 = Dialogue(StubLLM(["いどちゃん: こんにちは。"]), DialogueConfig(), now=_NOON, avatar_name="いどちゃん")
+    assert await _collect(d2, "やあ") == ["こんにちは。"]
+    d3 = Dialogue(StubLLM(["いどちゃんです。"]), DialogueConfig(), now=_NOON, avatar_name="いどちゃん")
+    assert await _collect(d3, "お名前は？") == ["いどちゃんです。"]  # 聞かれたら名乗る
+
+
+async def test_unknown_place_asks_to_be_taught_and_persona_contradiction_dropped() -> None:
+    from src.persona import Persona
+
+    d = Dialogue(StubLLM(["作った説明です。"]), DialogueConfig(), now=_NOON)
+    assert await _collect(d, "能美ってどんなところですか") == [
+        "能美のことは、まだ詳しくなくて。どんなところか、教えていただけますか？"]
+    persona = Persona("臨時職員", contradictions=("アメリカで生まれ",))
+    d2 = Dialogue(StubLLM(["ありがとうございます。", "私はアメリカで生まれました。", "勉強中です。"]),
+                  DialogueConfig(), now=_NOON, persona=persona)
+    assert await _collect(d2, "日本語お上手ですね") == ["ありがとうございます。", "勉強中です。"]
+    d3 = Dialogue(StubLLM(["いどちゃんは、", "保健医療課です。"]), DialogueConfig(), now=_NOON, avatar_name="いどちゃん")
+    assert "".join(await _collect(d3, "国保はどこ")) == "保健医療課です。"
+
+
+async def test_department_floor_is_corrected_and_directions_dropped() -> None:
+    from src.site_context import Department, Facility
+
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー",
+                   departments=(Department("保健医療課", "2階"), Department("生活環境課", "2階")))
+    d = Dialogue(StubLLM(["1階の保健医療課にお声がけください。", "生活環境課は1階ロビーの入り口すぐそばです。"]),
+                 DialogueConfig(), facility=fac, now=_NOON)
+    assert await _collect(d, "国保はどこ") == ["2階の保健医療課にお声がけください。"]
