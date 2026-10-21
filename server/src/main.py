@@ -38,7 +38,7 @@ from .edge_server import EdgeServer, StaffPanel
 from .knowledge import KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
-from .procedures import load_procedures
+from .procedures import AsrFixes, load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
 from .site_context import load_facility, load_site_words, referral_csv_enabled
 from .speech_gate import SpeechGate
@@ -130,6 +130,7 @@ class VoiceLoop:
                                         csv_export=referral_csv_enabled(config.site))
         self._visits = VisitLog(config.data_dir, config.site)
         self._tidbits = TidbitStore(config.data_dir, config.site, config.tidbit.retention_days)
+        self._asr_fixes = AsrFixes(config.asr.site_context_dir, config.data_dir)
         self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query)
         self._conversation = Conversation(
             self._dialogue, llm, config.llm.chat_model, config.actions, config.referral, facility,
@@ -161,7 +162,8 @@ class VoiceLoop:
             self._edge_server = EdgeServer(
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir,
                 staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits,
-                                 tuple(d.name for d in (facility.departments if facility else ()))),
+                                 tuple(d.name for d in (facility.departments if facility else ())),
+                                 self._asr_fixes),
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）
@@ -251,7 +253,7 @@ class VoiceLoop:
                 print("[会話を区切りました]")
                 continue
             self._last_utterance_at = time.monotonic()
-            await self._send_caption(text, role="user")
+            await self._send_caption(self._shown_user_text(text), role="user")
             await self._send_state("thinking")
             await self._respond_and_speak(text, "ja", None)
 
@@ -355,7 +357,7 @@ class VoiceLoop:
         language = "ja"
         # 提案の返事待ちは短い発話（うん・はい）が多く、言語判定を誤りやすいので会話の言語に固定する
         force = (language_name(self._conversation.language)
-                 if config.asr.force_language_on_reply and self._conversation.phase != "listen"
+                 if config.asr.force_language_on_reply and self._conversation.expects_short_reply
                  else None)
         async for chunk in self._asr.transcribe_segment(
             frames, t_speech_start, sample_rate=config.vad.sample_rate, force_language=force
@@ -370,8 +372,10 @@ class VoiceLoop:
 
         self._last_utterance_at = time.monotonic()
         self._asr.push_rolling_context(final_text)
-        print(f"[聞き取り:{language}] {final_text}")
-        await self._send_caption(final_text, role="user")
+        final_text = self._asr_fixes.apply(final_text)
+        shown = self._shown_user_text(final_text)
+        print(f"[聞き取り:{language}] {shown}")
+        await self._send_caption(shown, role="user")
         # 応答生成中も音声フレームの消費を止めない（マイクのキューが詰まらないように）
         task = asyncio.create_task(
             self._respond_and_speak(final_text, language, timing), name="turn"
@@ -455,7 +459,8 @@ class VoiceLoop:
                         backchannel_word = ""
                         if not sentence:
                             continue
-                    print(f"[井戸端AI] {sentence}")
+                    shown = self._conversation.redact(sentence)  # 読み上げは本物、画面とコンソールは伏せる
+                    print(f"[井戸端AI] {shown}")
                     try:
                         wav, query = await self._tts.synthesize_with_query(sentence)
                     except httpx.HTTPError:
@@ -468,7 +473,7 @@ class VoiceLoop:
                             timing.t_audio_start = time.monotonic()
                     try:
                         remaining = await sink.push(
-                            SpokenSentence(utterance_id, seq, sentence, wav, query)
+                            SpokenSentence(utterance_id, seq, shown, wav, query)
                         )
                     except Exception:
                         logger.warning("音声を流せません。この文はスキップします。", exc_info=True)
@@ -583,6 +588,11 @@ class VoiceLoop:
         while True:
             await asyncio.sleep(config.knowledge.reload_check_sec)
             await asyncio.to_thread(self._knowledge.reload_if_changed)
+
+    def _shown_user_text(self, text: str) -> str:
+        """字幕・コンソールに出す来訪者の言葉（氏名・地区・電話番号の答えは「お名前：伺いました」）。"""
+        label = self._conversation.private_label
+        return f"{label}：伺いました" if label else self._conversation.redact(text)
 
     async def _send_state(self, value: str) -> None:
         if self._edge is not None:

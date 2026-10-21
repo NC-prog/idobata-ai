@@ -170,7 +170,7 @@ def load_site_words(site: str, context_dir: Path) -> list[SiteWord]:
     """拠点の YAML から語を読む（表記の重複は先勝ち）。
 
     ファイルが無い・壊れている場合は空リストを返す（ASR・TTS は語彙なしで動く）。
-    facility 節の課名と、手続きの常用語（``procedures.yaml``、全拠点共通）も語彙に含める。
+    facility 節の課名と、手続きの常用語（``procedures.yaml``、全拠点共通。先頭に置く）も語彙に含める。
     """
     from .procedures import load_procedures  # procedures は SiteWord を使うので、ここで読む
 
@@ -191,11 +191,9 @@ def load_site_words(site: str, context_dir: Path) -> list[SiteWord]:
                 continue
             seen.add(word.surface)
             words.append(word)
-    for word in load_procedures(context_dir).words():
-        if word.surface not in seen:
-            seen.add(word.surface)
-            words.append(word)
-    return words
+    # 手続きの常用語は先頭に置く（後ろに置くと Qwen3-ASR のバイアシングが効かず「国保」→「国宝」になった）
+    procedure_words = [w for w in load_procedures(context_dir).words() if w.surface not in seen]
+    return procedure_words + words
 
 
 def _parse_item(item: Any) -> SiteWord | None:

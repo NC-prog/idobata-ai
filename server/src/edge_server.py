@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from .config import StaffConfig
 from .knowledge import JST
+from .procedures import AsrFixes
 from .referrals import ReferralStore, TidbitStore, VisitLog, today_stats
 
 logger = logging.getLogger(__name__)
@@ -47,17 +48,24 @@ class StatusUpdate(BaseModel):
     department: str | None = None
 
 
+class AsrFixIn(BaseModel):
+    surface: str
+    correct: str
+
+
 class StaffPanel:
     """職員パネルの中身（紹介状・来訪記録）。"""
 
     def __init__(self, referrals: ReferralStore, visits: VisitLog, cfg: StaffConfig,
-                 tidbits: TidbitStore | None = None, departments: tuple[str, ...] = ()) -> None:
+                 tidbits: TidbitStore | None = None, departments: tuple[str, ...] = (),
+                 asr_fixes: AsrFixes | None = None) -> None:
         self.referrals = referrals
         self.visits = visits
         self.cfg = cfg
         self.tidbits = tidbits
         # 職員が「未特定」の紹介状に付けられる課（拠点 YAML の facility.departments）
         self.departments = departments
+        self.asr_fixes = asr_fixes
 
 
 def _is_lan(host: str | None) -> bool:
@@ -115,6 +123,19 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
     @app.get("/staff/api/departments", dependencies=auth)
     async def list_departments() -> list[str]:
         return list(panel.departments)
+
+    @app.get("/staff/api/asr_fixes", dependencies=auth)
+    async def list_asr_fixes() -> list[dict[str, str]]:
+        return panel.asr_fixes.entries() if panel.asr_fixes is not None else []
+
+    @app.post("/staff/api/asr_fixes", dependencies=auth)
+    async def add_asr_fix(body: AsrFixIn) -> dict[str, str]:
+        if panel.asr_fixes is None:
+            raise HTTPException(503, "聞き取り間違いの対応表が使えません")
+        try:
+            return panel.asr_fixes.add(body.surface, body.correct)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
 
     @app.get("/staff/api/tidbits", dependencies=auth)
     async def list_tidbits() -> list[dict[str, Any]]:

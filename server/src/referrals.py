@@ -40,7 +40,7 @@ VISIT_RETENTION_DAYS = 365
 # 担当課が規則で決まらなかった紹介状の課（職員が職員パネルで付ける）
 UNSPECIFIED_DEPARTMENT = "未特定"
 CSV_HEADER = ("受付番号", "受付日時", "拠点", "担当課", "区分", "要約", "急ぎ", "連絡方法", "氏名", "電話",
-              "要対応", "タグ", "話題", "状態", "対応日時", "対応者", "結果", "id")
+              "要対応", "タグ", "話題", "状態", "対応日時", "対応者", "結果", "id", "地区", "聞き取り")
 
 
 def load_tags(path: Path) -> list[str]:
@@ -54,7 +54,8 @@ def pick_tags(raw: Any, vocabulary: list[str], limit: int = 5) -> list[str]:
     return [t for t in dict.fromkeys(str(x) for x in items) if t in vocabulary][:limit]
 
 
-_PHONE_RE = re.compile(r"(0\d{1,4})[-ー－‐\s]?(\d{1,4})[-ー－‐\s]?(\d{3,4})")
+# 区切りは「-」「の」「、」空白など（「090の1234の5678」と言われることが多い）
+_PHONE_RE = re.compile(r"(0\d{1,4})[-ー－‐\s、,の]{0,2}(\d{1,4})[-ー－‐\s、,の]{0,2}(\d{3,4})")
 
 
 def find_phone(text: str) -> str | None:
@@ -88,6 +89,9 @@ class Referral:
     needs_action: bool = True
     tags: list[str] = field(default_factory=list)
     topic_free: str = ""
+    # 同意の後の聞き取り（質問と答えの組）と、お住まいの地区（番地は転入・転居のときだけ）
+    intake: list[dict[str, str]] = field(default_factory=list)
+    address_area: str | None = None
     # 職員パネルで書く
     status: str = "未対応"
     handled_at: str | None = None
@@ -183,7 +187,8 @@ class ReferralStore:
                 w.writerow([r.receipt, r.created_at, r.site, r.department, r.category, r.summary, r.urgency,
                             r.contact_pref, r.name or "", r.phone or "", "要" if r.needs_action else "不要",
                             "／".join(r.tags), r.topic_free, r.status, r.handled_at or "",
-                            r.handled_by_role or "", r.resolution or "", r.id])
+                            r.handled_by_role or "", r.resolution or "", r.id, r.address_area or "",
+                            "／".join(f"{q.get('question', '')}: {q.get('answer', '')}" for q in r.intake)])
         tmp.replace(path)
 
     def cleanup(self, today: date | None = None) -> int:

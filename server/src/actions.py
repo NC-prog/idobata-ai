@@ -31,7 +31,7 @@ from .config import ActionsConfig, ReferralConfig, TidbitConfig
 from .dialogue import ChatBackend, Dialogue
 from .knowledge import JST
 from .lookup import Lookup
-from .procedures import Procedures
+from .procedures import IntakeSet, Procedures
 from .referrals import (
     CATEGORIES,
     CONTACT_PREFS,
@@ -91,15 +91,25 @@ class Pending:
     action: str
     user_text: str
     language: str
-    phase: str = "proposed"  # proposed / confirm_phone / confirm_share
+    # proposed / intake / ask_name / confirm_name / ask_area / ask_contact / ask_phone / confirm_phone / confirm_share
+    phase: str = "proposed"
     reasks: int = 0
-    fields: dict[str, Any] | None = None  # 紹介状の中身（電話番号の確認待ち）
     share_text: str | None = None
     # 提案したターンの番号と、そのときの話題の始まり（紹介状の要約に使う範囲）
     turn_index: int = 0
     topic_floor: int = 0
-    # 提案の後の来訪者の返事（「お願い。電話は…」など）
+    # 提案の後の来訪者の返事のうち、話題のもの（同意と手続きの聞き取りの答え。要約に使う）
     replies: list[str] = field(default_factory=list)
+    # 紹介状の聞き取り（同意の後）
+    department: str = ""
+    intake_set: IntakeSet | None = None
+    intake: list[dict[str, str]] = field(default_factory=list)  # {question, ask, answer}
+    intake_idx: int = 0
+    name: str | None = None
+    name_retry: bool = False
+    address_area: str | None = None
+    contact_pref: str = "未定"
+    phone: str | None = None
 
 
 @dataclass
@@ -156,6 +166,8 @@ class Conversation:
         self._procedures = procedures or Procedures()
         # この会話のターン（来訪者, 応答）と、いまの話題が始まったターンの番号（プロセス内のみ）
         self._turns: list[tuple[str, str]] = []
+        # 聞き取った氏名・地区・電話番号（画面・コンソールで伏せるため。会話の区切りで消す）
+        self._private_values: set[str] = set()
         self._topic_start = 0
         self._turn_new_topic = False
         self._words, self._templates = load_templates(cfg.templates_path)
@@ -194,9 +206,16 @@ class Conversation:
 
     async def end_session(self) -> None:
         """会話の区切り: 来訪記録を 1 行書いて、履歴と提案を消す。"""
+        p = self._pending
+        if p is not None and p.action == "refer" and p.phase != "proposed" and self._referrals is not None:
+            # 聞き取りの途中で立ち去った: 伺えたところまでで紹介状を作る（答えなくても作る）
+            logger.info("聞き取りの途中で会話が区切られたので、伺えたところまでで紹介状を作ります")
+            async for _ in self._finish_referral(p):
+                pass
         session, history = self._session, self.dialogue.history
         self._session, self._pending = None, None
         self._turns, self._topic_start = [], 0
+        self._private_values = set()
         self.dialogue.reset()
         if session is None or self._visits is None or not session.turns:
             return
@@ -220,12 +239,14 @@ class Conversation:
     async def respond(self, text: str, language: str = "ja") -> AsyncIterator[str]:
         """1 発話に応答する。ターンを記録し、行為が終わったら話題の区切りとする。"""
         index, had_pending = len(self._turns), self._pending is not None
+        label = self.private_label
         self._turn_new_topic = False
         lines: list[str] = []
         async for s in self._respond_turn(text, language, index):
             lines.append(s)
             yield s
-        self._turns.append((text, "".join(lines)))
+        # 氏名・地区・電話番号はプロセス内の記録にも残さない
+        self._turns.append((f"（{label}を伺いました）" if label else text, self.redact("".join(lines))))
         if had_pending and self._pending is None and not self._turn_new_topic:
             self._topic_start = len(self._turns)  # 行為が終わった・断られた: 次のターンから別の話題
 
@@ -345,8 +366,15 @@ class Conversation:
     async def _on_reply(self, text: str) -> AsyncIterator[str]:
         p = self._pending
         assert p is not None
-        p.replies.append(text)
         lines: list[str] = []
+        if p.phase in ("proposed", "intake"):
+            p.replies.append(text)
+        if p.phase in _FREE_ANSWER_PHASES:
+            async for s in self._on_intake_answer(p, text):
+                lines.append(s)
+                yield s
+            self.dialogue.add_turn(self._private_text(p, text), "".join(lines))
+            return
         verdict = classify_reply(text, self._words)
         if verdict == "unclear":
             if p.reasks < self._cfg.max_reask:
@@ -368,32 +396,37 @@ class Conversation:
             async for s in self._act(p):
                 lines.append(s)
                 yield s
+        elif p.phase == "confirm_name":
+            async for s in self._on_confirm_name(p, verdict == "yes"):
+                lines.append(s)
+                yield s
         elif p.phase == "confirm_phone":
-            assert p.fields is not None
             if verdict == "no":
-                p.fields["phone"] = None
+                p.phone = None
                 line = self._t("refer", "phone_wrong")
                 lines.append(line)
                 yield line
-            async for s in self._save_referral(p):
+            async for s in self._finish_referral(p):
                 lines.append(s)
                 yield s
         elif p.phase == "confirm_share":
             async for s in self._finish_share(p, verdict == "yes"):
                 lines.append(s)
                 yield s
-        self.dialogue.add_turn(text, "".join(lines))
+        self.dialogue.add_turn(self._private_text(p, text), "".join(lines))
 
     def _reask_line(self, p: Pending) -> str:
         if p.phase == "confirm_phone":
-            return self._t("refer", "confirm_phone", phone=phone_for_speech((p.fields or {}).get("phone") or ""))
+            return self._t("refer", "confirm_phone", phone=phone_for_speech(p.phone or ""))
+        if p.phase == "confirm_name":
+            return self._t("refer", "confirm_name", name=p.name or "")
         if p.phase == "confirm_share":
             return self._t("share", "confirm_text", text=p.share_text or "")
         return self._t(p.action, "reask")
 
     async def _act(self, p: Pending) -> AsyncIterator[str]:
         if p.action in ("lookup", "refer"):
-            yield self._t(p.action, "acting")
+            yield self._t(p.action, "acting")  # refer は「担当の方が準備できるように、少しだけ伺いますね」
             if self._on_state is not None:
                 await self._on_state("thinking")
         elif self._on_state is not None:
@@ -428,46 +461,150 @@ class Conversation:
     # ---- つなぐ（紹介状）------------------------------------------------
 
     async def _do_refer(self, p: Pending) -> AsyncIterator[str]:
+        """同意の後: 担当課を規則で決め、手続きの項目（最大 3 問）と共通の項目を順に伺う。"""
         window = self._refer_window(p)
-        fields = await self._structure_referral(window)
-        if fields is None:
-            self._pending = None
-            yield self._t("refer", "failed")
-            return
-        p.fields = fields
-        # 担当課は規則だけで決める（直近の発話 = 提案のきっかけとその後の返事。決まらなければ話題全体）。
+        # 担当課は規則だけで決める（提案のきっかけと同意の返事。決まらなければ話題全体）。
         # 一意に決まらなければ「未特定」で保存し、職員が職員パネルで課を付ける。来訪者には聞き返さない
         recent = "\n".join([p.user_text, *p.replies])
+        topic = "\n".join(u for u, _ in window)
         cands = (self._procedures.departments_for(recent, self._facility)
-                 or self._procedures.departments_for("\n".join(u for u, _ in window), self._facility))
+                 or self._procedures.departments_for(topic, self._facility))
         if len(cands) == 1:
-            fields["department"] = cands[0]
+            p.department = cands[0]
         else:
-            fields["department"] = UNSPECIFIED_DEPARTMENT
+            p.department = UNSPECIFIED_DEPARTMENT
             logger.info("担当課が規則で一意に決まりません（候補 %d）。未特定で保存します", len(cands))
-        if fields.get("phone"):
-            p.phase, p.reasks = "confirm_phone", 0
-            yield self._t("refer", "confirm_phone", phone=phone_for_speech(fields["phone"]))
+        p.phone = find_phone(topic)  # 来訪者が先に言っていれば、後で読み上げて確かめる
+        p.intake_set = (self._procedures.intake_for(recent, self._facility)
+                        or self._procedures.intake_for(topic, self._facility))
+        if p.intake_set is not None:
+            labels = list(p.intake_set.questions[: self._ref_cfg.intake_max_questions])
+            asks = await self._phrase_questions(labels, p.user_text)
+            p.intake = [{"question": q, "ask": a, "answer": ""} for q, a in zip(labels, asks, strict=True)]
+        if p.intake:
+            p.phase, p.intake_idx = "intake", 0
+            yield p.intake[0]["ask"]
             return
-        async for s in self._save_referral(p):
-            yield s
+        p.phase = "ask_name"
+        yield self._t("refer", "ask_name")
 
-    async def _save_referral(self, p: Pending) -> AsyncIterator[str]:
-        assert self._referrals is not None and p.fields is not None
+    async def _phrase_questions(self, labels: list[str], user_text: str) -> list[str]:
+        """聞き取りの項目を、LLM に自然な言い方の質問にしてもらう（だめなら決まった形）。"""
+        fallback = [f"{_PAREN_RE.sub(lambda m: '（' + m.group(1) + 'など）', q)}を教えていただけますか？"
+                    for q in labels]
+        prompt = self._ref_cfg.intake_phrase_prompt
+        body = f"来訪者の発話: {user_text}\n項目:\n" + "\n".join(f"{i + 1}. {q}" for i, q in enumerate(labels))
+        data = await self._chat_json(prompt, body, self._ref_cfg.intake_phrase_max_tokens)
+        got = (data or {}).get("questions")
+        if not isinstance(got, list) or len(got) != len(labels):
+            return fallback
+        out = []
+        for q, fb in zip(got, fallback, strict=True):
+            q = str(q).strip()
+            ok = 4 <= len(q) <= 60 and q[-1] in "？?か" and not re.search(r"[A-Za-z]{3,}", q)
+            out.append(q if ok else fb)
+        return out
+
+    async def _on_intake_answer(self, p: Pending, text: str) -> AsyncIterator[str]:
+        """自由な答えを待つ段（手続きの項目・お名前・地区・連絡方法・電話番号）。答えなくても先へ進む。"""
+        cfg = self._ref_cfg
+        skipped = re.search(cfg.skip_pattern, text) is not None
+        ack = self._t("refer", "skipped") if skipped else ""
+        if p.phase == "intake":
+            p.intake[p.intake_idx]["answer"] = "" if skipped else text.strip()
+            p.intake_idx += 1
+            if p.intake_idx < len(p.intake):
+                yield ack + p.intake[p.intake_idx]["ask"]
+                return
+            p.phase = "ask_name"
+            yield ack + self._t("refer", "ask_name")
+        elif p.phase == "ask_name":
+            name = None if skipped else _clean_name(text, cfg.name_strip_pattern, cfg.name_max_chars)
+            if name:
+                p.name, p.phase = name, "confirm_name"
+                yield self._t("refer", "confirm_name", name=name)
+                return
+            p.name = None
+            async for s in self._ask_area(p, ack):
+                yield s
+        elif p.phase == "ask_area":
+            if not skipped:
+                area = re.sub(r"(です|に住んで(い)?ます|に住んでる|から来ました|あたり|のほう)[。、]?$", "",
+                              text.strip()).strip("。、 ")
+                if not self._full_address(p):
+                    area = re.sub(cfg.address_number_pattern, "", area).strip("。、 ")
+                p.address_area = area[:40] or None
+            p.phase = "ask_contact"
+            yield ack + self._t("refer", "ask_contact")
+        elif p.phase == "ask_contact":
+            contact = next((v for pat, v in cfg.contact_rules if re.search(pat, text)), None)
+            p.contact_pref = contact or "未定"
+            phone = find_phone(text)
+            if phone:
+                p.phone = phone
+            if p.phone:
+                p.phase, p.reasks = "confirm_phone", 0
+                yield self._t("refer", "confirm_phone", phone=phone_for_speech(p.phone))
+            elif p.contact_pref == "電話":
+                p.phase = "ask_phone"
+                yield self._t("refer", "ask_phone")
+            else:
+                async for s in self._finish_referral(p):
+                    yield s
+        elif p.phase == "ask_phone":
+            phone = None if skipped else find_phone(text)
+            if phone:
+                p.phone, p.phase, p.reasks = phone, "confirm_phone", 0
+                yield self._t("refer", "confirm_phone", phone=phone_for_speech(phone))
+                return
+            async for s in self._finish_referral(p, prefix=ack):
+                yield s
+
+    async def _on_confirm_name(self, p: Pending, ok: bool) -> AsyncIterator[str]:
+        if ok:
+            async for s in self._ask_area(p, ""):
+                yield s
+        elif not p.name_retry:
+            p.name, p.name_retry, p.phase = None, True, "ask_name"
+            yield self._t("refer", "ask_name_again")
+        else:
+            p.name = None  # 二度違えば控えない
+            async for s in self._ask_area(p, self._t("refer", "name_dropped")):
+                yield s
+
+    async def _ask_area(self, p: Pending, prefix: str) -> AsyncIterator[str]:
+        p.phase = "ask_area"
+        yield prefix + self._t("refer", "ask_area_full" if self._full_address(p) else "ask_area")
+
+    def _full_address(self, p: Pending) -> bool:
+        return re.search(self._ref_cfg.full_address_pattern, "\n".join([p.user_text, *p.replies])) is not None
+
+    async def _finish_referral(self, p: Pending, prefix: str = "") -> AsyncIterator[str]:
+        """聞き取りを終えて紹介状を作り、受付番号と持ち物の案内を言う。"""
+        assert self._referrals is not None
         self._pending = None
+        if self._on_state is not None:
+            await self._on_state("thinking")
+        fields = await self._structure_referral(self._refer_window(p), p)
         try:
-            ref = await asyncio.to_thread(self._referrals.create, p.fields, self._edge_id(), p.language)
+            ref = await asyncio.to_thread(self._referrals.create, fields, self._edge_id(), p.language)
         except Exception:
             logger.exception("紹介状を保存できません")
-            yield self._t("refer", "failed")
+            yield prefix + self._t("refer", "failed")
             return
         self.last_receipt = ref.receipt
         if self._session is not None:
             self._session.referral_id = ref.id
-        logger.info("紹介状を保存しました: 受付 %s・%s", ref.receipt, ref.department)
+        logger.info("紹介状を保存しました: 受付 %s・%s・聞き取り %d 問", ref.receipt, ref.department,
+                    sum(1 for q in ref.intake if q.get("answer")))
         unknown = ref.department in ("", UNSPECIFIED_DEPARTMENT)
         key = ("done_unknown" if unknown else "done") + ("" if ref.name else "_no_name")
-        yield self._t("refer", key, department=ref.department, number=ref.receipt)
+        line = prefix + self._t("refer", key, department=ref.department, number=ref.receipt)
+        answers = "\n".join([p.user_text, *(q["answer"] for q in p.intake)])
+        item = p.intake_set.bring_for(answers) if p.intake_set else None
+        if item:
+            line += self._t("refer", "bring", item=item)
+        yield line
 
     def _transcript(self, history: list[tuple[str, str]]) -> str:
         return "\n".join(f"来訪者: {u}\n案内役: {a}" for u, a in history)
@@ -479,35 +616,63 @@ class Conversation:
         after = [(r, "") for r in p.replies[: self._ref_cfg.window_turns]]
         return before + after
 
-    async def _structure_referral(self, history: list[tuple[str, str]]) -> dict[str, Any] | None:
-        """会話から紹介状の項目を作る。氏名・電話番号は来訪者が言った場合だけ残す（規則で確かめる）。
+    async def _structure_referral(self, history: list[tuple[str, str]], p: Pending) -> dict[str, Any]:
+        """紹介状の項目を作る。要約・区分などは LLM、課・氏名・地区・連絡方法・電話番号は規則と聞き取りから。
 
-        課は LLM に決めさせない（規則で決める。_do_refer）。
+        LLM に失敗しても、来訪者の言葉をそのまま要約にして作る（答えなくても紹介状は作る）。
         """
-        user_text = "\n".join(u for u, _ in history)
         prompt = (self._ref_cfg.structure_prompt
                   + "\nneeds_action は職員の対応が要るか（案内だけで済むなら false）。"
                   + "tags は【タグの一覧】から最大 5 つ選ぶ（一覧に無いものは作らない）。topic_free は話題を 1 行で。"
                   + '\n出力に "needs_action": true, "tags": [], "topic_free": "" も含める。'
                   + "\n【タグの一覧】" + "、".join(self._tags))
-        data = await self._chat_json(prompt, self._transcript(history), self._ref_cfg.summary_max_tokens)
-        if data is None or not str(data.get("summary") or "").strip():
-            return None
-        name = data.get("name")
-        name = str(name).strip() if isinstance(name, str) and name.strip() and name.strip() in user_text else None
+        data = await self._chat_json(prompt, self._transcript(history), self._ref_cfg.summary_max_tokens) or {}
+        summary = str(data.get("summary") or "").strip() or p.user_text
         return {
-            "department": "",
+            "department": p.department or UNSPECIFIED_DEPARTMENT,
             "category": _pick(data.get("category"), CATEGORIES, "その他"),
-            "summary": str(data.get("summary")).strip(),
+            "summary": summary,
             "urgency": _pick(data.get("urgency"), URGENCIES, "通常"),
-            "contact_pref": _pick(data.get("contact_pref"), CONTACT_PREFS, "未定"),
-            "name": name,
-            # 電話番号は LLM の出力ではなく、来訪者の発話から規則で拾う（言っていなければ無し）
-            "phone": find_phone(user_text),
+            "contact_pref": p.contact_pref if p.contact_pref in CONTACT_PREFS else "未定",
+            "name": p.name,
+            "phone": p.phone,
             "needs_action": bool(data.get("needs_action", True)),
             "tags": pick_tags(data.get("tags"), self._tags),
             "topic_free": str(data.get("topic_free") or "")[:60],
+            "intake": [{"question": q["question"], "answer": q["answer"] or "（答えなし）"} for q in p.intake],
+            "address_area": p.address_area,
         }
+
+    # ---- 個人の情報を画面・ログに出さない ---------------------------------
+
+    @property
+    def private_label(self) -> str | None:
+        """いまの返事が個人の情報か（字幕・コンソールでは「お名前：伺いました」のように伏せる）。"""
+        p = self._pending
+        return _PRIVATE_LABELS.get(p.phase) if p is not None else None
+
+    @property
+    def expects_short_reply(self) -> bool:
+        """はい・いいえの返事を待っているか（ASR の言語を固定する）。自由な答えの段は固定しない。"""
+        return self._pending is not None and self._pending.phase not in _FREE_ANSWER_PHASES
+
+    def redact(self, text: str) -> str:
+        """画面・コンソールに出す文から、聞き取った氏名・地区・電話番号を伏せる。"""
+        values = set(self._private_values)
+        p = self._pending
+        if p is not None:
+            values |= {v for v in (p.name, p.address_area, p.phone,
+                                   phone_for_speech(p.phone) if p.phone else None) if v}
+        for v in sorted(values, key=len, reverse=True):
+            text = text.replace(v, "＊＊")
+        return text
+
+    def _private_text(self, p: Pending, text: str) -> str:
+        label = _PRIVATE_LABELS.get(p.phase)
+        for v in (p.name, p.address_area, p.phone, phone_for_speech(p.phone) if p.phone else None):
+            if v:
+                self._private_values.add(v)
+        return f"（{label}を伺いました）" if label else text
 
     async def _tag_conversation(self, history: list[tuple[str, str]]) -> list[str]:
         if not history or not self._tags:
@@ -604,6 +769,19 @@ class Conversation:
     def _tidbit_used(self, tidbit: str, reply: str) -> bool:
         return ("さっき来た方" in reply
                 or ngram_overlap(tidbit, reply) >= self._tidbit_cfg.used_overlap)
+
+
+# 自由な答えを待つ段（はい・いいえで判定しない）と、個人の情報を答える段
+_FREE_ANSWER_PHASES = frozenset({"intake", "ask_name", "ask_area", "ask_contact", "ask_phone"})
+_PRIVATE_LABELS = {"ask_name": "お名前", "confirm_name": "お名前", "ask_area": "お住まい",
+                   "ask_phone": "お電話番号", "confirm_phone": "お電話番号"}
+_PAREN_RE = re.compile(r"（(.*?)）")
+
+
+def _clean_name(text: str, strip_pattern: str, max_chars: int) -> str | None:
+    name = re.sub(strip_pattern, "", text.strip())
+    name = re.sub(strip_pattern, "", name)  # 「私は山田です。」の前後を両方落とす
+    return name if 0 < len(name) <= max_chars else None
 
 
 def _pick(value: Any, allowed: tuple[str, ...], default: str) -> str:

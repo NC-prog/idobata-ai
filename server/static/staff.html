@@ -13,6 +13,8 @@
   .stats b { font-size:20px; }
   h2 { font-size:16px; margin-top:24px; }
   .unspec { background:#fff0f0 !important; color:#b00020; }
+  .intake { font-size:13px; margin-top:4px; }
+  .intake ul { margin:2px 0 0 0; padding-left:18px; }
   table { border-collapse:collapse; width:100%; background:#fff; font-size:14px; }
   th, td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
   tr.needs td { background:var(--pending); }
@@ -34,6 +36,12 @@
 <p class="mut">要約は来訪者の言葉の要約です（職員が読む前提で表示しています）。__POLL_SEC__ 秒ごとに更新します。</p>
 <h2>今日の小ネタ <span class="mut">（来訪者が同意した匿名の一言。次の来訪者との雑談で 1 回に 1 つまで使います。7 日で消えます）</span></h2>
 <ul id="tidbits"></ul>
+<h2>聞き取り間違いの対応表 <span class="mut">（ASR の聞き違いを直してから対話・課の照合に使います。例: 国宝 → 国保）</span></h2>
+<form id="fixform" onsubmit="addFix(event)">
+  聞き取り間違い <input id="fix-surface" maxlength="20" required> → 正しい表記 <input id="fix-correct" maxlength="20" required>
+  <button type="submit">1 行足す</button> <span class="mut" id="fixmsg"></span>
+</form>
+<ul id="fixes"></ul>
 <script>
 const STATUSES = ["未対応", "対応中", "完了"];
 const ROLES = ["", "窓口", "担当課"];
@@ -49,6 +57,21 @@ async function post(id, body) {
 
 function select(options, value, onchange) {
   return `<select onchange="${onchange}">` + options.map((o) => `<option ${o === (value ?? "") ? "selected" : ""}>${esc(o)}</option>`).join("") + "</select>";
+}
+
+async function addFix(ev) {
+  ev.preventDefault();
+  const body = {surface: document.getElementById("fix-surface").value, correct: document.getElementById("fix-correct").value};
+  const r = await fetch("api/asr_fixes", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  document.getElementById("fixmsg").textContent = r.ok ? "足しました" : ((await r.json()).detail || "足せませんでした");
+  if (r.ok) { document.getElementById("fix-surface").value = ""; document.getElementById("fix-correct").value = ""; }
+  loadFixes();
+}
+
+async function loadFixes() {
+  const fixes = await fetch("api/asr_fixes").then((r) => r.json());
+  document.getElementById("fixes").innerHTML = fixes.map((f) =>
+    `<li>${esc(f.surface)} → ${esc(f.correct)} <span class="mut">${esc(f.source)}</span></li>`).join("") || `<li class="mut">ありません</li>`;
 }
 
 async function delTidbit(id) {
@@ -83,7 +106,8 @@ async function load() {
       <td class="${unspecified(r) ? "unspec" : ""}">${unspecified(r) ? "<b>未特定</b>" : esc(r.department)}
           <div>${select(["", ...DEPTS], unspecified(r) ? "" : r.department, `post('${r.id}', {department: this.value})`)}</div>
           <div class="mut">${esc(r.category)}</div></td>
-      <td>${esc(r.summary)}<div class="mut">${esc(r.topic_free)}${r.name ? "／氏名: " + esc(r.name) : ""}${r.phone ? "／電話: " + esc(r.phone) : ""}</div></td>
+      <td>${esc(r.summary)}<div class="mut">${esc(r.topic_free)}${r.name ? "／氏名: " + esc(r.name) : ""}${r.address_area ? "／地区: " + esc(r.address_area) : ""}${r.phone ? "／電話: " + esc(r.phone) : ""}</div>
+          ${(r.intake || []).length ? `<div class="intake">聞き取り<ul>${r.intake.map((q) => `<li>${esc(q.question)}：${esc(q.answer)}</li>`).join("")}</ul></div>` : ""}</td>
       <td class="${r.urgency === "急ぐ" ? "urgent" : ""}">${esc(r.urgency)}</td>
       <td>${esc(r.contact_pref)}</td>
       <td>${r.tags.map(esc).join("、")}</td>
@@ -97,6 +121,7 @@ async function load() {
 }
 dayEl.addEventListener("change", load);
 load();
+loadFixes();
 setInterval(load, __POLL_SEC__ * 1000);
 </script>
 </body>

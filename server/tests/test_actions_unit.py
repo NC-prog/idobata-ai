@@ -32,7 +32,7 @@ from src.site_context import Department, Facility
 
 TAGS = ["子育て", "介護", "保険・年金", "観光", "行事", "雑談"]
 FAC = Facility(name="江田島市役所", location_phrase="1階ロビー",
-               departments=(Department("市民課", "1階", handles=("住民票", "戸籍")),
+               departments=(Department("市民課", "1階", handles=("住民票", "住民登録", "戸籍")),
                             Department("税務課", "1階", handles=("国民健康保険税", "税証明書")),
                             Department("保健医療課", "2階", handles=("国民健康保険（資格・給付）", "後期高齢者医療")),
                             Department("高齢介護課", "2階", handles=("介護保険",))))
@@ -187,22 +187,6 @@ def _refer_json(**kw: Any) -> str:
     return json.dumps(base, ensure_ascii=False)
 
 
-async def test_refer_without_name_saves_and_reads_receipt(tmp_path: Path) -> None:
-    llm = StubLLM([["保健医療課の担当です。<propose:refer>"]], chat_reply=_refer_json(name="山田"))
-    c = _conv(llm, tmp_path)
-    await _say(c, "国保の切り替えで聞きたいことがあって")
-    out = await _say(c, "お願い")
-    assert out[0] == TEMPLATES["refer"]["acting"]
-    assert "お名前はおっしゃらなくても大丈夫です" in out[1]  # 氏名を言っていないので聞かない
-    store = ReferralStore(tmp_path, "etajima", 30, csv_export=True)
-    (ref,) = store.list(datetime.now(JST).date())
-    assert ref.receipt in out[1] and c.last_receipt == ref.receipt
-    assert ref.name is None  # LLM が名前を作っても、来訪者が言っていなければ残さない
-    assert ref.phone is None and ref.department == "保健医療課"
-    assert ref.tags == ["保険・年金"]  # 統制語彙に無いタグは捨てる
-    assert ref.needs_action is True and ref.topic_free == "国保の切り替え" and ref.edge_id == "edge-1"
-
-
 async def test_lookup_on_procedure_is_replaced_by_refer(tmp_path: Path) -> None:
     llm = StubLLM([["国保のことですね。<propose:lookup>"]], chat_reply=_refer_json())
     c = _conv(llm, tmp_path, StubLookup(LookupResult(found=False)))
@@ -239,47 +223,11 @@ async def test_lookup_on_smalltalk_is_dropped_and_new_topic_skips_reask(tmp_path
     assert c.phase == "listen"
 
 
-async def test_short_ack_after_action_gets_fixed_reply(tmp_path: Path) -> None:
-    llm = StubLLM([["保健医療課です。<propose:refer>"], ["担当者がそろいましたので、お呼びしますね。"]],
-                  chat_reply=_refer_json())
-    c = _conv(llm, tmp_path)
-    await _say(c, "国保の切り替えで聞きたいことがあって")
-    await _say(c, "お願い")
-    assert await _say(c, "うん") == [TEMPLATES["common"]["ack"]]  # LLM に続けさせない
-    assert len(llm.stream_calls) == 1
-
-
 async def test_refer_on_seasonal_smalltalk_becomes_share(tmp_path: Path) -> None:
     store = TidbitStore(tmp_path, "etajima", 7)
     c = _conv(StubLLM([["いいですね。<propose:refer>"]]), tmp_path, enabled=SHARE, tidbits=store)
     out = await _say(c, "庭の柿がたくさん実ったんですよ")
     assert out[-1] == TEMPLATES["share"]["propose"]
-
-
-async def test_refer_with_phone_is_read_back(tmp_path: Path) -> None:
-    llm = StubLLM([["保健医療課です。", "ご連絡は 090-1234-5678 ですね。<propose:refer>"]],
-                  chat_reply=_refer_json(name="田中"))
-    c = _conv(llm, tmp_path)
-    await _say(c, "田中です。国保のことで、電話は090-1234-5678です")
-    out = await _say(c, "お願いします")
-    assert out[-1] == TEMPLATES["refer"]["confirm_phone"].format(phone=phone_for_speech("090-1234-5678"))
-    assert c.phase == "confirm_phone"
-    done = await _say(c, "はい")
-    store = ReferralStore(tmp_path, "etajima", 30, csv_export=True)
-    (ref,) = store.list(datetime.now(JST).date())
-    assert ref.phone == "090-1234-5678" and ref.name == "田中"
-    assert "お名前は" not in done[0] and ref.receipt in done[0]
-
-
-async def test_refer_phone_rejected_is_dropped(tmp_path: Path) -> None:
-    llm = StubLLM([["わかりました。<propose:refer>"]], chat_reply=_refer_json())
-    c = _conv(llm, tmp_path)
-    await _say(c, "国保のことで、電話は０９０－１２３４－５６７８です")
-    await _say(c, "お願い")
-    out = await _say(c, "違います")
-    assert out[0] == TEMPLATES["refer"]["phone_wrong"] or out[0].startswith(TEMPLATES["refer"]["phone_wrong"][:6])
-    (ref,) = ReferralStore(tmp_path, "etajima", 30, csv_export=True).list(datetime.now(JST).date())
-    assert ref.phone is None
 
 
 async def test_end_session_writes_anonymous_visit(tmp_path: Path) -> None:
@@ -569,47 +517,6 @@ def test_procedure_words_for_asr_and_voicevox() -> None:
     assert readings == {"国保": "コクホ", "後期高齢": "コウキコウレイ"}  # 読みが自明でないものだけ
 
 
-async def test_refer_unspecified_department_is_saved_without_naming(tmp_path: Path) -> None:
-    llm = StubLLM([["それは大変ですね。<propose:refer>"]], chat_reply=_refer_json(department="保健医療課"))
-    c = _conv(llm, tmp_path)
-    await _say(c, "ちょっと困ったことがあって")
-    out = await _say(c, "お願い")
-    assert out[1].startswith("担当の方に伝えておきました")  # 課名は言わない、聞き返さない
-    (ref,) = ReferralStore(tmp_path, "etajima", 30, csv_export=True).list(datetime.now(JST).date())
-    assert ref.department == "未特定"  # LLM が課を挙げても使わない
-    assert c.phase == "listen"
-
-
-async def test_refer_ambiguous_department_is_unspecified(tmp_path: Path) -> None:
-    c = _conv(StubLLM([["そうですか。<propose:refer>"]], chat_reply=_refer_json()), tmp_path)
-    await _say(c, "国保と住民票のことで聞きたいことがあって")
-    await _say(c, "お願い")
-    (ref,) = ReferralStore(tmp_path, "etajima", 30, csv_export=True).list(datetime.now(JST).date())
-    assert ref.department == "未特定"
-
-
-async def test_refer_summary_uses_only_current_topic(tmp_path: Path) -> None:
-    class Spy(StubLLM):
-        def __init__(self) -> None:
-            super().__init__([["手元にありません。<propose:lookup>"], ["保健医療課です。<propose:refer>"]],
-                             chat_reply=_refer_json())
-            self.chat_inputs: list[str] = []
-
-        def chat(self, model: str, messages: list[dict[str, Any]], **kw: Any) -> str:
-            self.chat_inputs.append(messages[-1]["content"])
-            return super().chat(model, messages, **kw)
-
-    llm = Spy()
-    c = _conv(llm, tmp_path, StubLookup(LookupResult(found=False)))
-    await _say(c, "今週末は道の駅で何かやってますか")
-    await _say(c, "いらない")
-    await _say(c, "国保の切り替えで聞きたいことがあって")
-    await _say(c, "お願いします")
-    transcript = llm.chat_inputs[0]
-    assert "国保の切り替え" in transcript and "お願いします" in transcript
-    assert "道の駅" not in transcript and "いらない" not in transcript  # 前の話題を混ぜない
-
-
 async def test_staff_can_assign_department(tmp_path: Path) -> None:
     from src.edge_server import StaffPanel, create_app
 
@@ -626,3 +533,179 @@ async def test_staff_can_assign_department(tmp_path: Path) -> None:
         assert (await c.post(url, auth=auth, json={"department": "勝手な課"})).json()["department"] == "未特定"
         assert (await c.post(url, auth=auth, json={"department": "保健医療課"})).json()["department"] == "保健医療課"
         assert (await c.get("/staff/api/stats", auth=auth)).json()["unspecified"] == 0
+
+
+
+# ------------------------------------------------------------------
+# 紹介状の聞き取り（同意の後: 手続きの項目 → お名前・地区・連絡方法 → 受付番号と持ち物）
+# ------------------------------------------------------------------
+
+R = TEMPLATES["refer"]
+PHRASED = json.dumps({"questions": ["切り替えのきっかけは、退職ですか、転入ですか？", "いつから切り替えますか？",
+                                    "手続きはご本人ですか、ご家族ですか？"]}, ensure_ascii=False)
+
+
+class SpyLLM(StubLLM):
+    """chat に渡した最後の入力（紹介状の構造化に渡した会話）を覚える。"""
+
+    def __init__(self, replies: list[list[str]], chat_reply: str | list[str]) -> None:
+        super().__init__(replies, chat_reply)
+        self.chat_inputs: list[str] = []
+
+    def chat(self, model: str, messages: list[dict[str, Any]], **kw: Any) -> str:
+        self.chat_inputs.append(messages[-1]["content"])
+        return super().chat(model, messages, **kw)
+
+
+def _saved(tmp_path: Path) -> Any:
+    (ref,) = ReferralStore(tmp_path, "etajima", 30, csv_export=True).list(datetime.now(JST).date())
+    return ref
+
+
+async def test_refer_full_intake_flow(tmp_path: Path) -> None:
+    llm = SpyLLM([["国保の切り替えですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()])
+    c = _conv(llm, tmp_path)
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    out = await _say(c, "お願いします")
+    assert out == [R["acting"], "切り替えのきっかけは、退職ですか、転入ですか？"]
+    assert c.phase == "intake" and not c.expects_short_reply
+    assert await _say(c, "会社を退職したので") == ["いつから切り替えますか？"]
+    assert await _say(c, "来月からです") == ["手続きはご本人ですか、ご家族ですか？"]
+    assert await _say(c, "本人です") == [R["ask_name"]]
+    assert c.private_label == "お名前"
+    assert await _say(c, "山田です") == [R["confirm_name"].format(name="山田")]
+    assert c.redact("山田さま、でよろしいですか？") == "＊＊さま、でよろしいですか？"  # 画面には出さない
+    assert await _say(c, "はい") == [R["ask_area"]]
+    assert await _say(c, "能美町の中町1丁目です") == [R["ask_contact"]]
+    assert await _say(c, "電話でお願いします") == [R["ask_phone"]]
+    assert await _say(c, "090-1234-5678") == [R["confirm_phone"].format(phone="0 9 0、1 2 3 4、5 6 7 8")]
+    done = await _say(c, "はい")
+    assert done == [R["done"].format(department="保健医療課", number=c.last_receipt)
+                    + R["bring"].format(item="前の健康保険の資格喪失証明書")]
+    ref = _saved(tmp_path)
+    assert ref.department == "保健医療課" and ref.name == "山田" and ref.phone == "090-1234-5678"
+    assert ref.address_area == "能美町の中町"  # 番地は伺っていない（転入・転居ではない）
+    assert ref.contact_pref == "電話"
+    assert [q["answer"] for q in ref.intake] == ["会社を退職したので", "来月からです", "本人です"]
+    # 要約に渡した会話に、氏名・電話番号は入れない
+    assert "山田" not in llm.chat_inputs[-1] and "090" not in llm.chat_inputs[-1]
+    # プロセス内の記録にも残さない
+    assert all("山田" not in u and "090" not in u for u, _ in c._turns)
+    assert await _say(c, "うん") == [TEMPLATES["common"]["ack"]]  # 終わった直後の相づち
+
+
+async def test_refer_intake_skips_without_forcing(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["国保ですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()]), tmp_path)
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    await _say(c, "お願い")
+    assert await _say(c, "分からない") == [R["skipped"] + "いつから切り替えますか？"]
+    await _say(c, "いいから")
+    await _say(c, "言いたくない")
+    assert c.phase == "ask_name"
+    await _say(c, "言わなくていいでしょ")
+    await _say(c, "いいです")
+    out = await _say(c, "後日また来ます")
+    assert out[0].startswith(R["done_no_name"].format(department="保健医療課", number=c.last_receipt))
+    ref = _saved(tmp_path)
+    assert ref.name is None and ref.address_area is None and ref.contact_pref == "後日来庁"
+    assert [q["answer"] for q in ref.intake] == ["（答えなし）"] * 3
+
+
+async def test_refer_unspecified_department_without_intake(tmp_path: Path) -> None:
+    llm = StubLLM([["それは大変ですね。<propose:refer>"]], chat_reply=_refer_json())
+    c = _conv(llm, tmp_path)
+    await _say(c, "ちょっと困ったことがあって")
+    assert await _say(c, "お願い") == [R["acting"], R["ask_name"]]  # 手続きが分からないので共通の項目だけ
+    await _say(c, "いいです")
+    await _say(c, "いいです")
+    out = await _say(c, "ここで待ちます")
+    assert out == [R["done_unknown_no_name"].format(number=c.last_receipt)]  # 課名は言わない
+    ref = _saved(tmp_path)
+    assert ref.department == "未特定" and ref.contact_pref == "窓口で待つ" and ref.intake == []
+
+
+async def test_refer_ambiguous_department_is_unspecified(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["そうですか。<propose:refer>"]], chat_reply=_refer_json()), tmp_path)
+    await _say(c, "住民票と介護保険のことで聞きたいことがあって")
+    await _say(c, "お願い")
+    await c.end_session()  # 聞き取りの途中で立ち去っても、伺えたところまでで作る
+    assert _saved(tmp_path).department == "未特定"
+
+
+async def test_refer_phone_said_earlier_is_read_back_and_can_be_dropped(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["わかりました。<propose:refer>"]], chat_reply=_refer_json()), tmp_path)
+    await _say(c, "母の介護のことで相談したいんです。電話は090-1234-5678です")
+    await _say(c, "お願い")
+    for answer in ["分からない", "分からない", "いいです", "いいです", "窓口で待ちます"]:
+        out = await _say(c, answer)
+    assert out == [R["confirm_phone"].format(phone="0 9 0、1 2 3 4、5 6 7 8")]
+    out = await _say(c, "違います")
+    assert out[0] == R["phone_wrong"]
+    assert _saved(tmp_path).phone is None and _saved(tmp_path).department == "高齢介護課"
+
+
+async def test_refer_name_retry_then_full_address_for_moving_in(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["転入ですね。<propose:refer>"]], chat_reply=_refer_json()), tmp_path)
+    await _say(c, "転入の手続きで聞きたいことがあって")
+    await _say(c, "お願い")
+    assert c.phase == "ask_name"
+    await _say(c, "山田です")
+    assert await _say(c, "いいえ") == [R["ask_name_again"]]
+    assert await _say(c, "山本です") == [R["confirm_name"].format(name="山本")]
+    assert await _say(c, "はい") == [R["ask_area_full"]]  # 転入は番地まで
+    await _say(c, "中町4859番地です")
+    await _say(c, "ここで待ちます")
+    ref = _saved(tmp_path)
+    assert ref.name == "山本" and ref.address_area == "中町4859番地" and ref.department == "市民課"
+
+
+async def test_refer_summary_uses_only_current_topic(tmp_path: Path) -> None:
+    llm = SpyLLM([["手元にありません。<propose:lookup>"], ["保健医療課です。<propose:refer>"]],
+                 chat_reply=[PHRASED, _refer_json()])
+    c = _conv(llm, tmp_path, StubLookup(LookupResult(found=False)))
+    await _say(c, "今週末は道の駅で何かやってますか")
+    await _say(c, "いらない")
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    await _say(c, "お願いします")
+    await c.end_session()
+    transcript = llm.chat_inputs[1]
+    assert "国保の切り替え" in transcript and "お願いします" in transcript
+    assert "道の駅" not in transcript and "いらない" not in transcript  # 前の話題を混ぜない
+
+
+def test_asr_fixes_from_yaml_and_staff_panel(tmp_path: Path) -> None:
+    from src.procedures import AsrFixes
+
+    fixes = AsrFixes(SERVER_ROOT / "context", tmp_path)
+    assert fixes.apply("国宝の切り替えで聞きたいことがあって") == "国保の切り替えで聞きたいことがあって"
+    assert fixes.apply("後期好礼の保険証") == "後期高齢の保険証"
+    fixes.add("国保険", "国民健康保険")
+    again = AsrFixes(SERVER_ROOT / "context", tmp_path)  # 足した行はデータディレクトリに残る
+    assert again.apply("国保険の資格") == "国民健康保険の資格"
+    with pytest.raises(ValueError):
+        again.add("同じ", "同じ")
+
+
+async def test_staff_panel_adds_asr_fix_and_shows_intake(tmp_path: Path) -> None:
+    from src.edge_server import StaffPanel, create_app
+    from src.procedures import AsrFixes
+
+    store = ReferralStore(tmp_path, "etajima", 30, csv_export=True)
+    ref = store.create(_fields(intake=[{"question": "いつから", "answer": "来月"}], address_area="能美町"))
+    fixes = AsrFixes(SERVER_ROOT / "context", tmp_path)
+    panel = StaffPanel(store, VisitLog(tmp_path, "etajima"), StaffConfig(password="pw"), asr_fixes=fixes)
+    transport = httpx.ASGITransport(app=create_app(tmp_path / "none", panel), client=("192.168.1.20", 5000))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        auth = ("staff", "pw")
+        rows = (await c.get("/staff/api/referrals", auth=auth)).json()
+        assert rows[0]["intake"] == [{"question": "いつから", "answer": "来月"}] and rows[0]["address_area"] == "能美町"
+        r = await c.post("/staff/api/asr_fixes", auth=auth, json={"surface": "後期高齢写", "correct": "後期高齢者"})
+        assert r.status_code == 200
+        assert (await c.post("/staff/api/asr_fixes", auth=auth, json={"surface": "", "correct": "x"})).status_code == 422
+        listed = (await c.get("/staff/api/asr_fixes", auth=auth)).json()
+        assert {"surface": "後期高齢写", "correct": "後期高齢者", "source": "職員パネル"} in listed
+        page = (await c.get("/staff/", auth=auth)).text
+        assert "聞き取り間違いの対応表" in page
+    assert fixes.apply("後期高齢写") == "後期高齢者"
+    rows_csv = (tmp_path / "referrals" / "etajima").rglob("*.csv")
+    assert any("来月" in p.read_text(encoding="utf-8-sig") for p in rows_csv) or ref

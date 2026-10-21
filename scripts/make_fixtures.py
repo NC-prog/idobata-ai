@@ -80,6 +80,18 @@ UTTERANCES: tuple[Utterance, ...] = (
         text="国保の切り替えで聞きたいことがあって。",
     ),
     Utterance(filename="visitor_onegai_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="お願いします。"),
+    # WP04: 紹介状の聞き取り（同意の後）。名前・電話番号は架空
+    Utterance(filename="visitor_intake_reason_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="会社を退職したので。"),
+    Utterance(filename="visitor_intake_when_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="来月からです。"),
+    Utterance(filename="visitor_intake_self_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="本人です。"),
+    Utterance(filename="visitor_name_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="山田です。"),
+    Utterance(filename="visitor_hai_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="はい。"),
+    Utterance(filename="visitor_area_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="能美町です。"),
+    Utterance(filename="visitor_contact_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="電話でお願いします。"),
+    Utterance(filename="visitor_phone_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="ゼロキューゼロの、イチニーサンヨンの、ゴーロクナナハチです。"),
     Utterance(
         filename="visitor_trouble_ja.wav",
         speaker_id=13,
