@@ -779,3 +779,26 @@ def test_summary_filter_keeps_department_the_visitor_said(tmp_path: Path) -> Non
     c = _conv(StubLLM([]), tmp_path)
     s = "市民課で住民票を取りたい。保健医療課を案内された。"
     assert c._visitor_only(s, "市民課で住民票を取りたいんです") == "市民課で住民票を取りたい。"
+
+
+async def test_taught_local_talk_becomes_share_candidate(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    llm = StubLLM([["能美のことは、まだ詳しくなくて。どんなところか、教えていただけますか？"], ["すてきですね。"]])
+    c = _conv(llm, tmp_path, enabled=SHARE, tidbits=store)
+    await _say(c, "能美ってどんなところか知ってますか")
+    out = await _say(c, "能美は海がきれいで、夕方は島がよく見えるんですよ")
+    assert out[-1] == TEMPLATES["share"]["propose"]  # 教わった地元の話は小ネタの候補
+
+
+def test_short_segment_padding_and_voiced_length() -> None:
+    import numpy as np
+
+    from src.main import pad_segment, voiced_ms
+
+    frames = [np.zeros(512, np.float32) for _ in range(5)]
+    frames[2] = np.full(512, 0.2, np.float32)
+    padded = pad_segment(frames, 1.0, 16000)
+    assert sum(len(f) for f in padded) == 16000  # 1.0 秒にそろえる
+    assert padded[0].sum() == 0 and padded[-1].sum() == 0  # 前後は無音
+    assert pad_segment(padded, 0.8, 16000) == padded  # 長ければそのまま
+    assert voiced_ms(frames, 16000, 0.1, 0.005) == 32.0  # 声のあるフレームだけ数える

@@ -56,6 +56,11 @@
   聞き取り間違いの対応表（asr_fixes。職員パネルから足した行は `~/idobata-data/asr_fixes.jsonl`）にも使う。
   紹介状の同意の後は、手続きごとの聞き取り（procedures.yaml の intake、最大 3 問）→ お名前・地区・連絡方法を伺う。
   **氏名・地区・電話番号は字幕・エッジ画面・コンソール・ログに出さない**（「お名前：伺いました」と伏せる。保存は紹介状 JSON だけ）
+- 案内役の人物像は `server/context/persona.yaml`（WP05。肩書 `role_title` は `IDOBATA_ROLE_TITLE` で差し替え可）。
+  人物像は【話し方の決まり】の後ろに置き、事実・出典・設備と課の安全装置・日本語のみの規則が優先。
+  人物像と食い違う言い方（contradictions）は読み上げない。資料の無い地区の様子は作らず教えてもらう
+- 短い返事（うん・はい・そう）: 返事待ちの間だけ VAD のしきい値と最小発話長を下げ、短い区間は無音を足して ASR に渡す。
+  日本語の会話で短い区間が他言語と判定されたら日本語に固定して聞き直す（`VADConfig` / `ASRConfig`）
 - 挨拶は時間帯で変える（`src/timeofday.py`。5〜10 時 おはようございます、10〜17 時 こんにちは、17 時以降 こんばんは）。
   応答・相槌・定型文（`{greeting}`）・アナウンスで同じ判定を使い、LLM が別の時間帯の挨拶を言ったら読み上げ前に直すASR は返事待ちの間だけ言語を固定する
   （`deploy/standalone/asr/chat_template.jinja` の `force_language`）
@@ -80,7 +85,7 @@ uv run python -m src.main --mode voice --input-wav tests/fixtures/visitor_proced
 CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajima
 CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajima --daily   # 更新の速い区画だけ（差分）
 bash ../deploy/standalone/install-kb-timers.sh   # 自動更新（毎朝 6:00 差分・毎週日曜 3:00 全体・毎時 05 分天気。有効化済み）
-uv run python -m tests.eval.run --site etajima   # 評価セット 20 問（LLM と知識パックを使う）
+uv run python -m tests.eval.run --site etajima   # 評価セット 30 問（WP03 の 20 問＋人物像 10 問。LLM と知識パックを使う）
 uv run python -m tests.eval.run --site etajima --set smalltalk   # 雑談 10 問（締めの定型で終わる割合を数える）
 
 # エッジ（ブラウザ）モード: マイク・スピーカー・アバターはブラウザ側

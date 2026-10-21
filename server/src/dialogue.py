@@ -23,6 +23,7 @@ from typing import Any, Protocol
 from .config import DialogueConfig, config
 from .knowledge import JST, Reference, SearchResult, Weather
 from .persona import Persona, build_system_prompt, build_turn_message, source_labels, this_weekend
+from .procedures import Procedures
 from .site_context import Facility
 from .timeofday import fix_greeting, greeting_for
 
@@ -233,6 +234,7 @@ class Dialogue:
         avatar_name: str = "",
         enabled_actions: tuple[str, ...] = (),
         persona: Persona | None = None,
+        procedures: Procedures | None = None,
     ) -> None:
         self._llm = llm
         self._cfg = cfg or config.dialogue
@@ -243,6 +245,7 @@ class Dialogue:
         self._avatar_name = avatar_name
         self._enabled_actions = enabled_actions
         self._persona = persona
+        self._procedures = procedures
         # 直近の応答が出した行為の提案（<propose:…>）。無ければ None
         self.last_proposal: str | None = None
         self._now = now
@@ -378,11 +381,15 @@ class Dialogue:
                     for x in re.split(r"(?<=[。！？!?])", reply)}
         sentences: list[str] = []
         dropped_echo = False
+        # 発話から担当課が規則で一意に決まるなら、応答で最初に名前を出す課をそれにそろえる
+        expected_dept = self._expected_department(text)
+        dept_state = expected_dept is None
         cited: set[int] = set()
         try:
             async for delta in self._stream(messages):
                 for raw in splitter.feed(think.feed(delta)):
                     sentence = await self._finish_sentence(raw, cited)
+                    sentence, dept_state = self._fix_department(sentence, expected_dept, dept_state)
                     if self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
                         continue
@@ -400,6 +407,7 @@ class Dialogue:
             # 言いかけの残りは捨て、言えた文だけを履歴に積む
         else:
             tail = await self._finish_sentence(splitter.flush(), cited)
+            tail, dept_state = self._fix_department(tail, expected_dept, dept_state)
             if tail and dropped_echo and not sentences:
                 tail = _LEADING_PARTICLE_RE.sub("", tail)
             # 何も言っていないときの最後の文は捨てない（応答が空になる）
@@ -428,6 +436,33 @@ class Dialogue:
         self._history.append((text, reply))
         logger.debug("応答: %s", reply)
 
+    def _expected_department(self, text: str) -> str | None:
+        if self._procedures is None or self._facility is None:
+            return None
+        cands = self._procedures.departments_for(text, self._facility)
+        return cands[0] if len(cands) == 1 else None
+
+    def _fix_department(self, sentence: str, expected: str | None, done: bool) -> tuple[str, bool]:
+        """応答で最初に出た課が、発話から決まる担当課と違えば直す。done はもう課を言い終えたか。
+
+        2 つ目以降の課は直さない（「社会福祉課でも受け付けています」のような追加の案内があるため）。
+        """
+        if done or expected is None or not sentence:
+            return sentence, done
+        names = [d.name for d in self._facility.departments] if self._facility else []
+        said = [n for n in names if n in sentence]
+        if not said:
+            return sentence, False
+        if expected in said:
+            return sentence, True
+        wrong = said[0]
+        logger.info("担当課の取り違えを直しました（%s → %s）", wrong, expected)
+        floor = next((d.floor for d in self._facility.departments if d.name == expected), None) if self._facility else None
+        fixed = sentence.replace(wrong, expected, 1)
+        if floor:  # 「市民課（1階）」の階も直す
+            fixed = self._fix_department_floor(fixed)
+        return fixed, True
+
     def _fix_department_floor(self, sentence: str) -> str:
         """「1階の保健医療課」「税務課（2階）」「市民課は2階」の階を、施設の事実の階に直す。"""
         for d in (self._facility.departments if self._facility else ()):
@@ -442,10 +477,8 @@ class Dialogue:
         return sentence
 
     def _department_directions(self, sentence: str) -> bool:
-        """課の名前と道順の言い方が同じ文にあるか（道順は作らない決まり）。"""
-        if not re.search(self._cfg.direction_pattern, sentence):
-            return False
-        return any(d.name in sentence for d in (self._facility.departments if self._facility else ()))
+        """館内の道順の言い方を含む文か（道順は作らない決まり。課の名前が前の文にあっても捕まえる）。"""
+        return re.search(self._cfg.direction_pattern, sentence) is not None
 
     def _unknown_place(self, text: str, refs: list[Reference]) -> str | None:
         """「〇〇ってどんなところ？」で参考資料が無ければ、その地名（無ければ「そちら」）。"""
@@ -482,6 +515,9 @@ class Dialogue:
         """読み上げない文か（おうむ返し・これまでと同じ文・重ねた「お困りのことは」の類）。"""
         if not sentence:
             return False
+        if self._history and re.fullmatch(r"(おはようございます|こんにちは|こんばんは)[。！!、]?", sentence.strip()):
+            logger.info("会話の途中の挨拶だけの文を読み上げずに捨てました")
+            return True
         if self._contradicts_persona(sentence):
             logger.info("人物像と食い違う文（生まれ・育ちなど）を読み上げずに捨てました")
             return True
@@ -596,14 +632,14 @@ class Dialogue:
         if self._llm_source_re.search(sentence):
             return ""  # 出典の一言はこちらで足す
         sentence = self._fix_department_floor(sentence)
-        if self._department_directions(sentence):
-            logger.info("課への道順を作った文を読み上げずに捨てました")
-            return ""
         unknown = self._unknown_facility_location(sentence)
         if unknown is not None:
             logger.info("館内の設備（%s）の場所を作った文を差し替えます", unknown)
             logger.debug("差し替え前: %s", sentence)
             return self._cfg.unknown_facility_sentence.format(name=unknown)
+        if self._department_directions(sentence):
+            logger.info("館内の道順を作った文を読み上げずに捨てました")
+            return ""
         if any(p in sentence for p in self._banned):
             logger.warning("言わないことにしている言い回しを含む文を読み上げずに捨てました")
             logger.debug("捨てた文: %s", sentence)

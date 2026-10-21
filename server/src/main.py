@@ -127,6 +127,7 @@ class VoiceLoop:
             avatar_name=config.actions.avatar_name,
             enabled_actions=config.actions.enabled,
             persona=load_persona(config.persona),
+            procedures=load_procedures(config.asr.site_context_dir),
         )
         # 同意付きの行為（調べる・つなぐ）と来訪記録（WP04）
         self._referrals = ReferralStore(config.data_dir, config.site, config.referral.retention_days,

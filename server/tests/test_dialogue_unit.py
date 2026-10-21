@@ -538,3 +538,26 @@ async def test_department_floor_is_corrected_and_directions_dropped() -> None:
     d = Dialogue(StubLLM(["1階の保健医療課にお声がけください。", "生活環境課は1階ロビーの入り口すぐそばです。"]),
                  DialogueConfig(), facility=fac, now=_NOON)
     assert await _collect(d, "国保はどこ") == ["2階の保健医療課にお声がけください。"]
+
+
+async def test_first_department_is_aligned_with_rules() -> None:
+    from src.config import SERVER_ROOT
+    from src.procedures import load_procedures
+    from src.site_context import load_facility
+
+    fac = load_facility("etajima", SERVER_ROOT / "context")
+    procs = load_procedures(SERVER_ROOT / "context")
+    d = Dialogue(StubLLM(["国民健康保険の加入は、市民課（1階）で手続きできますよ。"]), DialogueConfig(),
+                 facility=fac, procedures=procs, now=_NOON)
+    out = "".join(await _collect(d, "国民健康保険に入りたいんですが"))
+    assert out == "国民健康保険の加入は、保健医療課（2階）で手続きできますよ。"
+    d2 = Dialogue(StubLLM(["子育て支援課で行います。", "社会福祉課でも受け付けています。"]), DialogueConfig(),
+                  facility=fac, procedures=procs, now=_NOON)
+    assert await _collect(d2, "児童手当の手続きはどこですか") == ["子育て支援課で行います。", "社会福祉課でも受け付けています。"]
+
+
+async def test_greeting_only_on_first_turn() -> None:
+    llm = StubLLM(["こんにちは。", "いい天気ですね。"])
+    d = Dialogue(llm, DialogueConfig(), now=_NOON)
+    assert await _collect(d, "やあ") == ["こんにちは。", "いい天気ですね。"]
+    assert await _collect(d, "散歩してきました") == ["いい天気ですね。"]
