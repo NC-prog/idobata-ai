@@ -34,6 +34,9 @@ _FALLBACK_REPLY: dict[str, str] = {
 }
 
 # 応答末尾の出典の印（[出典:1,3]）と、文中に紛れた [1] などの番号。読み上げ前に取り除く
+# 行為の提案のタグ（<propose:lookup> など）。読み上げ前に取り除き、last_proposal に残す
+_PROPOSE_RE = re.compile(r"[<＜]\s*propose\s*[:：]\s*([a-z_]+)\s*[>＞]", re.IGNORECASE)
+
 _SOURCE_MARK_RE = re.compile(
     r"[\[［]\s*(?:出典\s*[:：]?)?\s*([0-9０-９]+(?:\s*[,，、]\s*[0-9０-９]+)*)\s*[\]］]"
     # 括弧を付け忘れた印（「出典:1」「出典：1,3」）
@@ -42,6 +45,8 @@ _SOURCE_MARK_RE = re.compile(
 
 # 印を取ったあとに残る句読点の前の空白
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"[ \u3000]+([。、！？!?])")
+# 来訪者の言葉の繰り返しを比べるときに無視する文字
+_ECHO_IGNORE_RE = re.compile(r"[\s、。，．,.！？!?「」『』…ー〜~]")
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
@@ -206,6 +211,8 @@ class Dialogue:
         knowledge: Searcher | None = None,
         weather: Weather | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(JST),
+        avatar_name: str = "",
+        enabled_actions: tuple[str, ...] = (),
     ) -> None:
         self._llm = llm
         self._cfg = cfg or config.dialogue
@@ -213,6 +220,10 @@ class Dialogue:
         self._facility = facility
         self._kb = knowledge
         self._weather = weather
+        self._avatar_name = avatar_name
+        self._enabled_actions = enabled_actions
+        # 直近の応答が出した行為の提案（<propose:…>）。無ければ None
+        self.last_proposal: str | None = None
         self._now = now
         self._ascii_re = re.compile(rf"[A-Za-zＡ-Ｚａ-ｚ]{{{self._cfg.ascii_run_min},}}")
         self._allow_ascii = {a.lower() for a in (
@@ -253,7 +264,8 @@ class Dialogue:
         """LLM に渡す messages を組み立てる（システムプロンプトは毎ターン作り直す）。"""
         now = self._now()
         weather = self._weather.lines(now) if self._weather is not None else []
-        system = build_system_prompt(self._cfg, self._facility, now.date(), weather)
+        system = build_system_prompt(self._cfg, self._facility, now.date(), weather,
+                                     self._avatar_name, self._enabled_actions)
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for user, assistant in self._history:
             messages.append({"role": "user", "content": user})
@@ -264,7 +276,27 @@ class Dialogue:
                          "content": build_turn_message(self._cfg, self._facility, refs or [], content)})
         return messages
 
-    async def respond(self, text: str, language: str = "ja") -> AsyncIterator[str]:
+    @property
+    def history(self) -> list[tuple[str, str]]:
+        """今の会話の (来訪者, 応答) の組（古い順）。"""
+        return list(self._history)
+
+    def extend_last_reply(self, line: str) -> None:
+        """直前の応答の後ろに文を足す（行為の提案文など。履歴の流れを保つため）。"""
+        if self._history:
+            user, reply = self._history[-1]
+            self._history[-1] = (user, reply + line)
+
+    def add_turn(self, user: str, assistant: str) -> None:
+        """LLM を通さずに答えたターン（行為の定型文など）を履歴に積む。"""
+        self._history.append((user, assistant))
+
+    async def respond(
+        self,
+        text: str,
+        language: str = "ja",
+        extra_refs: list[Reference] | None = None,
+    ) -> AsyncIterator[str]:
         """1 発話に対する応答を 1 文ずつ返す。
 
         Args:
@@ -275,6 +307,7 @@ class Dialogue:
             応答の文。LLM が 1 文も返せなかった場合は定型の聞き返し文を 1 つ。
             履歴には、言い終えた全文を 1 ターンとして積む。
         """
+        self.last_proposal = None
         text = text.strip()
         if not text:
             return
@@ -296,7 +329,9 @@ class Dialogue:
             yield reply
             return
 
-        refs = await self._search(text)
+        refs = list(extra_refs) if extra_refs is not None else await self._search(text)
+        if extra_refs is not None:
+            self.last_references, self.last_search_ms = refs, None
         messages = self.build_messages(text, language, refs)
         logger.debug("発話 [%s]: %s", language, text)
         splitter = SentenceSplitter(
@@ -312,6 +347,9 @@ class Dialogue:
             async for delta in self._stream(messages):
                 for raw in splitter.feed(think.feed(delta)):
                     sentence = await self._finish_sentence(raw, cited)
+                    if sentence and not sentences and self._is_echo(sentence, text):
+                        logger.info("来訪者の言葉を繰り返す文を読み上げずに捨てました")
+                        continue
                     if sentence:
                         sentences.append(sentence)
                         yield sentence
@@ -346,6 +384,16 @@ class Dialogue:
         reply = "".join(sentences)
         self._history.append((text, reply))
         logger.debug("応答: %s", reply)
+
+    def _is_echo(self, sentence: str, user_text: str) -> bool:
+        """応答の文が来訪者の言葉のおうむ返しか（挨拶を返すのは除く）。"""
+        if any(k in sentence for k in self._cfg.echo_keep):
+            return False
+        s = _ECHO_IGNORE_RE.sub("", sentence)
+        u = _ECHO_IGNORE_RE.sub("", user_text)
+        if not s or s not in u:
+            return False
+        return len(s) >= 4 or u.startswith(s)
 
     async def _search(self, text: str) -> list[Reference]:
         """知識パックを検索する（CPU で数十 ms。イベントループを止めないよう別スレッド）。"""
@@ -402,6 +450,13 @@ class Dialogue:
                     cited.add(int(n.translate(_ZEN_DIGITS)))
             return ""
 
+        def propose(m: re.Match[str]) -> str:
+            kind = m.group(1).lower()
+            if kind in self._enabled_actions:
+                self.last_proposal = kind
+            return ""
+
+        raw = _PROPOSE_RE.sub(propose, raw)
         sentence = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", _SOURCE_MARK_RE.sub(take, raw)).strip()
         for old, new in self._cfg.leak_replacements:
             sentence = sentence.replace(old, new)
@@ -476,6 +531,14 @@ class Dialogue:
             if short in reply and re.sub(r"[^0-9]", "", e.number) not in digits:
                 out.append(self._cfg.emergency_number_sentence.format(name=short, number=e.number))
         return out
+
+    def safe_query(self, raw: str | None) -> str | None:
+        """LLM が作った検索語の安全装置（英字・言わない言い回し・長すぎるものは使わない）。"""
+        q = re.sub(r"[「」『』、。,.!?！？\n]", " ", (raw or "")).strip()
+        q = re.sub(r"\s+", " ", q)[:40]
+        if not q or self._has_foreign_word(q) or any(p in q for p in self._banned):
+            return None
+        return q
 
     def _has_foreign_word(self, sentence: str) -> bool:
         """英字の連なり（許可語以外）か、日本語の文字集合に無い漢字（中国語の簡体字など）があるか。"""

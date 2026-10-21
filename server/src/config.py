@@ -115,6 +115,13 @@ class ASRConfig:
     echo_ngram: int = 2
     # これより短い出力（句読点・空白を除く）は判定しない（「はい」の繰り返しを捨てない）
     echo_min_chars: int = 8
+    # 出力に拠点の語彙がこの数以上含まれていたら、語彙の一覧の吐き出しとして破棄する
+    vocabulary_dump_min_words: int = 6
+
+    # 提案の返事待ち（うん・はい・いらない）は会話の言語に固定して聞き取る（WP04）。
+    # 言語判定に任せると「うん」→「嗯」、「はい」→「Hi.」になる。ASR サーバ側に
+    # deploy/standalone/asr/chat_template.jinja（force_language 対応）が要る
+    force_language_on_reply: bool = True
 
 
 @dataclass(frozen=True)
@@ -152,6 +159,9 @@ class VADConfig:
     min_speech_ms: int = 250
     min_silence_ms: int = 400
     pre_roll_ms: int = 30
+    # 発話開始を検出する前の音声もセグメントに含める長さ（ミリ秒）。Silero は立ち上がりの
+    # 後で start を出すので、無いと語頭が欠ける（「うん」→「分」、「国保」→「国宝」。WP04）
+    segment_preroll_ms: int = 300
     max_segment_sec: float = 7.0
     sample_rate: int = 16000
     frame_size: int = 512
@@ -237,7 +247,7 @@ class DialogueConfig:
     source_marker_example: str = "[出典:1,3]"
     # システムプロンプト（固定事実層 + 参考資料 + 今日）。{...} は persona.py が埋める
     persona_template: str = (
-        "あなたは{location_phrase}にいる案内役です。名前はまだありません。\n"
+        "あなたは{location_phrase}にいる案内役です。呼び名は「{avatar_name}」です。\n"
         "来訪者の話を急かさず聞きます。敬語ですが硬くありません。\n"
         "【ここで分かっていること】\n"
         "{facts}\n"
@@ -273,6 +283,7 @@ class DialogueConfig:
         "- 分からないことは分からないと言う。\n"
         "- 日本語以外で話しかけられたら、日本語で「{foreign_reply}」と短く伝える。\n"
         "- 【参考資料】は来訪者の発話の前に毎回付けて渡す。無いときは「なし」と書いてある。\n"
+        "{propose_rules}"
         "【今日】\n"
         "{today}"
     )
@@ -286,6 +297,9 @@ class DialogueConfig:
         "お住まいの市区町村", "お住まいの自治体", "お住まいの地域の役所", "お住まいの市町村",
     )
     # プロンプトの見出しが漏れたときの言い換え
+    # 応答の冒頭で来訪者の言葉をそのまま繰り返す文は読み上げない（8B の癖。一度出ると
+    # 履歴に倣って続く）。ただし挨拶を返すのは自然なので残す
+    echo_keep: tuple[str, ...] = ("こんにちは", "こんばんは", "おはようございます", "ありがとう")
     leak_replacements: tuple[tuple[str, str], ...] = (
         ("【参考資料】", "手元の資料"), ("参考資料", "手元の資料"),
         ("【ここで分かっていること】", "こちらで分かっていること"),
@@ -304,6 +318,20 @@ class DialogueConfig:
     facility_question_pattern: str = r"どこ|ありますか|あります？|ある？|場所|行きたい|使いたい|使えますか|探して"
     # 緊急連絡先の名前だけ言って番号を言わなかったときに足す文
     emergency_number_sentence: str = "{name}の番号は、{number}です。"
+    # 同意付きの行為を提案してよい状況を、応答の最後のタグで知らせてもらう（WP04）。行為ごとの条件
+    propose_rule_head: str = (
+        "- 次の状況のときだけ、応答のいちばん最後にタグを 1 つ付ける（タグは読み上げない。"
+        "提案の言葉は自分で言わない。こちらで言う）:\n"
+    )
+    propose_conditions: tuple[tuple[str, str], ...] = (
+        ("lookup", ("行事・催し・施設・お知らせ・営業日を知りたがっているのに、【参考資料】に答えが無いとき。"
+                    "手続き・相談・困りごとには付けない（それは refer）")),
+        ("refer", ("手続き（保険・税・住民票・子育て・介護など）の相談で、担当の課が【ここで分かっていること】から"
+                   "分かるとき。または困りごとの打ち明けで相談先があるとき（子育て・介護・生活の困りごとなど）。"
+                   "雑談では付けない")),
+        ("share", ("行事・季節・畑・魚・天気などの雑談で、来訪者が話したことに個人の事情が含まれず、"
+                   "ほかの来訪者に教えても差し支えないとき")),
+    )
     # 日本語以外の発話への返事（多言語は site プロファイルで後日）。LLM を通さずこの文を返す
     foreign_reply: str = "申し訳ありません、外国語でのご案内は準備中です。"
     # 参考資料があるターンだけ【話し方の決まり】に足す（無いのに出典の一言を言わせない）
@@ -351,6 +379,101 @@ class KnowledgeConfig:
 
 
 @dataclass(frozen=True)
+class ActionsConfig:
+    """相槌と、同意付きの行為（調べる・つなぐ・覚えておく）の設定（WP04）。"""
+
+    # アバターの呼び名（仮。市民公募で決める前提）。環境変数 IDOBATA_AVATAR_NAME
+    avatar_name: str = "いどちゃん"
+    backchannel_enabled: bool = True
+    backchannel_path: Path = SERVER_ROOT / "context" / "backchannel.yaml"
+    # 相槌の事前合成にかけてよい時間（秒）。超えたら残りは使うときに合成する
+    backchannel_prepare_budget_sec: float = 30.0
+    templates_path: Path = SERVER_ROOT / "context" / "actions.yaml"
+    # 使う行為（LLM に <propose:…> を出してよいと伝えるもの）
+    enabled: tuple[str, ...] = ("lookup", "refer")
+    # 返事が分からないときに聞き直す回数（それでも分からなければ辞退扱い）
+    max_reask: int = 1
+    # LLM がタグを付け忘れたときの規則による補い（8B は付け忘れが多い）。
+    # 調べる: 応答が「資料に無い」と言い、発話が行事・営業などを尋ねているとき
+    lookup_fallback_reply: str = (
+        r"資料に(は)?(ありません|載っていません|見当たりません)|情報が(ありません|見当たりません)|"
+        r"手元に(は)?(ありません|情報が)|分かりません|わかりません|把握して(い)?ません"
+    )
+    lookup_fallback_topic: str = (
+        r"行事|イベント|催し|祭り|まつり|やって(い)?ます|営業|開いて(い)?ます|休み|定休|お知らせ|何時まで"
+    )
+    # 調べるの提案は、発話が尋ねているか行事・営業の話のときだけ受け付ける（雑談に付いたタグは捨てる）
+    question_pattern: str = (
+        r"[かは？?][。]?$|ますか|ですか|どこ|いつ|何|なに|どう|教えて|知りたい|ある[の？?]|やって"
+    )
+    # 返事待ちに、返事らしくない長い発話（新しい話）が来たら、聞き直さずに辞退として普通に答える
+    reply_max_chars: int = 12
+    # つなぐ: 発話が手続き（ReferralConfig.procedure_pattern）の相談を求めているとき
+    refer_fallback_cue: str = r"相談|聞きたいこと|困って|分からなくて|わからなくて|どうしたら"
+
+
+@dataclass(frozen=True)
+class LookupConfig:
+    """調べる（lookup）の設定。取得先は kb/sources/<site>.yaml の lookup。"""
+
+    sources_dir: Path = REPO_ROOT / "kb" / "sources"
+    # 合計でこの秒数で打ち切る
+    timeout_sec: float = 5.0
+    # 一覧・検索結果から読みに行くページ数
+    max_pages: int = 3
+    max_chars: int = 1000
+    # 読んだ本文が見つかったとみなす BM25 の最低点（実測で決める）
+    min_score: float = 2.0
+    query_max_tokens: int = 32
+    query_prompt: str = (
+        "来訪者の発話から、市役所のホームページで調べるための検索語を作ってください。"
+        "場所・行事・手続き・施設の名前だけを 2〜4 語、空白で区切って出力します。"
+        "本人の事情・氏名・体調・家族の話・連絡先は含めません。検索語だけを出力してください。"
+    )
+    # 一般の検索エンジン（既定 OFF。環境変数 IDOBATA_LOOKUP_WEB_SEARCH=1 で ON）
+    web_search_enabled: bool = False
+    web_search_url: str = "https://html.duckduckgo.com/html/?q={q}"
+    web_search_results: int = 3
+    user_agent: str = "idobata-ai-lookup/0.1 (+Fuji Seisakusho LLC; municipal lobby guide pilot)"
+
+
+@dataclass(frozen=True)
+class ReferralConfig:
+    """紹介状（本人が同意したものだけを保存する）の設定。"""
+
+    # 保存期間（日）。起動時に古いものを消す。環境変数 IDOBATA_REFERRAL_RETENTION_DAYS
+    retention_days: int = 30
+    summary_max_tokens: int = 300
+    # LLM が lookup を提案しても、発話が手続き・相談ならつなぐ（refer）に置き換える
+    # （8B は手続きの相談にも lookup を付けがちなため、規則で補正する）
+    procedure_pattern: str = (
+        r"手続き?|切り?替え|申請|届け?出|届|証明書|相談|困って|困りごと|聞きたいこと|"
+        r"国保|国民健康保険|保険証|年金|介護|児童手当|住民票|戸籍|転入|転出|引っ越し|税金|納付|"
+        r"生活保護|障害"
+    )
+    structure_prompt: str = (
+        "以下の来訪者との会話から、担当の課へ伝える紹介状を JSON で作ってください。"
+        "department は【課の一覧】のどれか（分からなければ空文字）。"
+        "category は 手続き / 相談 / 意見 / その他 のどれか。"
+        "summary は来訪者の言葉を 2〜3 文で要約（推測で足さない）。"
+        "urgency は 急ぐ / 通常。contact_pref は 窓口で待つ / 電話 / 後日来庁 / 未定。"
+        "name と phone は、来訪者が自分で言った場合だけ書き、言っていなければ null。"
+        'JSON だけを出力: {"department":"","category":"","summary":"","urgency":"",'
+        '"contact_pref":"","name":null,"phone":null}'
+    )
+
+
+@dataclass(frozen=True)
+class StaffConfig:
+    """職員パネル（/staff/、LAN 内のみ、Basic 認証）の設定。"""
+
+    user: str = "staff"
+    # 環境変数 IDOBATA_STAFF_PASSWORD。空ならパネルは使えない
+    password: str = ""
+    poll_sec: int = 10
+
+
+@dataclass(frozen=True)
 class CaptionConfig:
     """字幕表示の設定。"""
 
@@ -390,6 +513,10 @@ class AppConfig:
     speech_gate: SpeechGateConfig = field(default_factory=SpeechGateConfig)
     dialogue: DialogueConfig = field(default_factory=DialogueConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
+    actions: ActionsConfig = field(default_factory=ActionsConfig)
+    lookup: LookupConfig = field(default_factory=LookupConfig)
+    referral: ReferralConfig = field(default_factory=ReferralConfig)
+    staff: StaffConfig = field(default_factory=StaffConfig)
     edge: EdgeConfig = field(default_factory=EdgeConfig)
 
 
@@ -431,7 +558,16 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     edge = EdgeConfig(
         ws_port=int(_parse_float(env, "IDOBATA_EDGE_WS_PORT", EdgeConfig.ws_port)),
         http_port=int(_parse_float(env, "IDOBATA_EDGE_HTTP_PORT", EdgeConfig.http_port)),
+        # 職員パネルを LAN から見るときは 0.0.0.0（アクセスは LAN 内のアドレスだけに絞る）
+        http_host=env.get("IDOBATA_EDGE_HTTP_HOST", EdgeConfig.http_host).strip() or EdgeConfig.http_host,
     )
+    actions = ActionsConfig(
+        avatar_name=env.get("IDOBATA_AVATAR_NAME", "").strip() or ActionsConfig.avatar_name)
+    lookup = LookupConfig(
+        web_search_enabled=env.get("IDOBATA_LOOKUP_WEB_SEARCH", "").strip().lower() in ("1", "true", "yes"))
+    referral = ReferralConfig(retention_days=int(_parse_float(
+        env, "IDOBATA_REFERRAL_RETENTION_DAYS", ReferralConfig.retention_days)))
+    staff = StaffConfig(password=env.get("IDOBATA_STAFF_PASSWORD", "").strip())
     dialogue = DialogueConfig(
         idle_timeout_sec=_parse_float(
             env, "IDOBATA_IDLE_TIMEOUT_SEC", DialogueConfig.idle_timeout_sec
@@ -447,6 +583,10 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         audio_output=audio_output,
         dialogue=dialogue,
         edge=edge,
+        actions=actions,
+        lookup=lookup,
+        referral=referral,
+        staff=staff,
     )
 
 

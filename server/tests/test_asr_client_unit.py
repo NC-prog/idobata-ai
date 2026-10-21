@@ -18,6 +18,7 @@ from src.asr_client import (
     _clean_streaming_text,
     _detect_language,
     _language_code,
+    language_name,
     load_site_vocabulary,
     ngram_overlap,
 )
@@ -209,8 +210,11 @@ class TestCleanStreamingTextProgressiveAccumulation:
 # ------------------------------------------------------------------
 
 
-def _sse_client(outputs: list[str]) -> tuple[ASRClient, list[dict[str, Any]]]:
-    """呼ばれるたびに outputs を 1 つずつ ASR の出力として返す ASRClient。"""
+def _sse_client(outputs: list[str], header: bool = True) -> tuple[ASRClient, list[dict[str, Any]]]:
+    """呼ばれるたびに outputs を 1 つずつ ASR の出力として返す ASRClient。
+
+    header=False は言語を固定したとき（言語ヘッダーはプロンプト側にあり、出力に出ない）。
+    """
     import httpx
 
     payloads: list[dict[str, Any]] = []
@@ -220,7 +224,7 @@ def _sse_client(outputs: list[str]) -> tuple[ASRClient, list[dict[str, Any]]]:
         text = outputs[len(payloads) - 1]
         body = "".join(
             f"data: {json.dumps({'choices': [{'delta': {'content': c}}]})}\n\n"
-            for c in ["language Japanese", "<asr_text>", text, "</asr_text>"]
+            for c in (["language Japanese", "<asr_text>"] if header else []) + [text, "</asr_text>"]
         ) + "data: [DONE]\n\n"
         return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
 
@@ -229,9 +233,10 @@ def _sse_client(outputs: list[str]) -> tuple[ASRClient, list[dict[str, Any]]]:
     return client, payloads
 
 
-async def _final(client: ASRClient) -> str | None:
+async def _final(client: ASRClient, force_language: str | None = None) -> str | None:
     audio = [np.zeros(1600, dtype=np.float32)]
-    finals = [c.text async for c in client.transcribe_segment(audio, 0.0) if c.is_final]
+    finals = [c.text async for c in client.transcribe_segment(audio, 0.0, force_language=force_language)
+              if c.is_final]
     return finals[0] if finals else None
 
 
@@ -286,3 +291,25 @@ class TestContextEcho:
         client.clear_rolling_context()  # 会話の区切り（次の来訪者は同じことを言ってよい）
         assert await _final(client) == text
         await client.close()
+
+
+class TestForcedLanguage:
+    async def test_force_language_sends_kwargs_without_vocabulary(self) -> None:
+        client, payloads = _sse_client(["うん。"], header=False)
+        client.set_static_context(["能美", "市民課"])
+        assert await _final(client, force_language="Japanese") == "うん。"
+        assert payloads[0]["chat_template_kwargs"] == {"force_language": "Japanese"}
+        assert all(m["role"] != "system" for m in payloads[0]["messages"])  # 返事待ちは語彙を添えない
+        await client.close()
+
+    async def test_vocabulary_dump_is_dropped(self) -> None:
+        vocab = ["江田島市", "江田島", "能美", "大柿", "沖美", "小用", "市民課"]
+        client, _ = _sse_client(["江田島市, 江田島, 能美, 大柿, 沖美, 小用, 市民課.", "能美の市民課はどこですか。"])
+        client.set_static_context(vocab)
+        assert await _final(client) is None
+        assert await _final(client) == "能美の市民課はどこですか。"
+        await client.close()
+
+    def test_language_name(self) -> None:
+        assert language_name("ja") == "Japanese"
+        assert language_name("xx") is None

@@ -412,3 +412,16 @@ async def test_bracketless_source_marker_is_stripped() -> None:
 
     d = Dialogue(StubLLM(["登録する印鑑が要ります。出典:1"]), DialogueConfig(), knowledge=KB())
     assert await _collect(d, "印鑑登録") == ["登録する印鑑が要ります。", "詳しくは市のホームページにも載っています。"]
+
+
+async def test_leading_echo_of_visitor_is_dropped() -> None:
+    llm = StubLLM(["最近、急に寒くなりましたね。", "お体に気をつけてくださいね。"])
+    d = Dialogue(llm, DialogueConfig())
+    out = await _collect(d, "最近、急に寒くなりましたね。朝晩は特に冷えますよ。")
+    assert out == ["お体に気をつけてくださいね。"]
+
+
+async def test_greeting_back_is_not_treated_as_echo() -> None:
+    llm = StubLLM(["こんにちは。", "ようこそ。"])
+    d = Dialogue(llm, DialogueConfig())
+    assert await _collect(d, "こんにちは。ちょっと寄ってみました。") == ["こんにちは。", "ようこそ。"]

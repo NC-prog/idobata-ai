@@ -34,6 +34,15 @@ facilities:
   - 太田川
 
 # ===== 拠点の固定事実（WP03。システムプロンプトに直書き。出典と確認日は docs/WP03_result.md）=====
+# 手続きの略称（WP04: 短く言われると聞き違えやすい。「国保」→「国宝」）
+procedures:
+  - 国保
+  - 国民健康保険
+  - 後期高齢者医療
+  - 介護保険
+  - 児童手当
+  - 住民票
+  - マイナンバーカード
 facility:
   name: 安芸太田町役場
   location_phrase: 安芸太田町役場のロビー   # 階は公式サイトで確認できず
@@ -81,3 +90,6 @@ facility:
   emergency_lines:
     - name: マイナンバー総合フリーダイヤル（マイナンバーカードを紛失したときの一時利用停止。24時間365日・通話無料。音声ガイダンスで2番）
       number: 0120-95-0178
+
+# 紹介状を kintone（サイボウズ）取り込み用の CSV にも書く（referrals/<site>/<date>.csv、UTF-8 BOM）
+referral_csv: true

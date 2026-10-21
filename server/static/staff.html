@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>井戸端AI 職員パネル</title>
+<style>
+  :root { --bg:#fafafa; --fg:#222; --mut:#666; --line:#ddd; --urgent:#c62828; --pending:#fff3e0; }
+  body { margin:16px; font-family:"Noto Sans JP",sans-serif; background:var(--bg); color:var(--fg); }
+  h1 { font-size:20px; margin:0 0 12px; }
+  .stats { display:flex; flex-wrap:wrap; gap:16px; margin-bottom:16px; font-size:14px; }
+  .stats div { background:#fff; border:1px solid var(--line); border-radius:6px; padding:8px 12px; }
+  .stats b { font-size:20px; }
+  table { border-collapse:collapse; width:100%; background:#fff; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
+  tr.needs td { background:var(--pending); }
+  .urgent { color:var(--urgent); font-weight:bold; }
+  .mut { color:var(--mut); font-size:12px; }
+  button { margin:2px; padding:4px 8px; font-size:13px; }
+  button.on { background:#333; color:#fff; }
+  select { font-size:13px; }
+</style>
+</head>
+<body>
+<h1>井戸端AI 職員パネル <span class="mut" id="updated"></span></h1>
+<label>日付 <input type="date" id="day"></label>
+<div class="stats" id="stats"></div>
+<table>
+  <thead><tr><th>受付</th><th>時刻</th><th>課</th><th>要約</th><th>急ぎ</th><th>連絡方法</th><th>タグ</th><th>状態</th><th>対応</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<p class="mut">要約は来訪者の言葉の要約です（職員が読む前提で表示しています）。__POLL_SEC__ 秒ごとに更新します。</p>
+<script>
+const STATUSES = ["未対応", "対応中", "完了"];
+const ROLES = ["", "窓口", "担当課"];
+const RESOLUTIONS = ["", "完了", "来庁待ち", "電話済み", "取り下げ", "不明"];
+const dayEl = document.getElementById("day");
+dayEl.value = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function post(id, body) {
+  await fetch(`api/referrals/${dayEl.value}/${id}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  load();
+}
+
+function select(options, value, onchange) {
+  return `<select onchange="${onchange}">` + options.map((o) => `<option ${o === (value ?? "") ? "selected" : ""}>${esc(o)}</option>`).join("") + "</select>";
+}
+
+async function load() {
+  const [refs, st] = await Promise.all([
+    fetch(`api/referrals?day=${dayEl.value}`).then((r) => r.json()),
+    fetch(`api/stats?day=${dayEl.value}`).then((r) => r.json()),
+  ]);
+  document.getElementById("stats").innerHTML =
+    `<div>来訪者 <b>${st.visits}</b></div><div>紹介状 <b>${st.referrals}</b></div>` +
+    `<div>要対応で未完了 <b>${st.pending_action}</b></div>` +
+    `<div>言語 ${Object.entries(st.languages).map(([k, v]) => `${esc(k)}:${v}`).join(" ") || "-"}</div>` +
+    `<div>話題 ${st.top_tags.map(([t, n]) => `${esc(t)}(${n})`).join(" ") || "-"}</div>`;
+  document.getElementById("rows").innerHTML = refs.map((r) => `
+    <tr class="${r.needs_action && r.status !== "完了" ? "needs" : ""}">
+      <td><b>${esc(r.receipt)}</b></td>
+      <td>${esc(r.created_at.slice(11, 16))}</td>
+      <td>${esc(r.department || "（未定）")}<div class="mut">${esc(r.category)}</div></td>
+      <td>${esc(r.summary)}<div class="mut">${esc(r.topic_free)}${r.name ? "／氏名: " + esc(r.name) : ""}${r.phone ? "／電話: " + esc(r.phone) : ""}</div></td>
+      <td class="${r.urgency === "急ぐ" ? "urgent" : ""}">${esc(r.urgency)}</td>
+      <td>${esc(r.contact_pref)}</td>
+      <td>${r.tags.map(esc).join("、")}</td>
+      <td>${STATUSES.map((s) => `<button class="${s === r.status ? "on" : ""}" onclick='post("${r.id}", {status: "${s}"})'>${s}</button>`).join("")}
+          <div class="mut">${r.handled_at ? "更新 " + esc(r.handled_at.slice(11, 16)) : ""}</div></td>
+      <td>要対応 <input type="checkbox" ${r.needs_action ? "checked" : ""} onchange='post("${r.id}", {needs_action: this.checked})'><br>
+          ${select(ROLES, r.handled_by_role, `post('${r.id}', {handled_by_role: this.value})`)}
+          ${select(RESOLUTIONS, r.resolution, `post('${r.id}', {resolution: this.value})`)}</td>
+    </tr>`).join("") || `<tr><td colspan="9" class="mut">この日の紹介状はありません</td></tr>`;
+  document.getElementById("updated").textContent = "更新 " + new Date().toLocaleTimeString("ja-JP");
+}
+dayEl.addEventListener("change", load);
+load();
+setInterval(load, __POLL_SEC__ * 1000);
+</script>
+</body>
+</html>

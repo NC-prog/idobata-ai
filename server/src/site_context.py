@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 # 語彙ではない節（拠点の固定事実など）
-_NON_VOCAB_KEYS = frozenset({"facility", "allow_ascii", "outside_places"})
+_NON_VOCAB_KEYS = frozenset({"facility", "allow_ascii", "outside_places", "referral_csv"})
 
 
 @dataclass(frozen=True)
@@ -114,6 +114,14 @@ def _load_yaml(site: str, context_dir: Path) -> dict[str, Any]:
         logger.exception("拠点コンテキストの読み込みに失敗: %s", path)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def referral_csv_enabled(site: str, context_dir: Path | None = None) -> bool:
+    """紹介状を kintone 取り込み用の CSV にも書く拠点か（拠点 YAML の referral_csv: true）。"""
+    from .config import config as _config
+
+    data = _load_yaml(site, context_dir or _config.asr.site_context_dir)
+    return bool(data.get("referral_csv"))
 
 
 def load_facility(site: str, context_dir: Path) -> Facility | None:

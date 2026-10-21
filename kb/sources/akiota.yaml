@@ -109,3 +109,13 @@ crawl:
   respect_robots: true
   max_pages: 1200
   max_fetches: 4000
+
+# ---- 調べる（WP04 A-3）。来訪者が同意したときに、その場で見に行く先（許可ドメインだけ）----
+# 町のサイト内検索は Google のカスタム検索（外部）なので使わない。RSS・一覧で探す
+lookup:
+  - {name: 町の新着, type: list, url: "https://www.akiota.jp/rss/10/list1.xml"}
+  - {name: 町のトピックス, type: list, url: "https://www.akiota.jp/rss/10/list6.xml"}
+  - {name: 町の行事カレンダー, type: list, url: "https://www.akiota.jp/calendar/"}
+  - {name: あきおおたからのイベント, type: list, url: "https://cs-akiota.or.jp/news/category/イベント/", trust: semi, label: あきおおたからのホームページ}
+  - {name: 道の駅のお知らせ, type: list, url: "https://cs-akiota.or.jp/special/category/道の駅/", trust: semi, label: 道の駅のお知らせ}
+  - {name: 社会福祉協議会のサイト内検索, type: search, url: "https://www.akiota-shakyo.jp/?s={q}", trust: semi, label: 社会福祉協議会のホームページ}

@@ -65,6 +65,8 @@ class EdgeBridge:
         # 受信したうち、各発話で鳴らし終えた最大の文番号（待ちより先に届いた通知用）
         self._played: dict[str, int] = {}
         self.on_pcm: PcmHandler | None = None
+        # 最後に hello したエッジの ID（来訪記録・紹介状に残す）
+        self.edge_id = ""
         self._close_task: asyncio.Future[None] | None = None
         self.on_hello: HelloHandler | None = None
 
@@ -133,6 +135,7 @@ class EdgeBridge:
                     previous.close(REPLACED_CLOSE_CODE, "replaced by another edge")
                 )
             self._audio_client = websocket
+            self.edge_id = str(data.get("edge_id") or "")
             logger.info(
                 "エッジ hello: edge_id=%s sample_rate=%s caps=%s",
                 data.get("edge_id"), data.get("sample_rate"), data.get("caps"),
