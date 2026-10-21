@@ -108,8 +108,12 @@ def build_system_prompt(
     weather_lines: list[str],
     avatar_name: str = "",
     enabled_actions: tuple[str, ...] = (),
+    greeting: str = "こんにちは",
 ) -> str:
-    """システムプロンプト（固定事実 + 決まり + 今日）。参考資料は入れない（build_turn_message）。"""
+    """システムプロンプト（固定事実 + 決まり + 今日）。参考資料は入れない（build_turn_message）。
+
+    挨拶は時間帯（1 日 3 回だけ変わる）なので、プレフィックスキャッシュはほぼ効いたまま。
+    """
     return cfg.persona_template.format(
         facility_name=facility.name if facility else "市役所",
         city=(facility.address_city or facility.name) if facility else "この市",
@@ -119,6 +123,7 @@ def build_system_prompt(
         today=format_today(today, weather_lines),
         avatar_name=avatar_name or "（未定）",
         propose_rules=format_propose_rules(cfg, enabled_actions),
+        greeting=greeting,
     )
 
 

@@ -55,7 +55,9 @@
   来訪者に課を聞き返さない・LLM に課を推測させない）。procedures.yaml は ASR の語彙（先頭に置く）・VOICEVOX 辞書・
   聞き取り間違いの対応表（asr_fixes。職員パネルから足した行は `~/idobata-data/asr_fixes.jsonl`）にも使う。
   紹介状の同意の後は、手続きごとの聞き取り（procedures.yaml の intake、最大 3 問）→ お名前・地区・連絡方法を伺う。
-  **氏名・地区・電話番号は字幕・エッジ画面・コンソール・ログに出さない**（「お名前：伺いました」と伏せる。保存は紹介状 JSON だけ）ASR は返事待ちの間だけ言語を固定する
+  **氏名・地区・電話番号は字幕・エッジ画面・コンソール・ログに出さない**（「お名前：伺いました」と伏せる。保存は紹介状 JSON だけ）
+- 挨拶は時間帯で変える（`src/timeofday.py`。5〜10 時 おはようございます、10〜17 時 こんにちは、17 時以降 こんばんは）。
+  応答・相槌・定型文（`{greeting}`）・アナウンスで同じ判定を使い、LLM が別の時間帯の挨拶を言ったら読み上げ前に直すASR は返事待ちの間だけ言語を固定する
   （`deploy/standalone/asr/chat_template.jinja` の `force_language`）
 
 ## 起動・テスト
@@ -106,6 +108,7 @@ uv run ruff check
 
 ## コーディング規約
 
+- **報告・コミットメッセージ・結果文書（docs/WP*_result.md）は日本語で書く**
 - 型ヒント必須（mypy strict が通ること）
 - docstring・コメントは日本語でよい
 - 設定は `server/src/config.py` に集約（dataclass）。マジックナンバー散在禁止

@@ -19,6 +19,8 @@ import re
 from enum import Enum
 from typing import Any
 
+from .timeofday import greeting_for
+
 
 class Scene(Enum):
     """アナウンスシーンの定義。"""
@@ -36,11 +38,11 @@ class Scene(Enum):
 
 # テンプレート辞書: style → scene → テンプレートリスト
 # {name}: 表示用名前、{reading}: 読み上げ用、{dept}: 部署、{topic}: 発表題目
-# {title}: 会議タイトル
+# {title}: 会議タイトル、{greeting}: 時間帯の挨拶（src/timeofday.py）
 _TEMPLATES: dict[str, dict[Scene, list[str]]] = {
     "friendly": {
         Scene.OPENING: [
-            "皆さん、こんにちは！{title}を始めましょう！",
+            "皆さん、{greeting}！{title}を始めましょう！",
             "お待たせしました！{title}のスタートです！",
             "それでは、{title}を開会いたします！本日もよろしくお願いします！",
         ],
@@ -181,6 +183,7 @@ def generate(scene: Scene, style: str = "friendly", **kwargs: Any) -> str:
     """
     templates = _TEMPLATES[style][scene]
     template = random.choice(templates)
+    kwargs.setdefault("greeting", greeting_for())  # 切り出しの挨拶も応答と同じ時刻判定
     return template.format(**kwargs)
 
 

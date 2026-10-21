@@ -49,6 +49,7 @@ from .speech_output import (
     SpokenSentence,
     WavDirWriter,
 )
+from .timeofday import greeting_for
 from .tts_client import TTSClient
 from .vad import SpeechEventType, VADBackend, create_vad
 
@@ -532,7 +533,7 @@ class VoiceLoop:
         assert self._backchannels is not None
         if self._conversation.phase != "listen":
             return None  # 提案への返事（「うん」など）には相槌を打たない
-        chosen = self._backchannels.choose(text)
+        chosen = self._backchannels.choose(text, greeting_for())
         if chosen is None:
             return None
         return await self._backchannels.get(self._tts, *chosen)

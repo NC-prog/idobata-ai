@@ -45,6 +45,7 @@ from .referrals import (
     pick_tags,
 )
 from .site_context import Facility
+from .timeofday import greeting_for
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,7 @@ class Conversation:
         tidbits: TidbitStore | None = None,
         tidbit_cfg: TidbitConfig | None = None,
         procedures: Procedures | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.dialogue = dialogue
         self._llm = llm
@@ -170,6 +172,7 @@ class Conversation:
         self._private_values: set[str] = set()
         self._topic_start = 0
         self._turn_new_topic = False
+        self._now = now or (lambda: datetime.now(JST))
         self._words, self._templates = load_templates(cfg.templates_path)
         self._pending: Pending | None = None
         self._session: Session | None = None
@@ -357,7 +360,8 @@ class Conversation:
         return kind == "share" and self._tidbits is not None
 
     def _t(self, action: str, key: str, **kw: Any) -> str:
-        return self._templates.get(action, {}).get(key, "").format(**kw)
+        # 定型文の {greeting} は応答・相槌と同じ時刻判定で埋める
+        return self._templates.get(action, {}).get(key, "").format(greeting=greeting_for(self._now()), **kw)
 
     def _outcome(self, outcome: str) -> None:
         if self._session and self._session.proposals:
@@ -629,8 +633,14 @@ class Conversation:
                   + "tags は【タグの一覧】から最大 5 つ選ぶ（一覧に無いものは作らない）。topic_free は話題を 1 行で。"
                   + '\n出力に "needs_action": true, "tags": [], "topic_free": "" も含める。'
                   + "\n【タグの一覧】" + "、".join(self._tags))
-        data = await self._chat_json(prompt, self._transcript(history), self._ref_cfg.summary_max_tokens) or {}
-        summary = str(data.get("summary") or "").strip() or p.user_text
+        # 来訪者の言葉と案内役の言ったことを分けて渡す（同意の「お願いします」だけの返事は来訪者の話に入れない）
+        visitor = [u for u, _ in history if u and not self._is_bare_reply(u)]
+        assistant = [a for _, a in history if a]
+        body = ("【来訪者の言葉】\n" + "\n".join(visitor or [p.user_text])
+                + "\n【案内役が言ったこと】\n" + ("\n".join(assistant) or "なし"))
+        data = await self._chat_json(prompt, body, self._ref_cfg.summary_max_tokens) or {}
+        summary = self._visitor_only(str(data.get("summary") or ""), "\n".join(visitor)) or p.user_text
+        note = str(data.get("assistant_note") or "").strip().replace("\n", " ")
         return {
             "department": p.department or UNSPECIFIED_DEPARTMENT,
             "category": _pick(data.get("category"), CATEGORIES, "その他"),
@@ -644,7 +654,27 @@ class Conversation:
             "topic_free": str(data.get("topic_free") or "")[:60],
             "intake": [{"question": q["question"], "answer": q["answer"] or "（答えなし）"} for q in p.intake],
             "address_area": p.address_area,
+            "assistant_note": note[: self._ref_cfg.assistant_note_max_chars],
         }
+
+    def _is_bare_reply(self, text: str) -> bool:
+        """「お願いします」「はい」だけの返事か（来訪者の話としては要約に入れない）。"""
+        return (classify_reply(text, self._words) != "unclear"
+                and len(re.sub(r"[\s、。！？!?]", "", text)) <= self._cfg.reply_max_chars)
+
+    def _visitor_only(self, summary: str, visitor_text: str) -> str:
+        """要約から、来訪者が言っていない課名を含む文と、案内役の側の経緯の文を落とす。"""
+        depts = [d.name for d in (self._facility.departments if self._facility else ())]
+        kept = []
+        for sent in re.split(r"(?<=[。！？!?])", summary.strip()):
+            if not sent.strip():
+                continue
+            if re.search(self._ref_cfg.summary_meta_pattern, sent):
+                continue
+            if any(d in sent and d not in visitor_text for d in depts):
+                continue
+            kept.append(sent.strip())
+        return "".join(kept)
 
     # ---- 個人の情報を画面・ログに出さない ---------------------------------
 

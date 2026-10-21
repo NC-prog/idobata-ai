@@ -20,6 +20,8 @@ import numpy as np
 import soundfile as sf  # type: ignore[import-untyped]
 import yaml
 
+from .timeofday import all_greetings, greeting_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,8 +69,11 @@ class BackchannelBank:
         self._default = _Category("default", [], default, self._pause)
         self._cache: dict[tuple[str, float], BackchannelClip] = {}
 
-    def choose(self, text: str) -> tuple[str, float] | None:
-        """相槌の語と無音の長さ。短い返事なら None（相槌なし）。"""
+    def choose(self, text: str, greeting: str = "") -> tuple[str, float] | None:
+        """相槌の語と無音の長さ。短い返事なら None（相槌なし）。
+
+        候補の {greeting} は時間帯の挨拶（src/timeofday.py。応答・定型文と同じ判定）で埋める。
+        """
         t = text.strip()
         if not t or any(p.search(t) for p in self._none):
             return None
@@ -77,12 +82,15 @@ class BackchannelBank:
             return None
         word = cat.candidates[cat.turn % len(cat.candidates)]
         cat.turn += 1
-        return word, cat.pause_sec
+        return word.replace("{greeting}", greeting or greeting_for()), cat.pause_sec
 
     def all_variants(self) -> list[tuple[str, float]]:
         out: list[tuple[str, float]] = []
         for c in [*self._categories, self._default]:
-            out += [(w, c.pause_sec) for w in c.candidates]
+            for w in c.candidates:
+                # {greeting} は時間帯の 3 通りとも先に合成しておく
+                words = [w.replace("{greeting}", g) for g in all_greetings()] if "{greeting}" in w else [w]
+                out += [(x, c.pause_sec) for x in words]
         return list(dict.fromkeys(out))
 
     async def prepare(self, tts: Synthesizer, time_budget_sec: float) -> int:

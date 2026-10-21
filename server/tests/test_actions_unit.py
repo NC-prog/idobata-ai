@@ -39,6 +39,10 @@ FAC = Facility(name="江田島市役所", location_phrase="1階ロビー",
 PROCS = load_procedures(SERVER_ROOT / "context")
 
 
+def _noon() -> datetime:
+    return datetime(2026, 10, 21, 12, 0, tzinfo=JST)
+
+
 # ------------------------------------------------------------------
 # 返事の判定・相槌
 # ------------------------------------------------------------------
@@ -110,7 +114,7 @@ class StubLookup:
 
 def _conv(llm: StubLLM, tmp_path: Path, lookup: Any = None, enabled: tuple[str, ...] = ("lookup", "refer"),
           states: list[str] | None = None, tidbits: TidbitStore | None = None) -> Conversation:
-    d = Dialogue(llm, DialogueConfig(), facility=FAC, enabled_actions=enabled)
+    d = Dialogue(llm, DialogueConfig(), facility=FAC, enabled_actions=enabled, now=_noon)
 
     async def on_state(v: str) -> None:
         if states is not None:
@@ -120,7 +124,7 @@ def _conv(llm: StubLLM, tmp_path: Path, lookup: Any = None, enabled: tuple[str, 
         d, llm, "/models/llm", ActionsConfig(enabled=enabled), ReferralConfig(), FAC, TAGS,
         lookup=lookup, referrals=ReferralStore(tmp_path, "etajima", 30, csv_export=True),
         visits=VisitLog(tmp_path, "etajima"), on_state=on_state, edge_id=lambda: "edge-1",
-        tidbits=tidbits, procedures=PROCS,
+        tidbits=tidbits, procedures=PROCS, now=_noon,
     )
 
 
@@ -669,7 +673,9 @@ async def test_refer_summary_uses_only_current_topic(tmp_path: Path) -> None:
     await _say(c, "お願いします")
     await c.end_session()
     transcript = llm.chat_inputs[1]
-    assert "国保の切り替え" in transcript and "お願いします" in transcript
+    visitor_part = transcript.split("【案内役が言ったこと】")[0]
+    assert "国保の切り替え" in visitor_part
+    assert "お願いします" not in visitor_part  # 同意の返事だけの発話は来訪者の話に入れない
     assert "道の駅" not in transcript and "いらない" not in transcript  # 前の話題を混ぜない
 
 
@@ -731,3 +737,44 @@ async def test_private_answers_are_not_kept_in_dialogue_history(tmp_path: Path) 
     for secret in ("山田", "能美町", "090", "0 9 0"):
         assert secret not in kept
     assert _saved(tmp_path).address_area == "能美町"
+
+
+
+def test_backchannel_returns_time_of_day_greeting() -> None:
+    bank = BackchannelBank(SERVER_ROOT / "context" / "backchannel.yaml")
+    assert bank.choose("こんにちは。ちょっと寄ってみました", "こんばんは") == ("こんばんは", 0.3)
+    words = {w for w, _ in bank.all_variants()}
+    assert {"おはようございます", "こんにちは", "こんばんは"} <= words  # 3 通りとも先に合成する
+
+
+def test_templates_and_announcer_use_same_greeting() -> None:
+    from src.announcer import Scene, generate
+
+    c = _conv(StubLLM([]), Path("/tmp/unused-wp04"))
+    c._templates["common"]["hello"] = "{greeting}。"
+    assert c._t("common", "hello") == "こんにちは。"  # _noon
+    text = generate(Scene.OPENING, "friendly", title="会", greeting="こんばんは")
+    assert "こんにちは" not in text
+
+
+
+async def test_summary_keeps_only_visitor_words_and_note_is_separate(tmp_path: Path) -> None:
+    reply = json.dumps({
+        "category": "相談", "urgency": "通常", "needs_action": True, "tags": ["保険・年金"], "topic_free": "国保",
+        "summary": "国保の切り替えについて聞きたいとのこと。保健医療課で説明してもらうことになりました。"
+                   "担当の課への伝達を依頼しました。",
+        "assistant_note": "保健医療課（2階）を案内済み",
+    }, ensure_ascii=False)
+    c = _conv(StubLLM([["保健医療課でご案内します。<propose:refer>"]], chat_reply=[PHRASED, reply]), tmp_path)
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    await _say(c, "お願い")
+    await c.end_session()
+    ref = _saved(tmp_path)
+    assert ref.summary == "国保の切り替えについて聞きたいとのこと。"  # 案内役の側の経緯は落とす
+    assert ref.assistant_note == "保健医療課（2階）を案内済み"
+
+
+def test_summary_filter_keeps_department_the_visitor_said(tmp_path: Path) -> None:
+    c = _conv(StubLLM([]), tmp_path)
+    s = "市民課で住民票を取りたい。保健医療課を案内された。"
+    assert c._visitor_only(s, "市民課で住民票を取りたいんです") == "市民課で住民票を取りたい。"

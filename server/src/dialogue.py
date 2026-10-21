@@ -24,6 +24,7 @@ from .config import DialogueConfig, config
 from .knowledge import JST, Reference, SearchResult, Weather
 from .persona import build_system_prompt, build_turn_message, source_labels, this_weekend
 from .site_context import Facility
+from .timeofday import fix_greeting, greeting_for
 
 logger = logging.getLogger(__name__)
 
@@ -274,7 +275,8 @@ class Dialogue:
         now = self._now()
         weather = self._weather.lines(now) if self._weather is not None else []
         system = build_system_prompt(self._cfg, self._facility, now.date(), weather,
-                                     self._avatar_name, self._enabled_actions)
+                                     self._avatar_name, self._enabled_actions,
+                                     greeting_for(now, self._cfg))
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for user, assistant in self._history:
             messages.append({"role": "user", "content": user})
@@ -501,6 +503,7 @@ class Dialogue:
 
         raw = _PROPOSE_RE.sub(propose, raw)
         sentence = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", _SOURCE_MARK_RE.sub(take, raw)).strip()
+        sentence = fix_greeting(sentence, greeting_for(self._now(), self._cfg), self._cfg)
         for old, new in self._cfg.leak_replacements:
             sentence = sentence.replace(old, new)
         if self._llm_source_re.search(sentence):

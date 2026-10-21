@@ -107,6 +107,7 @@ async function load() {
           <div>${select(["", ...DEPTS], unspecified(r) ? "" : r.department, `post('${r.id}', {department: this.value})`)}</div>
           <div class="mut">${esc(r.category)}</div></td>
       <td>${esc(r.summary)}<div class="mut">${esc(r.topic_free)}${r.name ? "／氏名: " + esc(r.name) : ""}${r.address_area ? "／地区: " + esc(r.address_area) : ""}${r.phone ? "／電話: " + esc(r.phone) : ""}</div>
+          ${r.assistant_note ? `<div class="mut">案内役のメモ：${esc(r.assistant_note)}</div>` : ""}
           ${(r.intake || []).length ? `<div class="intake">聞き取り<ul>${r.intake.map((q) => `<li>${esc(q.question)}：${esc(q.answer)}</li>`).join("")}</ul></div>` : ""}</td>
       <td class="${r.urgency === "急ぐ" ? "urgent" : ""}">${esc(r.urgency)}</td>
       <td>${esc(r.contact_pref)}</td>
