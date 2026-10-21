@@ -561,3 +561,16 @@ async def test_greeting_only_on_first_turn() -> None:
     d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "やあ") == ["こんにちは。", "いい天気ですね。"]
     assert await _collect(d, "散歩してきました") == ["いい天気ですね。"]
+
+
+async def test_floor_only_sentence_and_umbrella_are_checked() -> None:
+    from src.site_context import Department, Facility
+
+    class _W:
+        def lines(self, now: datetime) -> list[str]:
+            return ["明日（10月22日）の広島県南部は「晴れ」の予報です。降水確率は最大0パーセントです。"]
+
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー", departments=(Department("生活環境課", "2階"),))
+    d = Dialogue(StubLLM(["ごみは生活環境課でご案内します。", "1階ロビーの窓口にあります。", "傘をお持ちください。"]),
+                 DialogueConfig(), facility=fac, weather=_W(), now=_NOON)  # type: ignore[arg-type]
+    assert await _collect(d, "ごみの出し方は") == ["ごみは生活環境課でご案内します。", "2階にあります。"]

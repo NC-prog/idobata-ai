@@ -390,6 +390,7 @@ class Dialogue:
                 for raw in splitter.feed(think.feed(delta)):
                     sentence = await self._finish_sentence(raw, cited)
                     sentence, dept_state = self._fix_department(sentence, expected_dept, dept_state)
+                    sentence = self._fix_floor_of_last_department(sentence, sentences)
                     if self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
                         continue
@@ -408,6 +409,7 @@ class Dialogue:
         else:
             tail = await self._finish_sentence(splitter.flush(), cited)
             tail, dept_state = self._fix_department(tail, expected_dept, dept_state)
+            tail = self._fix_floor_of_last_department(tail, sentences)
             if tail and dropped_echo and not sentences:
                 tail = _LEADING_PARTICLE_RE.sub("", tail)
             # 何も言っていないときの最後の文は捨てない（応答が空になる）
@@ -436,11 +438,32 @@ class Dialogue:
         self._history.append((text, reply))
         logger.debug("応答: %s", reply)
 
+    def _rain_likely(self) -> bool:
+        """天気の文の降水確率に、傘をすすめる基準以上のものがあるか（天気が無ければ判断しない＝True）。"""
+        if self._weather is None:
+            return True
+        lines = self._weather.lines(self._now())
+        pops = [int(x) for line in lines for x in re.findall(r"(\d+)パーセント", line)]
+        return not pops or max(pops) >= self._cfg.umbrella_min_pop
+
     def _expected_department(self, text: str) -> str | None:
         if self._procedures is None or self._facility is None:
             return None
         cands = self._procedures.departments_for(text, self._facility)
         return cands[0] if len(cands) == 1 else None
+
+    def _fix_floor_of_last_department(self, sentence: str, said: list[str]) -> str:
+        """課の名前の無い「1階ロビーの窓口にあります」を、この応答で直前に出た課の階に直す。"""
+        depts = {d.name: d.floor for d in (self._facility.departments if self._facility else ()) if d.floor}
+        last = next((n for x in reversed(said) for n in depts if n in x), None)
+        if last is None or any(n in sentence for n in depts):
+            return sentence
+        floor = depts[last]
+        fixed = re.sub(r"[0-9０-９一二三四五]階(ロビー)?(の窓口)?(に|で)(あり|ござい)",
+                       lambda m: m[0] if m[0].startswith(floor) else f"{floor}{m[3]}{m[4]}", sentence)
+        if fixed != sentence:
+            logger.info("課の階を施設の事実に直しました（%s）", last)
+        return fixed
 
     def _fix_department(self, sentence: str, expected: str | None, done: bool) -> tuple[str, bool]:
         """応答で最初に出た課が、発話から決まる担当課と違えば直す。done はもう課を言い終えたか。
@@ -517,6 +540,9 @@ class Dialogue:
             return False
         if self._history and re.fullmatch(r"(おはようございます|こんにちは|こんばんは)[。！!、]?", sentence.strip()):
             logger.info("会話の途中の挨拶だけの文を読み上げずに捨てました")
+            return True
+        if "傘" in sentence and not self._rain_likely():
+            logger.info("降水確率が低いのに傘をすすめる文を読み上げずに捨てました")
             return True
         if self._contradicts_persona(sentence):
             logger.info("人物像と食い違う文（生まれ・育ちなど）を読み上げずに捨てました")
