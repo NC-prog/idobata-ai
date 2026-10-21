@@ -347,7 +347,8 @@ class ASRClient:
             logger.warning(
                 "ASR 出力が直前の確定転写とほぼ同じため破棄しました（コンテキストの吐き出しの疑い）"
             )
-            logger.debug("破棄した ASR 出力: %s", final_text)
+            # 本文は出さない（氏名・電話番号の答えかもしれない。WP04）
+            logger.debug("破棄した ASR 出力: %d 文字", len(final_text))
         elif final_text:
             self._recent_finals.append(final_text)
             yield TranscriptChunk(

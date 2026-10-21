@@ -366,6 +366,7 @@ class Conversation:
     async def _on_reply(self, text: str) -> AsyncIterator[str]:
         p = self._pending
         assert p is not None
+        label = _PRIVATE_LABELS.get(p.phase)  # 答えを聞く前の段で決める（答えると段が進む）
         lines: list[str] = []
         if p.phase in ("proposed", "intake"):
             p.replies.append(text)
@@ -373,7 +374,8 @@ class Conversation:
             async for s in self._on_intake_answer(p, text):
                 lines.append(s)
                 yield s
-            self.dialogue.add_turn(self._private_text(p, text), "".join(lines))
+            user = self._private_text(p, text, label)
+            self.dialogue.add_turn(user, self.redact("".join(lines)))
             return
         verdict = classify_reply(text, self._words)
         if verdict == "unclear":
@@ -413,7 +415,8 @@ class Conversation:
             async for s in self._finish_share(p, verdict == "yes"):
                 lines.append(s)
                 yield s
-        self.dialogue.add_turn(self._private_text(p, text), "".join(lines))
+        user = self._private_text(p, text, label)
+        self.dialogue.add_turn(user, self.redact("".join(lines)))
 
     def _reask_line(self, p: Pending) -> str:
         if p.phase == "confirm_phone":
@@ -596,7 +599,7 @@ class Conversation:
         if self._session is not None:
             self._session.referral_id = ref.id
         logger.info("紹介状を保存しました: 受付 %s・%s・聞き取り %d 問", ref.receipt, ref.department,
-                    sum(1 for q in ref.intake if q.get("answer")))
+                    sum(1 for q in p.intake if q["answer"]))
         unknown = ref.department in ("", UNSPECIFIED_DEPARTMENT)
         key = ("done_unknown" if unknown else "done") + ("" if ref.name else "_no_name")
         line = prefix + self._t("refer", key, department=ref.department, number=ref.receipt)
@@ -667,8 +670,7 @@ class Conversation:
             text = text.replace(v, "＊＊")
         return text
 
-    def _private_text(self, p: Pending, text: str) -> str:
-        label = _PRIVATE_LABELS.get(p.phase)
+    def _private_text(self, p: Pending, text: str, label: str | None) -> str:
         for v in (p.name, p.address_area, p.phone, phone_for_speech(p.phone) if p.phone else None):
             if v:
                 self._private_values.add(v)

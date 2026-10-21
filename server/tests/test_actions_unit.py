@@ -715,3 +715,19 @@ def test_find_phone_spoken_forms() -> None:
     assert find_phone("ゼロ九ゼロの一二三四の五六七八です。") == "090-1234-5678"
     assert find_phone("090の1234の5678です") == "090-1234-5678"
     assert find_phone("二十一日に来ました") is None
+
+
+async def test_private_answers_are_not_kept_in_dialogue_history(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["わかりました。<propose:refer>"]], chat_reply=_refer_json()), tmp_path)
+    await _say(c, "ちょっと困ったことがあって")
+    await _say(c, "お願い")
+    await _say(c, "山田です")
+    await _say(c, "はい")
+    await _say(c, "能美町です")
+    await _say(c, "電話で")
+    await _say(c, "090-1234-5678")
+    await _say(c, "はい")
+    kept = repr(c.dialogue.history) + repr(c._turns)
+    for secret in ("山田", "能美町", "090", "0 9 0"):
+        assert secret not in kept
+    assert _saved(tmp_path).address_area == "能美町"
