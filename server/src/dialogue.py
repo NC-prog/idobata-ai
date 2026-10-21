@@ -14,19 +14,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import deque
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from datetime import date
 from typing import Any, Protocol
 
 from .config import DialogueConfig, config
+from .knowledge import KnowledgeBase, Reference, Weather
+from .persona import build_system_prompt, build_turn_message
+from .site_context import Facility
 
 logger = logging.getLogger(__name__)
 
-# LLM が応答できなかったときに返す定型文（言語別）
+# LLM が応答できなかったときに返す定型文（言語別）。WP03 から外国語にも日本語で答える
+# （多言語は site プロファイルで後日）ので、日本語の文だけを持つ
 _FALLBACK_REPLY: dict[str, str] = {
     "ja": "すみません、少し聞き取れませんでした。もう一度お話しいただけますか。",
-    "en": "Sorry, I didn't quite catch that. Could you say it again?",
 }
+
+# 応答末尾の出典の印（[出典:1,3]）と、文中に紛れた [1] などの番号。読み上げ前に取り除く
+_SOURCE_MARK_RE = re.compile(r"[\[［]\s*(?:出典\s*[:：]?)?\s*([0-9０-９]+(?:\s*[,，、]\s*[0-9０-９]+)*)\s*[\]］]")
+
+# 印を取ったあとに残る句読点の前の空白
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"[ \u3000]+([。、！？!?])")
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
@@ -34,6 +45,10 @@ _THINK_CLOSE = "</think>"
 
 class ChatBackend(Protocol):
     """Dialogue が使う LLM 側のインターフェース（LLMClient 互換）。"""
+
+    def chat(self, model: str, messages: list[dict[str, Any]], **kwargs: Any) -> str:
+        """チャット補完（ストリーミングなし）。英字混じりの文の言い直しに使う。"""
+        ...
 
     def chat_stream(
         self, model: str, messages: list[dict[str, Any]], **kwargs: Any
@@ -135,6 +150,7 @@ class _ThinkFilter:
 
 
 _END = object()
+_ZEN_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
 class Dialogue:
@@ -145,14 +161,33 @@ class Dialogue:
         llm: ChatBackend,
         cfg: DialogueConfig | None = None,
         model: str | None = None,
+        facility: Facility | None = None,
+        knowledge: KnowledgeBase | None = None,
+        weather: Weather | None = None,
+        today: Callable[[], date] = date.today,
     ) -> None:
         self._llm = llm
         self._cfg = cfg or config.dialogue
         self._model = model or config.llm.chat_model
+        self._facility = facility
+        self._kb = knowledge
+        self._weather = weather
+        self._today = today
+        self._ascii_re = re.compile(rf"[A-Za-zＡ-Ｚａ-ｚ]{{{self._cfg.ascii_run_min},}}")
+        self._allow_ascii = {a.lower() for a in (facility.allow_ascii if facility else ())}
+        self._banned = tuple(self._cfg.banned_phrases) + (facility.outside_places if facility else ())
+        # 直近のターンの検索結果（計測・出典表示用）
+        self.last_search_ms: float | None = None
+        self.last_references: list[Reference] = []
+        self.last_cited: list[Reference] = []
         # (user, assistant) の組を直近 history_turns 件だけ保持する
         self._history: deque[tuple[str, str]] = deque(maxlen=self._cfg.history_turns)
         # LLM ストリームを読むスレッド（タスクが GC で消えないよう参照を持つ）
         self._worker: asyncio.Future[None] | None = None
+
+    def attach_knowledge(self, knowledge: KnowledgeBase | None) -> None:
+        """知識パックを後から付ける（読み込みに数秒かかるので起動処理の中で行う）。"""
+        self._kb = knowledge
 
     @property
     def history_len(self) -> int:
@@ -164,16 +199,21 @@ class Dialogue:
         self._history.clear()
         logger.info("対話履歴をクリアしました")
 
-    def build_messages(self, text: str, language: str) -> list[dict[str, Any]]:
-        """LLM に渡す messages を組み立てる。"""
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self._cfg.system_prompt},
-        ]
+    def build_messages(
+        self, text: str, language: str, refs: list[Reference] | None = None
+    ) -> list[dict[str, Any]]:
+        """LLM に渡す messages を組み立てる（システムプロンプトは毎ターン作り直す）。"""
+        today = self._today()
+        weather = self._weather.lines(today) if self._weather is not None else []
+        system = build_system_prompt(self._cfg, self._facility, today, weather)
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for user, assistant in self._history:
             messages.append({"role": "user", "content": user})
             messages.append({"role": "assistant", "content": assistant})
         content = text if language == "ja" else f"[language: {language}] {text}"
-        messages.append({"role": "user", "content": content})
+        # 履歴には発話だけを積む（参考資料は今のターンにだけ付ける）
+        messages.append({"role": "user",
+                         "content": build_turn_message(self._cfg, self._facility, refs or [], content)})
         return messages
 
     async def respond(self, text: str, language: str = "ja") -> AsyncIterator[str]:
@@ -191,7 +231,15 @@ class Dialogue:
         if not text:
             return
 
-        messages = self.build_messages(text, language)
+        if language != "ja":
+            # 多言語は後日。LLM に任せると日本語で中身を答えてしまうので、決まった文を返す
+            self.last_references, self.last_cited, self.last_search_ms = [], [], None
+            logger.info("日本語以外の発話（%s）には準備中の旨を返します", language)
+            yield self._cfg.foreign_reply
+            return
+
+        refs = await self._search(text)
+        messages = self.build_messages(text, language, refs)
         logger.debug("発話 [%s]: %s", language, text)
         splitter = SentenceSplitter(
             self._cfg.sentence_terminators,
@@ -201,11 +249,14 @@ class Dialogue:
         )
         think = _ThinkFilter()
         sentences: list[str] = []
+        cited: set[int] = set()
         try:
             async for delta in self._stream(messages):
-                for sentence in splitter.feed(think.feed(delta)):
-                    sentences.append(sentence)
-                    yield sentence
+                for raw in splitter.feed(think.feed(delta)):
+                    sentence = await self._finish_sentence(raw, cited)
+                    if sentence:
+                        sentences.append(sentence)
+                        yield sentence
         except Exception:
             logger.exception("LLM 呼び出しに失敗しました")
             if not sentences:
@@ -213,10 +264,15 @@ class Dialogue:
                 return
             # 言いかけの残りは捨て、言えた文だけを履歴に積む
         else:
-            tail = splitter.flush()
+            tail = await self._finish_sentence(splitter.flush(), cited)
             if tail:
                 sentences.append(tail)
                 yield tail
+        self.last_cited = [refs[i - 1] for i in sorted(cited) if 0 < i <= len(refs)]
+        # 緊急連絡先の名前を言ったのに番号を言っていなければ、番号の文を足す（いちばん大事な事実なので）
+        for line in self._missing_emergency_numbers("".join(sentences)):
+            sentences.append(line)
+            yield line
 
         if not sentences:
             yield _FALLBACK_REPLY.get(language, _FALLBACK_REPLY["ja"])
@@ -224,6 +280,77 @@ class Dialogue:
         reply = "".join(sentences)
         self._history.append((text, reply))
         logger.debug("応答: %s", reply)
+
+    async def _search(self, text: str) -> list[Reference]:
+        """知識パックを検索する（CPU で数十 ms。イベントループを止めないよう別スレッド）。"""
+        self.last_references, self.last_cited, self.last_search_ms = [], [], None
+        if self._kb is None:
+            return []
+        try:
+            result = await asyncio.to_thread(self._kb.search, text)
+        except Exception:
+            logger.exception("知識パックの検索に失敗しました（参考資料なしで続けます）")
+            return []
+        self.last_search_ms = result.elapsed_ms
+        self.last_references = result.references
+        logger.info("知識パック検索: %d 件, %.0f ms", len(result.references), result.elapsed_ms)
+        for r in result.references:
+            logger.debug("  参考資料 %.3f %s", r.vector_score, r.title)
+        return result.references
+
+    async def _finish_sentence(self, raw: str, cited: set[int]) -> str:
+        """読み上げる前の 1 文の後処理: 出典の印を取り除き、英字混じりなら言い直させる。"""
+        def take(m: re.Match[str]) -> str:
+            for n in re.split(r"[,，、\s]+", m.group(1)):
+                if n:
+                    cited.add(int(n.translate(_ZEN_DIGITS)))
+            return ""
+
+        sentence = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", _SOURCE_MARK_RE.sub(take, raw)).strip()
+        for old, new in self._cfg.leak_replacements:
+            sentence = sentence.replace(old, new)
+        if any(p in sentence for p in self._banned):
+            logger.warning("言わないことにしている言い回しを含む文を読み上げずに捨てました")
+            logger.debug("捨てた文: %s", sentence)
+            return ""
+        if not sentence or not self._has_foreign_word(sentence):
+            return sentence
+        logger.info("英字の混じった文を日本語で言い直させます")
+        logger.debug("言い直し前: %s", sentence)
+        try:
+            fixed = await asyncio.to_thread(
+                self._llm.chat,
+                self._model,
+                [
+                    {"role": "system", "content": self._cfg.rephrase_prompt},
+                    {"role": "user", "content": sentence},
+                ],
+                max_tokens=self._cfg.rephrase_max_tokens,
+                temperature=0.0,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+        except Exception:
+            logger.warning("言い直しに失敗しました。この文は読み上げません。", exc_info=True)
+            return ""
+        fixed = _SOURCE_MARK_RE.sub("", fixed).strip()
+        if not fixed or self._has_foreign_word(fixed):
+            logger.warning("言い直しても英字が残ったため、この文は読み上げません")
+            return ""
+        return fixed
+
+    def _missing_emergency_numbers(self, reply: str) -> list[str]:
+        if self._facility is None:
+            return []
+        out: list[str] = []
+        digits = re.sub(r"[^0-9]", "", reply.translate(_ZEN_DIGITS))
+        for e in self._facility.emergency_lines:
+            short = re.split(r"[（(]", e.name, maxsplit=1)[0]
+            if short in reply and re.sub(r"[^0-9]", "", e.number) not in digits:
+                out.append(self._cfg.emergency_number_sentence.format(name=short, number=e.number))
+        return out
+
+    def _has_foreign_word(self, sentence: str) -> bool:
+        return any(m.lower() not in self._allow_ascii for m in self._ascii_re.findall(sentence))
 
     async def _stream(self, messages: list[dict[str, Any]]) -> AsyncIterator[str]:
         """同期のストリーミング API を別スレッドで回し、断片を非同期に受け取る。"""
@@ -243,6 +370,7 @@ class Dialogue:
                     messages,
                     max_tokens=self._cfg.max_tokens,
                     temperature=self._cfg.temperature,
+                    presence_penalty=self._cfg.presence_penalty,
                     extra_body={
                         "chat_template_kwargs": {"enable_thinking": self._cfg.enable_thinking},
                     },

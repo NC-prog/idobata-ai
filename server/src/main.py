@@ -32,8 +32,9 @@ from .config import ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue
 from .edge_bridge import EdgeBridge
 from .edge_server import EdgeServer
+from .knowledge import KnowledgeBase, Weather
 from .llm_client import LLMClient
-from .site_context import load_site_words
+from .site_context import load_facility, load_site_words
 from .speech_gate import SpeechGate
 from .speech_output import (
     EdgeSpeaker,
@@ -64,6 +65,7 @@ class TurnTiming:
     t_first_sentence: float = 0.0
     t_audio_start: float = 0.0
     t_llm_done: float = 0.0
+    search_ms: float | None = None  # 知識パックの検索（LLM の前）
 
     def summary(self) -> str:
         """発話終了（VAD 判定）を起点とした各段の経過時間。"""
@@ -74,6 +76,7 @@ class TurnTiming:
 
         return (
             f"ASR {at(self.t_asr_done)} / "
+            f"検索 {'-' if self.search_ms is None else f'{self.search_ms:.0f}ms'} / "
             f"LLM 1文目確定 {at(self.t_first_sentence)} / "
             f"音声開始 {at(self.t_audio_start)} / "
             f"LLM 完了 {at(self.t_llm_done)}"
@@ -104,7 +107,12 @@ class VoiceLoop:
                 output_device if output_device is not None else config.audio_output.device_id
             )
         )
-        self._dialogue = Dialogue(LLMClient())
+        # 拠点の固定事実（facility）はプロンプトに直書き。知識パックは run() で読む（数秒かかる）
+        self._dialogue = Dialogue(
+            LLMClient(),
+            facility=load_facility(config.site, config.asr.site_context_dir),
+            weather=Weather.for_site(config.data_dir, config.site),
+        )
         self._gate = SpeechGate(
             post_margin_sec=config.speech_gate.post_margin_sec,
             safety_margin_sec=config.speech_gate.safety_margin_sec,
@@ -134,6 +142,10 @@ class VoiceLoop:
         # 固有名詞の読みを先に登録する（プリウォームの合成より前に）
         await self._tts.sync_user_dict(load_site_words(config.site, config.asr.site_context_dir))
         await self._tts.prewarm()
+        kb = await asyncio.to_thread(
+            KnowledgeBase.load, config.data_dir, config.site, config.knowledge
+        )
+        self._dialogue.attach_knowledge(kb)
         if self._edge is not None and self._edge_server is not None:
             self._edge.on_hello = self._on_edge_hello
             await self._edge.start()
@@ -401,8 +413,13 @@ class VoiceLoop:
                     self._gate.schedule_unmute()
                 elif self._edge is not None:
                     await self._send_state("idle")  # 1 文も流せなかった
+            await self._show_sources()
             if timing is not None:
+                timing.search_ms = self._dialogue.last_search_ms
                 print(f"[計測] 発話終了→ {timing.summary()}")
+            elif self._dialogue.last_search_ms is not None:
+                print(f"[検索] {self._dialogue.last_search_ms:.0f}ms、"
+                      f"参考資料 {len(self._dialogue.last_references)} 件")
 
     async def _produce_sentences(
         self,
@@ -421,6 +438,15 @@ class VoiceLoop:
             if timing is not None:
                 timing.t_llm_done = time.monotonic()
             await out.put(None)
+
+    async def _show_sources(self) -> None:
+        """応答が参考資料を使っていたら、出典のタイトルを出す（読み上げはしない）。"""
+        titles = list(dict.fromkeys(r.title for r in self._dialogue.last_cited))
+        if not titles:
+            return
+        print(f"[出典] {' / '.join(titles)}")
+        if self._edge is not None:
+            await self._edge.send_json({"type": "sources", "titles": titles})
 
     def _open_sink(self) -> SpeechSink:
         """1 応答ぶんの出力先を作る。"""

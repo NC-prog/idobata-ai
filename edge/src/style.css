@@ -68,6 +68,14 @@ body {
   font-size: clamp(18px, 3.4vh, 44px);
 }
 
+.caption.sources {
+  font-size: clamp(14px, 2.2vh, 28px);
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.75);
+  background: rgba(20, 24, 32, 0.45);
+  min-height: 0;
+}
+
 #status {
   position: fixed;
   top: 1vh;

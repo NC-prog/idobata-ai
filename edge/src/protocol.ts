@@ -38,7 +38,18 @@ export interface ThemeMessage {
   season: string;
 }
 
-export type DownMessage = StateMessage | CaptionMessage | SpeakMessage | ThemeMessage;
+/** 応答が使った参考資料の出典タイトル（字幕の下に薄く出す。読み上げない。WP03） */
+export interface SourcesMessage {
+  type: "sources";
+  titles: string[];
+}
+
+export type DownMessage =
+  | StateMessage
+  | CaptionMessage
+  | SpeakMessage
+  | ThemeMessage
+  | SourcesMessage;
 
 export interface HelloMessage {
   type: "hello";

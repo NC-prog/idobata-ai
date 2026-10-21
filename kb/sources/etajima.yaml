@@ -1,0 +1,105 @@
+# 江田島市の知識パックのクロール定義（人間が編集する）
+# サイトの構造（2026-10-21 確認）: 記事は /cms/articles/show/<番号>、分類は /cms/categories/show/<番号>
+# （下位分類は /cms/categories/articles/<番号> に転送される）。記事は複数の分類に属するので、
+# 記事の URL では分類を判別できない。住民向けの分類を seeds にし、個人名を含みうる分類は
+# パンくず（exclude_breadcrumb_keywords）とタイトルで外す。どのページにも全分類へのナビがあるので、
+# seed ごとに scope_breadcrumbs（パンくずにその語を含むページだけ採用・展開）で範囲を絞る。
+# include / exclude は URL への正規表現。robots.txt は無い（404）。
+# 江田島市観光協会（etajima-kanko.com）はブラウザで描画するサイトで、HTML に本文が無いため対象外。
+site: etajima
+allow_domains:
+  - www.city.etajima.hiroshima.jp
+seeds:
+  # 暮らしのガイド（届出・証明、税金、健康・福祉、子育て・教育、保険・医療・年金、ごみ、生活、住まい、防犯、消費生活、防災、水道、市民センター）
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/1
+    depth: 3
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: &exclude ['\.pdf$', '/en/', '/cms/(atom|rss)/recruitments', '/cms/categories/(show|articles)/(14|20|26|27|28|100|175|207)$']
+    scope_breadcrumbs: ["> 暮らしのガイド"]
+  # 課ごとの記事（住民向けの課）
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/213
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 市民課"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/215
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 税務課"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/217
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 生活環境課"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/218
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 社会福祉課"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/221
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 保健医療課"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/499
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 高齢介護課"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/222
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 子育て支援課"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/224
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 商工観光課"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/232
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["組織で情報を探す > 会計課"]
+  # 各課・公共施設のご案内、各種相談窓口、バス・船時刻表
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/22
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["各課・公共施設のご案内"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/128
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["各種相談窓口"]
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/124
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["時刻表"]
+  # 行事（新着の行事フィードと、催し・イベントのカレンダー）。分類はまちまちなので範囲は絞らない
+  - url: https://www.city.etajima.hiroshima.jp/cms/atom/events
+    depth: 1
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+  - url: https://www.city.etajima.hiroshima.jp/cms/calendars
+    depth: 1
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+# 個人名を含みうるページを外す（議会・会議録・入札・人事・職員採用・市長の部屋・選挙・監査）
+exclude_breadcrumb_keywords: [議会, 会議録, 入札, 契約, 職員採用, 人事, 市長の部屋, 秘書室, 選挙, 監査, 合併協議会]
+exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]
+weather:
+  provider: jma
+  area_code: "340000"        # 広島県（https://www.jma.go.jp/bosai/forecast/data/forecast/340000.json）
+  area_sub_code: "340010"    # 一次細分区域: 南部
+  pref_name: 広島県
+  point_name: 広島           # 気温の地点（南部は 広島 / 呉 / 福山）
+crawl:
+  rate_limit_sec: 1.0
+  # HTTP ヘッダは ASCII のみ（指示書の「富士製作所; 自治体向け実証」をローマ字・英語にした）
+  user_agent: "idobata-ai-kb/0.1 (+Fuji Seisakusho LLC; municipal lobby guide pilot)"
+  respect_robots: true
+  max_pages: 500
+  max_fetches: 1500

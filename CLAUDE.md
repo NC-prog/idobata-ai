@@ -12,7 +12,9 @@
 - WP00: standalone プロファイルで「マイク → VAD → Qwen3-ASR → LLM → VOICEVOX → スピーカー」の音声往復
 - WP01（現在）: 応答の文単位先行合成（音声開始 約 1 秒）、固有名詞の VOICEVOX ユーザー辞書、
   エッジ分離（ブラウザがマイク・スピーカー・VRM アバターを持つ、`--edge`）。結果は `docs/WP01_result.md`
-- 日本語 TTS は VOICEVOX で確定（WP00.5）。カメラ・YOLO11-pose・別機のエッジ PC は WP02、対話FSM は WP03
+- WP03（現在）: ペルソナ（拠点の固定事実をプロンプトに直書き）と知識パック（自治体サイトのクロール →
+  Ruri v3 埋め込み → LanceDB、気象庁の予報）。手続きの詳細は出典があるときだけ言う。結果は `docs/WP03_result.md`
+- 日本語 TTS は VOICEVOX で確定（WP00.5）。カメラ・YOLO11-pose・別機のエッジ PC は WP02、紹介状・職員パネルは WP04
 
 ## 実行環境（重要）
 
@@ -40,7 +42,9 @@
 
 - モデル名は必ず `/models/` プレフィックス付き。API key は `"dummy"`
 - Qwen3 の思考モードは既定オフ（サーバに `--reasoning-parser` を付けず、リクエストで `chat_template_kwargs.enable_thinking=false`）
-- 拠点（`IDOBATA_SITE=etajima|akiota`）で ASR のコンテキストバイアシング語彙（`server/context/<site>.yaml`）を選ぶ
+- 拠点（`IDOBATA_SITE=etajima|akiota`）で `server/context/<site>.yaml` を選ぶ。語彙（ASR バイアシング・VOICEVOX 辞書）と
+  `facility`（施設名・開庁時間・課と担当と階・緊急連絡先。**市町の公式サイトで確認したものだけ**）を持つ
+- 知識パックは `~/idobata-data/kb/<site>/`（`kb/build.py` で作る。窓口機はネットに出ないので、作るのはネットにつながる機体）
 
 ## 起動・テスト
 
@@ -57,6 +61,10 @@ uv run python -m src.main --mode text --output-device alsa_output.pci-0000_00_1f
 uv run python -m src.main --mode voice --audio-device hw:0,0 --output-device alsa_output.pci-0000_00_1f.3
 uv run python -m src.main --list-devices   # デバイスは番号か名前の一部。番号は USB 機器の抜き差しでずれる
 uv run python -m src.main --mode voice --input-wav tests/fixtures/visitor_procedure_ja.wav --output-wav-dir /tmp/out
+
+# 知識パック（kb/ は別の uv 環境。埋め込みは CPU）。--weather-only で天気だけ
+CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajima
+uv run python -m tests.eval.run --site etajima   # 評価セット 20 問（LLM と知識パックを使う）
 
 # エッジ（ブラウザ）モード: マイク・スピーカー・アバターはブラウザ側
 (cd ../edge && npm ci && npm run build)    # 初回と edge/ を変えたとき。成果物は server/static/edge/
@@ -102,6 +110,8 @@ server/
 │   ├── llm_client.py     # vLLM（OpenAI 互換）クライアント。chat_stream でストリーミング
 │   ├── tts_client.py     # VOICEVOX。ユーザー辞書の同期、StreamPlayer（文ごとの WAV を切れ目なく再生）
 │   ├── dialogue.py       # 最小対話：固定ペルソナ + 直近 6 ターン（プロセス内のみ）。応答を文ごとに yield
+│   ├── persona.py        # システムプロンプト（固定事実 + 参考資料 + 今日の日付・天気）
+│   ├── knowledge.py      # 知識パックの検索（Ruri v3 + 文字 2-gram BM25 のハイブリッド）と天気
 │   ├── speech_output.py  # 応答音声の出力先（LocalSpeaker / WavDirWriter / EdgeSpeaker）
 │   ├── lipsync.py        # audio_query → 口形の時系列（音素同期の口パク）
 │   ├── edge_bridge.py    # エッジとの WebSocket（JSON + PCM/WAV バイナリ、8765）
@@ -111,6 +121,7 @@ server/
 │   └── main.py           # text / voice の 2 モード、--edge
 ├── static/edge/          # edge/ のビルド成果物（git 管理外）
 └── tests/
+kb/                       # 知識パックのビルド（sources/<site>.yaml、build.py、README.md。pack/ は git 管理外）
 edge/                     # エッジページ（Vite + TypeScript、three.js + @pixiv/three-vrm）
 ├── src/                  # main.ts / avatar.ts / audio.ts / link.ts / protocol.ts
 └── public/               # mic-processor.js（AudioWorklet）、models/（VRM サンプル）、backgrounds/

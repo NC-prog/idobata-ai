@@ -1,0 +1,47 @@
+# 安芸太田町の知識パックのクロール定義（人間が編集する）
+# サイトの構造（2026-10-21 確認）: /life/<大>/<中>/<小>/（くらし・子育て等）、/soshiki/<課>/<番号>.html、
+# /site/<サブサイト>/。robots.txt は無い（404）。観光は町のサイトが案内する「あきおおたから」
+# （cs-akiota.or.jp、一般社団法人 地域商社あきおおた。robots.txt で wp-admin 等以外は許可）。
+site: akiota
+allow_domains:
+  - www.akiota.jp
+  - cs-akiota.or.jp
+seeds:
+  - url: https://www.akiota.jp/life/1/        # くらし
+    depth: 3
+    include: ["/soshiki/", "/life/", "/site/"]
+    exclude: &akiota_exclude [".pdf", "/life/3/17/", "/life/4/", "/site/gikai/", "/site/saiyou/", "/site/chocho-shitsu/", "/soshiki/2/", "/soshiki/23/", "/life/2/16/121/"]
+  - url: https://www.akiota.jp/life/2/        # 子育て・教育
+    depth: 3
+    include: ["/soshiki/", "/life/", "/site/kosodate/"]
+    exclude: *akiota_exclude
+  - url: https://www.akiota.jp/soshiki/
+    depth: 2
+    include: ["/soshiki/7/", "/soshiki/8/", "/soshiki/9/", "/soshiki/10/", "/soshiki/13/", "/soshiki/14/", "/soshiki/19/", "/soshiki/20/", "/soshiki/21/", "/soshiki/22/", "/soshiki/24/"]
+    exclude: *akiota_exclude
+  - url: https://www.akiota.jp/calendar/      # 行事
+    depth: 1
+    include: ["/soshiki/", "/site/", "/calendar/"]
+    exclude: *akiota_exclude
+  - url: https://cs-akiota.or.jp/news/category/イベント/
+    depth: 1
+    include: ["/news/"]
+    exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
+  - url: https://cs-akiota.or.jp/special/category/観光/
+    depth: 1
+    include: ["/special/"]
+    exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
+exclude_breadcrumb_keywords: [議会, 会議録, 入札, 職員採用, 人事, 町長の部屋, 選挙]
+exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]
+weather:
+  provider: jma
+  area_code: "340000"
+  area_sub_code: "340020"    # 一次細分区域: 北部
+  pref_name: 広島県
+  point_name: 庄原           # 北部の気温の地点は 庄原 のみ（安芸太田町からは離れている）
+crawl:
+  rate_limit_sec: 1.0
+  user_agent: "idobata-ai-kb/0.1 (+Fuji Seisakusho LLC; municipal lobby guide pilot)"
+  respect_robots: true
+  max_pages: 500
+  max_fetches: 1500

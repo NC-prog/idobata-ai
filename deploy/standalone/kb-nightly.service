@@ -1,0 +1,17 @@
+# 井戸端AI 知識パックの夜間ビルド（systemd の user サービス。sudo 不要）
+# 有効化は人間が判断する（kb/README.md の「夜間バッチ」）。
+#   cp deploy/standalone/kb-nightly.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now kb-nightly.timer
+[Unit]
+Description=idobata-ai knowledge pack nightly build
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/idobata-ai
+# GPU の予備枠を使わない（埋め込みは CPU）
+Environment=CUDA_VISIBLE_DEVICES=
+Environment=IDOBATA_SITE=etajima
+ExecStart=/bin/bash -lc 'uv run --project kb python kb/build.py --site "$IDOBATA_SITE"'
+Nice=10

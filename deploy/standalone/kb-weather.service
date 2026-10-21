@@ -1,0 +1,12 @@
+# 井戸端AI 天気だけの更新（朝のバッチ）。kb-nightly.service と同じく user サービス
+[Unit]
+Description=idobata-ai knowledge pack weather update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/idobata-ai
+Environment=CUDA_VISIBLE_DEVICES=
+Environment=IDOBATA_SITE=etajima
+ExecStart=/bin/bash -lc 'uv run --project kb python kb/build.py --site "$IDOBATA_SITE" --weather-only'

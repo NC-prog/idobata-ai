@@ -11,3 +11,6 @@ models/
 server/static/edge/
 # エッジのサンプル VRM（ライセンス確認済み、edge/public/models/README.md）は管理する
 !edge/public/models/
+
+# 知識パック（実体は ~/idobata-data/kb/<site>/ へのシンボリックリンク）
+kb/pack/

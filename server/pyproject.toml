@@ -15,6 +15,10 @@ dependencies = [
     "pyyaml>=6.0",            # 拠点コンテキストの読み込み
     "fastapi>=0.115",         # Web オペレーターパネル
     "uvicorn[standard]>=0.30",  # ASGI サーバ
+    "lancedb>=0.40.0",
+    "pyarrow>=26.0.0",
+    "sentence-transformers>=3",
+    "transformers>=4.48",
 ]
 
 [dependency-groups]

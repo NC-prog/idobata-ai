@@ -1,0 +1,23 @@
+[project]
+name = "idobata-kb"
+version = "0.1.0"
+description = "井戸端AI 知識パックのビルド（クロール → 抽出 → チャンク → 埋め込み → 保存）"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "lancedb>=0.40.0",
+    "pyarrow>=26.0.0",
+    "pyyaml>=6.0.3",
+    "sentence-transformers>=3",
+    "trafilatura>=2.3.1",
+    "transformers>=4.48",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

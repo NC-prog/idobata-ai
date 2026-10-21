@@ -14,6 +14,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const statusEl = $<HTMLDivElement>("status");
 const userCaption = $<HTMLParagraphElement>("caption-user");
 const assistantCaption = $<HTMLParagraphElement>("caption-assistant");
+const sourcesCaption = $<HTMLParagraphElement>("caption-sources");
 const startEl = $<HTMLDivElement>("start");
 const backgroundEl = $<HTMLDivElement>("background");
 
@@ -95,6 +96,10 @@ function handleMessage(msg: DownMessage): void {
   switch (msg.type) {
     case "state":
       avatar.setState(msg.value);
+      if (msg.value === "listening" || msg.value === "thinking") sourcesCaption.textContent = "";
+      break;
+    case "sources":
+      sourcesCaption.textContent = msg.titles.length ? `出典: ${msg.titles.join(" / ")}` : "";
       break;
     case "caption":
       if (msg.role === "user") {

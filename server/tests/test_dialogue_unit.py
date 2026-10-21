@@ -18,10 +18,19 @@ class StubLLM:
         self,
         deltas: list[str] | None = None,
         fail_after: int | None = None,
+        rephrase: str | Exception = "日本語で言い直しました。",
     ) -> None:
         self.deltas = deltas if deltas is not None else ["そうなん", "ですね。"]
         self.fail_after = fail_after
+        self.rephrase = rephrase
         self.calls: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = []
+        self.chat_calls: list[list[dict[str, Any]]] = []
+
+    def chat(self, model: str, messages: list[dict[str, Any]], **kwargs: Any) -> str:
+        self.chat_calls.append(messages)
+        if isinstance(self.rephrase, Exception):
+            raise self.rephrase
+        return self.rephrase
 
     def chat_stream(
         self, model: str, messages: list[dict[str, Any]], **kwargs: Any
@@ -46,9 +55,12 @@ async def test_respond_uses_system_prompt_and_disables_thinking() -> None:
     model, messages, kwargs = llm.calls[0]
     assert model == "/models/llm"
     assert messages[0]["role"] == "system"
-    assert "聞き役" in messages[0]["content"]
-    assert messages[-1] == {"role": "user", "content": "こんにちは"}
+    assert "案内役" in messages[0]["content"]
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"].endswith("【来訪者の発話】\nこんにちは")
     assert kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert kwargs["temperature"] == 0.5
+    assert kwargs["presence_penalty"] == 0.3
 
 
 async def test_yields_sentence_by_sentence_and_keeps_full_reply_in_history() -> None:
@@ -71,15 +83,21 @@ async def test_history_keeps_only_recent_turns() -> None:
     _, messages, _ = llm.calls[-1]
     # system + 6 ターン × 2 + 今回の user
     assert len(messages) == 1 + 12 + 1
-    assert messages[1]["content"] == "発話3"
+    assert messages[1]["content"] == "発話3"  # 履歴は発話だけ（参考資料を付けない）
 
 
-async def test_non_japanese_is_tagged() -> None:
-    llm = StubLLM(["Hello!"])
+async def test_non_japanese_gets_fixed_reply_without_llm() -> None:
+    llm = StubLLM()
     d = Dialogue(llm, DialogueConfig())
-    assert await _collect(d, "hello", language="en") == ["Hello!"]
-    _, messages, _ = llm.calls[0]
-    assert messages[-1]["content"] == "[language: en] hello"
+    assert await _collect(d, "Where is the city hall?", language="en") == [
+        "申し訳ありません、外国語でのご案内は準備中です。"
+    ]
+    assert llm.calls == []
+
+
+def test_non_japanese_is_tagged_in_messages() -> None:
+    d = Dialogue(StubLLM(), DialogueConfig())
+    assert d.build_messages("hello", "en")[-1]["content"].endswith("[language: en] hello")
 
 
 async def test_llm_failure_returns_fallback_without_history() -> None:
@@ -169,12 +187,129 @@ def test_first_sentence_is_also_cut_at_comma() -> None:
         cfg.sentence_terminators, cfg.sentence_closers,
         cfg.first_chunk_soft_terminators, cfg.first_chunk_min_chars,
     )
-    out = sp.feed("はい、住民票の写しは、二階の市民課です。手続きは、窓口で。") + [sp.flush()]
-    # 「はい、」は短いので切らない。2 文目以降は読点で切らない
-    assert out == ["はい、住民票の写しは、", "二階の市民課です。", "手続きは、窓口で。"]
+    out = sp.feed("ええ、住民票の写しは、二階の市民課です。手続きは、窓口で。") + [sp.flush()]
+    # 1 文目だけ読点で切る（2 文字以上）。2 文目以降は読点で切らない
+    assert out == ["ええ、", "住民票の写しは、二階の市民課です。", "手続きは、窓口で。"]
+    sp2 = SentenceSplitter(
+        cfg.sentence_terminators, cfg.sentence_closers,
+        cfg.first_chunk_soft_terminators, cfg.first_chunk_min_chars,
+    )
+    assert sp2.feed("あ、そうですね。") + [sp2.flush()] == ["あ、そうですね。"]  # 1 文字では切らない
 
 
 def test_think_filter_passes_plain_text() -> None:
     f = _ThinkFilter()
     assert f.feed("こん") == "こん"
     assert f.feed("<think>") == "<think>"  # 先頭以外のタグには触らない
+
+
+# ------------------------------------------------------------------
+# WP03: 英字の混じった文の言い直し・出典の印・参考資料
+# ------------------------------------------------------------------
+
+
+async def test_sentence_with_english_word_is_rephrased_once() -> None:
+    llm = StubLLM(["窓口でcheckしてください。", "以上です。"], rephrase="窓口で確認してください。")
+    d = Dialogue(llm, DialogueConfig())
+    assert await _collect(d, "a") == ["窓口で確認してください。", "以上です。"]
+    assert len(llm.chat_calls) == 1
+    assert llm.chat_calls[0][1]["content"] == "窓口でcheckしてください。"
+    # 履歴にも言い直した文が入る
+    await _collect(d, "b")
+    assert llm.calls[-1][1][2]["content"] == "窓口で確認してください。以上です。"
+
+
+async def test_sentence_still_english_after_rephrase_is_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    llm = StubLLM(["Please wait。", "少々お待ちください。"], rephrase="Please wait.")
+    d = Dialogue(llm, DialogueConfig())
+    with caplog.at_level(logging.WARNING, logger="src.dialogue"):
+        assert await _collect(d, "a") == ["少々お待ちください。"]
+    assert any("読み上げません" in r.message for r in caplog.records)
+
+
+async def test_short_or_allowed_ascii_is_kept() -> None:
+    from src.site_context import Facility
+
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー", allow_ascii=("LINE",))
+    llm = StubLLM(["JRやLINEで予約できます。"])
+    d = Dialogue(llm, DialogueConfig(), facility=fac)
+    assert await _collect(d, "a") == ["JRやLINEで予約できます。"]
+    assert llm.chat_calls == []
+
+
+async def test_source_marker_is_stripped_and_cited() -> None:
+    from src.knowledge import Reference
+
+    refs = [Reference(f"資料{i}", f"https://example.jp/{i}", "本文", 0.9, 1.0) for i in (1, 2, 3)]
+
+    class FakeKB:
+        def search(self, text: str) -> Any:
+            from src.knowledge import SearchResult
+
+            return SearchResult(refs, 12.0)
+
+    class FakeWeather:
+        def lines(self, today: Any) -> list[str]:
+            return ["今日（10月21日）の広島県南部は「晴れ」の予報です。"]
+
+    llm = StubLLM(["秋祭りは土曜日です[1]。", "詳しくは市のホームページにも載っています [出典:1，３]。"])
+    d = Dialogue(llm, DialogueConfig(), knowledge=FakeKB(),  # type: ignore[arg-type]
+                 weather=FakeWeather())  # type: ignore[arg-type]
+    out = await _collect(d, "お祭りはありますか")
+    assert out == ["秋祭りは土曜日です。", "詳しくは市のホームページにも載っています。"]
+    assert [r.title for r in d.last_cited] == ["資料1", "資料3"]
+    assert d.last_search_ms == 12.0
+    system = llm.calls[0][1][0]["content"]
+    turn = llm.calls[0][1][-1]["content"]
+    assert "[1] (出典: 資料1)" in turn and "[1] (出典: 資料1)" not in system
+    assert "ホームページにも載っています" in turn
+    assert "広島県南部は「晴れ」" in system
+
+
+async def test_no_kb_means_no_references() -> None:
+    llm = StubLLM()
+    d = Dialogue(llm, DialogueConfig())
+    await _collect(d, "a")
+    system = llm.calls[0][1][0]["content"]
+    turn = llm.calls[0][1][-1]["content"]
+    assert turn.startswith("【参考資料】\nなし")
+    # 参考資料が無いターンは出典の一言を言わせない
+    assert "ホームページにも載っています" not in system + turn
+    assert d.last_search_ms is None
+
+
+async def test_banned_phrase_sentence_is_dropped_and_leaks_rewritten() -> None:
+    llm = StubLLM(["まずはお住まいの市区町村に確認してください。", "【参考資料】には載っていません。",
+                   "保健医療課でご案内します。"])
+    d = Dialogue(llm, DialogueConfig())
+    assert await _collect(d, "国保") == ["手元の資料には載っていません。", "保健医療課でご案内します。"]
+
+
+async def test_outside_places_are_not_spoken() -> None:
+    from src.site_context import Facility
+
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー", outside_places=("宮島",))
+    llm = StubLLM(["例えば宮島がおすすめです。", "商工観光課でご案内しています。"])
+    d = Dialogue(llm, DialogueConfig(), facility=fac)
+    assert await _collect(d, "観光地は") == ["商工観光課でご案内しています。"]
+
+
+async def test_emergency_number_is_appended_when_missing() -> None:
+    from src.site_context import EmergencyLine, Facility
+
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー", emergency_lines=(
+        EmergencyLine("マイナンバー総合フリーダイヤル（24時間）", "0120-95-0178"),))
+    d = Dialogue(StubLLM(["まずマイナンバー総合フリーダイヤルに電話してください。"]),
+                 DialogueConfig(), facility=fac)
+    assert await _collect(d, "なくした") == [
+        "まずマイナンバー総合フリーダイヤルに電話してください。",
+        "マイナンバー総合フリーダイヤルの番号は、0120-95-0178です。",
+    ]
+    d2 = Dialogue(StubLLM(["マイナンバー総合フリーダイヤル、０１２０－９５－０１７８へどうぞ。"]),
+                  DialogueConfig(), facility=fac)
+    out = await _collect(d2, "なくした")
+    assert not any("番号は" in x for x in out)  # 全角で言っていれば足さない
