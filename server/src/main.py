@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 _WAV_TAIL_SILENCE_SEC = 1.0
 # 疑似音声モードでゲートが開くのを待つときの確認間隔
 _GATE_POLL_SEC = 0.05
+# 待機タイムアウト（最後の確定発話からの経過）を確認する間隔
+_IDLE_POLL_SEC = 1.0
 
 
 @dataclass
@@ -120,6 +122,8 @@ class VoiceLoop:
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        # 最後に確定した来訪者の発話の時刻（monotonic）。待機に戻ったら None
+        self._last_utterance_at: float | None = None
 
     # ------------------------------------------------------------------
     # 起動
@@ -135,12 +139,14 @@ class VoiceLoop:
             await self._edge.start()
             await self._edge_server.start()
         self._print_banner()
+        idle_watch = asyncio.create_task(self._watch_idle(), name="idle-watch")
         try:
             if self._mode == "text":
                 await self._text_loop()
             else:
                 await self._voice_loop()
         finally:
+            idle_watch.cancel()
             await self._shutdown()
 
     def _print_banner(self) -> None:
@@ -189,6 +195,7 @@ class VoiceLoop:
                 self._dialogue.reset()
                 print("[履歴を消去しました]")
                 continue
+            self._last_utterance_at = time.monotonic()
             await self._send_caption(text, role="user")
             await self._send_state("thinking")
             await self._respond_and_speak(text, "ja", None)
@@ -295,6 +302,7 @@ class VoiceLoop:
             await self._send_state("idle")
             return
 
+        self._last_utterance_at = time.monotonic()
         self._asr.push_rolling_context(final_text)
         print(f"[聞き取り:{language}] {final_text}")
         await self._send_caption(final_text, role="user")
@@ -304,6 +312,29 @@ class VoiceLoop:
         )
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
+
+    async def _watch_idle(self) -> None:
+        """最後の確定発話から idle_timeout_sec 経ったら、履歴を消して待機に戻る。"""
+        timeout = config.dialogue.idle_timeout_sec
+        if timeout <= 0:
+            return
+        while True:
+            await asyncio.sleep(_IDLE_POLL_SEC)
+            await self.check_idle(time.monotonic(), timeout)
+
+    async def check_idle(self, now: float, timeout: float) -> bool:
+        """待機タイムアウトに達していれば会話を区切る。区切ったら True。"""
+        last = self._last_utterance_at
+        if last is None or now - last < timeout or self._turn_lock.locked():
+            return False  # 応答中は区切らない（終わってから次の確認で区切る）
+        self._last_utterance_at = None
+        self._dialogue.reset()
+        if self._asr is not None:
+            self._asr.clear_rolling_context()
+        logger.info("最後の発話から %.0f秒経ったため会話を区切りました（次の発話から新しい会話）",
+                    timeout)
+        await self._send_state("idle")
+        return True
 
     async def _drain_turns(self) -> None:
         while self._turn_tasks:

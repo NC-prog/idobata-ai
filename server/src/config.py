@@ -101,10 +101,20 @@ class ASRConfig:
     context_biasing: bool = True
     site_context_dir: Path = SERVER_ROOT / "context"
 
-    # ローリングコンテキスト（直前の確定転写を動的注入）
-    rolling_context: bool = True
+    # ローリングコンテキスト（直前の確定転写を system に動的注入）。既定は無効:
+    # 実機で、音声が曖昧なときに Qwen3-ASR がコンテキスト文をそのまま出力として返し、
+    # 過去の発話がつながった偽の聞き取りが連発した（WP01 追加作業）。コードは残す
+    rolling_context_enabled: bool = False
     rolling_context_segments: int = 3
     rolling_context_max_chars: int = 200
+
+    # 保険: 直前の確定転写の焼き直し（コンテキストの吐き出し）を破棄する
+    echo_check_segments: int = 3
+    # 出力の文字 n-gram のうち、直前の転写にも含まれる割合がこれ以上なら破棄
+    echo_overlap_threshold: float = 0.8
+    echo_ngram: int = 2
+    # これより短い出力（句読点・空白を除く）は判定しない（「はい」の繰り返しを捨てない）
+    echo_min_chars: int = 8
 
 
 @dataclass(frozen=True)
@@ -197,6 +207,9 @@ class DialogueConfig:
     temperature: float = 0.7
     # Qwen3 の思考モードを無効化する（chat_template_kwargs で渡す）
     enable_thinking: bool = False
+    # 最後の確定発話からこの秒数で履歴を消して待機に戻る（次の発話は新しい会話）。
+    # 環境変数 IDOBATA_IDLE_TIMEOUT_SEC。0 以下で無効
+    idle_timeout_sec: float = 90.0
     # ストリーミング応答をこの文字で文に切る（1 文ずつ合成して再生する）。
     # 改行も文の区切り。ASCII の "." は直後が空白のときだけ区切る（英語の応答向け）
     sentence_terminators: str = "。？！?!"
@@ -294,6 +307,11 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     audio_output = AudioOutputConfig(
         device_id=_parse_device_id(env, "IDOBATA_AUDIO_OUTPUT_DEVICE")
     )
+    dialogue = DialogueConfig(
+        idle_timeout_sec=_parse_float(
+            env, "IDOBATA_IDLE_TIMEOUT_SEC", DialogueConfig.idle_timeout_sec
+        )
+    )
 
     return AppConfig(
         profile=profile,
@@ -302,12 +320,24 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         llm=llm,
         audio_input=audio_input,
         audio_output=audio_output,
+        dialogue=dialogue,
     )
 
 
 def _parse_device_id(env: Mapping[str, str], key: str) -> DeviceSpec:
     """音声デバイスの指定を読む。未設定・空なら None（既定デバイス）。"""
     return parse_device(env.get(key, ""))
+
+
+def _parse_float(env: Mapping[str, str], key: str, default: float) -> float:
+    """秒数などの数値を読む。未設定・空なら default。"""
+    raw = env.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} は数値で指定してください: {raw!r}") from exc
 
 
 def parse_device(raw: str | None) -> DeviceSpec:

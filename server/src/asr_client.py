@@ -20,6 +20,7 @@ import logging
 import re
 import time
 import wave
+from collections import deque
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,28 @@ def _language_code(detected: str | None) -> str:
     return _LANG_NAME_TO_CODE.get(name, name)
 
 
+# 一致判定で無視する文字（句読点・記号・空白）
+_ECHO_IGNORE_RE = re.compile(r"[\s、。，．,.！？!?「」『』（）()・…ー〜~\-]")
+
+
+def _normalize_for_echo(text: str) -> str:
+    return _ECHO_IGNORE_RE.sub("", text)
+
+
+def ngram_overlap(text: str, reference: str, n: int = 2) -> float:
+    """text の文字 n-gram のうち、reference にも現れるものの割合（0〜1）。
+
+    句読点・空白は除いて比べる。text が n 文字未満なら 0。
+    """
+    a = _normalize_for_echo(text)
+    b = _normalize_for_echo(reference)
+    grams = [a[i : i + n] for i in range(len(a) - n + 1)]
+    if not grams:
+        return 0.0
+    ref = {b[i : i + n] for i in range(len(b) - n + 1)}
+    return sum(1 for g in grams if g in ref) / len(grams)
+
+
 def load_site_vocabulary(site: str, context_dir: Path) -> list[str]:
     """拠点の YAML（``<context_dir>/<site>.yaml``）から語彙（表記）のリストを読む。
 
@@ -137,6 +160,8 @@ class ASRClient:
 
         # ローリングコンテキスト（直前の確定転写バッファ）
         self._rolling_segments: list[str] = []
+        # 直前の確定転写（コンテキスト吐き出しの判定用。ローリングコンテキストの有効・無効に依らない）
+        self._recent_finals: deque[str] = deque(maxlen=self._cfg.echo_check_segments)
 
     def set_static_context(self, vocabulary: list[str]) -> None:
         """拠点の地名・施設名・課名から静的コンテキストを設定する。
@@ -154,7 +179,7 @@ class ASRClient:
 
     def push_rolling_context(self, text: str) -> None:
         """確定転写テキストをローリングバッファに追加する。"""
-        if not self._cfg.rolling_context or not text:
+        if not self._cfg.rolling_context_enabled or not text:
             return
         self._rolling_segments.append(text)
         # セグメント数上限
@@ -163,8 +188,9 @@ class ASRClient:
             self._rolling_segments = self._rolling_segments[-max_segs:]
 
     def clear_rolling_context(self) -> None:
-        """ローリングバッファをクリアする（会話の切れ目・リセット時）。"""
+        """ローリングバッファと直前の確定転写をクリアする（会話の切れ目・リセット時）。"""
         self._rolling_segments.clear()
+        self._recent_finals.clear()
         logger.debug("ASR ローリングコンテキストをクリア")
 
     def _build_system_prompt(self) -> str | None:
@@ -174,7 +200,7 @@ class ASRClient:
         if self._static_context:
             parts.append(self._static_context)
 
-        if self._cfg.rolling_context and self._rolling_segments:
+        if self._cfg.rolling_context_enabled and self._rolling_segments:
             rolling = "".join(self._rolling_segments)
             # 文字数上限でトリム（末尾を残す）
             max_chars = self._cfg.rolling_context_max_chars
@@ -296,7 +322,13 @@ class ASRClient:
 
         # ストリーム完了 → final チャンク
         final_text = _clean_streaming_text(collected)
-        if final_text:
+        if final_text and self._is_context_echo(final_text):
+            logger.warning(
+                "ASR 出力が直前の確定転写とほぼ同じため破棄しました（コンテキストの吐き出しの疑い）"
+            )
+            logger.debug("破棄した ASR 出力: %s", final_text)
+        elif final_text:
+            self._recent_finals.append(final_text)
             yield TranscriptChunk(
                 text=final_text,
                 is_final=True,
@@ -306,6 +338,16 @@ class ASRClient:
             )
         else:
             logger.warning("ASR が空のテキストを返しました")
+
+    def _is_context_echo(self, text: str) -> bool:
+        """直前の確定転写のいずれか（またはそれらをつなげたもの）の焼き直しか。"""
+        cfg = self._cfg
+        if len(_normalize_for_echo(text)) < cfg.echo_min_chars or not self._recent_finals:
+            return False
+        refs = [*self._recent_finals, "".join(self._recent_finals)]
+        return any(
+            ngram_overlap(text, ref, cfg.echo_ngram) >= cfg.echo_overlap_threshold for ref in refs
+        )
 
     async def close(self) -> None:
         """HTTP クライアントを終了する。"""

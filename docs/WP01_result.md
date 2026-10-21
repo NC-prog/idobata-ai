@@ -321,3 +321,29 @@ uv run python -m src.main --mode voice --audio-device Avaya --output-device alsa
 - `uv run mypy --strict src`: Success（18 files）
 - `uv run ruff check`: All checks passed
 - `edge/`: `npm run typecheck`（tsc --noEmit）と `npm run build` が通る。`npm ci` からのクリーンビルドも確認した
+
+---
+
+## 追加作業（実機確認を受けて）
+
+実施: 2026-10-21
+
+- **ASR のローリングコンテキストを既定で無効にした**（`ASRConfig.rolling_context_enabled=False`、コードは残す）
+  - 理由: 実機で、音声が曖昧なときに Qwen3-ASR がコンテキスト文（直前の転写）をそのまま出力として返し、過去の発話がつながった偽の聞き取りが続いた
+  - 静的語彙（地名・課名）は引き続き system に入れる
+- **保険: 直前の確定転写の焼き直しを破棄する**（`ASRClient._is_context_echo`）
+  - ASR の出力の文字 2-gram のうち、直前 3 つの確定転写のいずれかにも含まれる割合が 80% 以上なら、破棄して WARNING を出す（本文は DEBUG にだけ出す）
+  - 指示書は「いずれか」だが、「過去の発話がつながった」出力も捕まえるため、3 つをつなげたものとも比べる
+  - 句読点・空白を除いて 8 文字未満の出力は判定しない（「はい、そうです。」のような短い返事の繰り返しを捨てないため）
+  - 会話を区切ったら（下記）直前の転写も忘れる
+  - 設定は `ASRConfig.echo_*`
+- **待機タイムアウト**: 最後の確定発話から `IDOBATA_IDLE_TIMEOUT_SEC`（既定 90 秒、0 で無効）経つと、次をする
+  - 対話の履歴を消す
+  - ASR の直前の転写を消す
+  - エッジへ `state: idle` を送る
+  
+  応答中は区切らず、終わってから区切る。次の発話は新しい会話になる
+- **会議用マイク**（Avaya B109 など）は部屋の会話を拾う。WP02 の声かけ機能までは `wpctl set-volume <source id> 0.5` で入力を下げる、と `.env.example` と README に書いた
+- 確認:
+  - pytest 184 passed（integration 3 passed）、mypy strict・ruff 通過
+  - 疑似音声 3 往復は聞き取りが正しく、音声開始 0.76〜0.91 秒

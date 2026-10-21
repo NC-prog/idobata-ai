@@ -5,18 +5,23 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pytest
 
 from src.asr_client import (
     DEFAULT_LANGUAGE,
+    ASRClient,
     _clean_streaming_text,
     _detect_language,
     _language_code,
     load_site_vocabulary,
+    ngram_overlap,
 )
-from src.config import SERVER_ROOT
+from src.config import SERVER_ROOT, ASRConfig
 
 
 class TestCleanStreamingText:
@@ -197,3 +202,87 @@ class TestCleanStreamingTextProgressiveAccumulation:
         assert results[4] == "こんにちは。"
         # 最終結果
         assert results[-1] == "こんにちは。本日はタウンホールです。"
+
+
+# ------------------------------------------------------------------
+# ローリングコンテキスト無効化と、コンテキスト吐き出しの破棄（WP01 追加作業）
+# ------------------------------------------------------------------
+
+
+def _sse_client(outputs: list[str]) -> tuple[ASRClient, list[dict[str, Any]]]:
+    """呼ばれるたびに outputs を 1 つずつ ASR の出力として返す ASRClient。"""
+    import httpx
+
+    payloads: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(req.content))
+        text = outputs[len(payloads) - 1]
+        body = "".join(
+            f"data: {json.dumps({'choices': [{'delta': {'content': c}}]})}\n\n"
+            for c in ["language Japanese", "<asr_text>", text, "</asr_text>"]
+        ) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    client = ASRClient(ASRConfig())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return client, payloads
+
+
+async def _final(client: ASRClient) -> str | None:
+    audio = [np.zeros(1600, dtype=np.float32)]
+    finals = [c.text async for c in client.transcribe_segment(audio, 0.0) if c.is_final]
+    return finals[0] if finals else None
+
+
+class TestContextEcho:
+    def test_ngram_overlap(self) -> None:
+        assert ngram_overlap("住民票の写しを取りたい", "住民票の写しを取りたいです。") == 1.0
+        assert ngram_overlap("今日は寒いですね", "住民票の写しを取りたい") == 0.0
+        assert ngram_overlap("あ", "あ") == 0.0  # n 文字未満
+
+    def test_rolling_context_disabled_by_default(self) -> None:
+        cfg = ASRConfig()
+        assert cfg.rolling_context_enabled is False
+        client = ASRClient(cfg)
+        client.set_static_context(["能美", "市民課"])
+        client.push_rolling_context("住民票の写しを取りたいんですけど")
+        prompt = client._build_system_prompt()
+        assert prompt is not None
+        assert "能美" in prompt  # 静的語彙は残す
+        assert "Recent transcript" not in prompt
+        assert "住民票" not in prompt
+
+    async def test_echo_of_recent_transcripts_is_dropped(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        client, _ = _sse_client([
+            "住民票の写しを取りたいんですけど。",
+            "最近急に寒くなりましたね。",
+            # 過去の 2 発話がつながった偽の聞き取り
+            "住民票の写しを取りたいんですけど、最近急に寒くなりましたね。",
+            "国民健康保険の更新はどこですか。",
+        ])
+        assert await _final(client) == "住民票の写しを取りたいんですけど。"
+        assert await _final(client) == "最近急に寒くなりましたね。"
+        with caplog.at_level(logging.WARNING, logger="src.asr_client"):
+            assert await _final(client) is None
+        assert any("破棄" in r.message for r in caplog.records)
+        assert await _final(client) == "国民健康保険の更新はどこですか。"
+        await client.close()
+
+    async def test_short_repeats_are_kept(self) -> None:
+        client, _ = _sse_client(["はい、そうです。", "はい、そうです。"])
+        assert await _final(client) == "はい、そうです。"
+        assert await _final(client) == "はい、そうです。"
+        await client.close()
+
+    async def test_clear_forgets_recent_transcripts(self) -> None:
+        text = "住民票の写しを取りたいんですけど。"
+        client, _ = _sse_client([text, text])
+        assert await _final(client) == text
+        client.clear_rolling_context()  # 会話の区切り（次の来訪者は同じことを言ってよい）
+        assert await _final(client) == text
+        await client.close()

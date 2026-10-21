@@ -70,6 +70,16 @@ class TestBuildConfig:
         assert cfg.audio_output.device_id == "alsa_output.pci-0000_00_1f.3.analog-stereo"
 
 
+class TestIdleTimeout:
+    def test_default_and_env(self) -> None:
+        assert build_config({}).dialogue.idle_timeout_sec == 90.0
+        assert build_config({"IDOBATA_IDLE_TIMEOUT_SEC": " 30 "}).dialogue.idle_timeout_sec == 30.0
+
+    def test_invalid(self) -> None:
+        with pytest.raises(ConfigError):
+            build_config({"IDOBATA_IDLE_TIMEOUT_SEC": "1分"})
+
+
 class TestLoadEnvFile:
     def test_does_not_override_existing(self, tmp_path: Path) -> None:
         env_file = tmp_path / ".env"
