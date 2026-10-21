@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
+import httpx
 import pytest
 
 from src.llm_client import _THINK_CLOSE_ONLY_RE, _THINK_RE, LLMClient
@@ -178,3 +180,72 @@ class TestExtractContent:
         )
         result = client._extract_content(resp, "/models/llm")
         assert result.strip() == "会議は成功裡に終了しました。"
+
+
+# ------------------------------------------------------------------
+# chat_stream（WP01）
+# ------------------------------------------------------------------
+
+
+def _chunk(content: str | None = None, usage: Any = None) -> SimpleNamespace:
+    choices = [] if content is None else [SimpleNamespace(delta=SimpleNamespace(content=content))]
+    return SimpleNamespace(choices=choices, usage=usage)
+
+
+class _FakeCompletions:
+    def __init__(self, behaviours: list[Any]) -> None:
+        self.behaviours = behaviours
+        self.kwargs: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> Any:
+        self.kwargs.append(kwargs)
+        b = self.behaviours.pop(0)
+        if isinstance(b, Exception):
+            raise b
+        return iter(b)
+
+
+def _stream_client(behaviours: list[Any]) -> tuple[LLMClient, _FakeCompletions]:
+    from src.config import LLMConfig
+
+    comp = _FakeCompletions(behaviours)
+    client = LLMClient.__new__(LLMClient)
+    client._cfg = LLMConfig(max_retries=2)
+    client._gateway = SimpleNamespace(chat=SimpleNamespace(completions=comp))  # type: ignore[assignment]
+    client._direct_clients = {}
+    return client, comp
+
+
+class TestChatStream:
+    def test_yields_deltas_and_requests_stream(self) -> None:
+        usage = SimpleNamespace(prompt_tokens=10, completion_tokens=3)
+        client, comp = _stream_client([[_chunk("こん"), _chunk(""), _chunk("にちは"),
+                                        _chunk(usage=usage)]])
+        assert list(client.chat_stream("/models/llm", [])) == ["こん", "にちは"]
+        assert comp.kwargs[0]["stream"] is True
+        assert comp.kwargs[0]["stream_options"] == {"include_usage": True}
+
+    def test_retries_before_first_delta(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from openai import APIConnectionError
+
+        monkeypatch.setattr("src.llm_client.time.sleep", lambda _s: None)
+        err = APIConnectionError(request=httpx.Request("POST", "http://x"))
+        client, comp = _stream_client([err, [_chunk("はい")]])
+        assert list(client.chat_stream("/models/llm", [])) == ["はい"]
+        assert len(comp.kwargs) == 2
+
+    def test_failure_after_first_delta_is_raised(self) -> None:
+        from openai import APIConnectionError
+
+        err = APIConnectionError(request=httpx.Request("POST", "http://x"))
+
+        def broken() -> Any:
+            yield _chunk("途中")
+            raise err
+
+        client, comp = _stream_client([broken()])
+        it = client.chat_stream("/models/llm", [])
+        assert next(it) == "途中"
+        with pytest.raises(APIConnectionError):
+            next(it)
+        assert len(comp.kwargs) == 1

@@ -31,6 +31,10 @@ LLM_PORT = 8001
 VOICEVOX_PORT = 50021
 
 
+# 音声デバイスの指定: sounddevice の番号、名前の一部、None（既定デバイス）
+DeviceSpec = int | str | None
+
+
 class Profile(str, Enum):
     """実行プロファイル。"""
 
@@ -113,6 +117,20 @@ class VoicevoxConfig:
     pitch_scale: float = 0.0
     intonation_scale: float = 1.0
     volume_scale: float = 1.0
+    # 文末の無音（秒）。文単位で続けて再生するので、文と文の間はこれ（+ 次文の前無音）で作る
+    post_phoneme_length: float = 0.1
+    timeout: float = 30.0
+    # 接続失敗・5xx の再試行回数と待ち時間（秒）
+    max_retries: int = 2
+    retry_wait_sec: float = 0.3
+
+    # ユーザー辞書（拠点 YAML の読み付きの語を起動時に登録する）
+    user_dict_enabled: bool = True
+    user_dict_word_type: str = "PROPER_NOUN"
+    # 優先度 0〜10。8 以下だとシステム辞書の読み（能美→ノミ）に負けた（VOICEVOX 0.25.2 で確認）
+    user_dict_priority: int = 9
+    # YAML で accent を省略した語のアクセント核の位置
+    user_dict_default_accent: int = 1
 
 
 @dataclass(frozen=True)
@@ -141,7 +159,7 @@ class AudioInputConfig:
     sample_rate: int = 16000
     channels: int = 1
     frame_size: int = 512
-    device_id: int | None = None
+    device_id: DeviceSpec = None
     wav_speed: float = 1.0
 
 
@@ -149,11 +167,13 @@ class AudioInputConfig:
 class AudioOutputConfig:
     """音声出力（TTS 再生先）の設定。"""
 
-    device_id: int | None = None
+    device_id: DeviceSpec = None
     # 再生タイムアウト = WAV の実時間 + この秒数。超えたらストリームを強制的に閉じる
     play_timeout_margin_sec: float = 2.0
     # OutputStream.write() 1 回あたりの長さ（秒）。中断要求はこの粒度で確認する
     write_block_sec: float = 0.1
+    # 連続再生で次の文の合成を待つ間に書く無音の長さ（秒）。次の文が来たらこの粒度で繋がる
+    idle_fill_sec: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -177,6 +197,15 @@ class DialogueConfig:
     temperature: float = 0.7
     # Qwen3 の思考モードを無効化する（chat_template_kwargs で渡す）
     enable_thinking: bool = False
+    # ストリーミング応答をこの文字で文に切る（1 文ずつ合成して再生する）。
+    # 改行も文の区切り。ASCII の "." は直後が空白のときだけ区切る（英語の応答向け）
+    sentence_terminators: str = "。？！?!"
+    # 応答の 1 文目に限り、読点でも切る（1 文目が長いと合成待ちで音声開始が遅れるため）。
+    # 読点より前がこの文字数未満なら切らない（「はい、」だけを先に言わない）
+    first_chunk_soft_terminators: str = "、，,"
+    first_chunk_min_chars: int = 4
+    # 文末記号の直後に続いたら、同じ文に含める閉じ括弧など
+    sentence_closers: str = "」』）)】\"'"
     system_prompt: str = (
         "あなたは「井戸端AI」です。市役所のロビーにいる、話を急かさない聞き役です。\n"
         "- 敬語ですが、硬くなりすぎず、やわらかく話します。\n"
@@ -268,15 +297,22 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     )
 
 
-def _parse_device_id(env: Mapping[str, str], key: str) -> int | None:
-    """音声デバイス ID（sounddevice の番号）を読む。未設定・空なら None（既定デバイス）。"""
-    raw = env.get(key, "").strip()
-    if not raw:
+def _parse_device_id(env: Mapping[str, str], key: str) -> DeviceSpec:
+    """音声デバイスの指定を読む。未設定・空なら None（既定デバイス）。"""
+    return parse_device(env.get(key, ""))
+
+
+def parse_device(raw: str | None) -> DeviceSpec:
+    """音声デバイスの指定（番号、または名前の一部）を sounddevice に渡せる形にする。
+
+    番号は USB 機器の抜き差しでずれるので、名前（例: ``hw:0,0``、
+    ``alsa_output.pci-0000_00_1f.3.analog-stereo``）でも指定できる。
+    名前は sounddevice が入力・出力それぞれの機器名の部分一致で解決する。
+    """
+    text = (raw or "").strip()
+    if not text:
         return None
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise ConfigError(f"{key} は整数のデバイス番号で指定してください: {raw!r}") from exc
+    return int(text) if text.isdigit() else text
 
 
 def _load_default() -> AppConfig:

@@ -60,9 +60,14 @@ class TestBuildConfig:
         assert cfg.audio_input.device_id == 0
         assert cfg.audio_output.device_id == 20
 
-    def test_audio_device_must_be_integer(self) -> None:
-        with pytest.raises(ConfigError):
-            build_config({"IDOBATA_AUDIO_INPUT_DEVICE": "hw:0,0"})
+    def test_audio_device_by_name(self) -> None:
+        # 番号は USB 機器の抜き差しでずれるので、名前（部分一致）でも指定できる
+        cfg = build_config({
+            "IDOBATA_AUDIO_INPUT_DEVICE": "hw:0,0",
+            "IDOBATA_AUDIO_OUTPUT_DEVICE": " alsa_output.pci-0000_00_1f.3.analog-stereo ",
+        })
+        assert cfg.audio_input.device_id == "hw:0,0"
+        assert cfg.audio_output.device_id == "alsa_output.pci-0000_00_1f.3.analog-stereo"
 
 
 class TestLoadEnvFile:

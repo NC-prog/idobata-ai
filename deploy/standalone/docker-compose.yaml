@@ -100,6 +100,9 @@ services:
     image: voicevox/voicevox_engine:cpu-latest
     container_name: idobata-voicevox
     restart: unless-stopped
+    environment:
+      # 合成スレッド数。既定（未指定）より 8 の方が 1 文あたり約 4 割速い（7560 / i9-11950H 8C16T で実測、16 は逆に遅い）
+      - VV_CPU_NUM_THREADS=${VOICEVOX_CPU_THREADS:-8}
     ports:
       - "127.0.0.1:50021:50021"
     healthcheck:

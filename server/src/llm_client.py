@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterator
 from typing import Any, TypeVar
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
@@ -80,6 +81,70 @@ class LLMClient:
             except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
                 logger.warning("%s への接続に失敗: %s", label, exc)
                 last_exc = exc
+
+        raise RuntimeError(
+            f"すべてのエンドポイントで {model} への接続に失敗しました"
+        ) from last_exc
+
+    def chat_stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        """ストリーミングでチャット補完を実行し、content の断片を順に返す（同期イテレータ）。
+
+        最初の断片を受け取る前の失敗は chat() と同じくリトライ・フォールバックする。
+        途中で切れた場合はそのまま例外を送出する（言いかけの文を言い直さない）。
+        """
+        timeout = kwargs.pop("timeout", self._cfg.timeout)
+        kwargs.setdefault("max_tokens", self._cfg.max_tokens)
+        last_exc: Exception | None = None
+
+        for label, client in self._clients_for(model):
+            for attempt in range(self._cfg.max_retries):
+                if attempt > 0:
+                    wait = 2**attempt
+                    logger.info("リトライ %d/%d（%s、%d秒待機）",
+                                attempt + 1, self._cfg.max_retries, label, wait)
+                    time.sleep(wait)
+                yielded = False
+                t0 = time.monotonic()
+                try:
+                    stream = client.chat.completions.create(  # type: ignore[call-overload]
+                        model=model,
+                        messages=messages,
+                        timeout=timeout,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                        **kwargs,
+                    )
+                    tokens = "?"
+                    t_first: float | None = None
+                    for event in stream:
+                        if event.usage is not None:
+                            tokens = (
+                                f"{event.usage.prompt_tokens}+{event.usage.completion_tokens}"
+                            )
+                        if not event.choices:
+                            continue
+                        delta = event.choices[0].delta.content
+                        if delta:
+                            if t_first is None:
+                                t_first = time.monotonic() - t0
+                            yielded = True
+                            yield delta
+                    logger.info(
+                        "LLM応答（stream）[%s] model=%s 初回=%.2fs 全体=%.1fs tokens=%s",
+                        label, model, t_first or 0.0, time.monotonic() - t0, tokens,
+                    )
+                    return
+                except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
+                    if yielded:
+                        raise
+                    last_exc = exc
+                    logger.warning("試行 %d/%d 失敗 [%s]: %s",
+                                   attempt + 1, self._cfg.max_retries, label, exc)
 
         raise RuntimeError(
             f"すべてのエンドポイントで {model} への接続に失敗しました"

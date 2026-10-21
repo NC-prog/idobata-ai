@@ -1,6 +1,7 @@
-"""井戸端AI 音声往復 CLI（WP00）。
+"""井戸端AI 音声往復 CLI（WP00 / WP01）。
 
 - ``--mode text`` : 標準入力の 1 行 → dialogue → 応答表示 + VOICEVOX 再生
+- 応答は LLM のストリーミングを文に切り、1 文目から合成・再生する（WP01）
 - ``--mode voice``: マイク → SpeechGate → VAD → ASR → dialogue → VOICEVOX 再生
 - ``--mode voice --input-wav a.wav b.wav ...``: マイクの代わりに WAV を順に流す疑似音声モード。
   ``--output-wav-dir`` を付けると再生せず応答音声を WAV で書き出す（無人での自動確認用）。
@@ -24,10 +25,12 @@ import numpy as np
 
 from .asr_client import ASRClient, load_site_vocabulary
 from .audio_input import MicrophoneInput, WavFileInput, list_audio_devices
-from .config import ConfigError, config
+from .config import ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue
 from .llm_client import LLMClient
+from .site_context import load_site_words
 from .speech_gate import SpeechGate
+from .speech_output import LocalSpeaker, SpeechSink, SpokenSentence, WavDirWriter
 from .tts_client import TTSClient
 from .vad import SpeechEventType, VADBackend, create_vad
 
@@ -45,16 +48,22 @@ class TurnTiming:
 
     t_speech_end: float
     t_asr_done: float = 0.0
-    t_llm_done: float = 0.0
+    t_first_sentence: float = 0.0
     t_audio_start: float = 0.0
+    t_llm_done: float = 0.0
 
     def summary(self) -> str:
         """発話終了（VAD 判定）を起点とした各段の経過時間。"""
         base = self.t_speech_end
+
+        def at(t: float) -> str:
+            return f"{t - base:.2f}s" if t else "-"
+
         return (
-            f"ASR {self.t_asr_done - base:.2f}s / "
-            f"LLM {self.t_llm_done - base:.2f}s / "
-            f"音声開始 {self.t_audio_start - base:.2f}s"
+            f"ASR {at(self.t_asr_done)} / "
+            f"LLM 1文目確定 {at(self.t_first_sentence)} / "
+            f"音声開始 {at(self.t_audio_start)} / "
+            f"LLM 完了 {at(self.t_llm_done)}"
         )
 
 
@@ -65,8 +74,8 @@ class VoiceLoop:
         self,
         mode: str,
         input_wavs: list[Path],
-        audio_device: int | None,
-        output_device: int | None,
+        audio_device: DeviceSpec,
+        output_device: DeviceSpec,
         output_wav_dir: Path | None,
     ) -> None:
         self._mode = mode
@@ -97,6 +106,8 @@ class VoiceLoop:
 
     async def run(self) -> None:
         """モードに応じたループを実行する。"""
+        # 固有名詞の読みを先に登録する（プリウォームの合成より前に）
+        await self._tts.sync_user_dict(load_site_words(config.site, config.asr.site_context_dir))
         await self._tts.prewarm()
         self._print_banner()
         try:
@@ -109,7 +120,7 @@ class VoiceLoop:
 
     def _print_banner(self) -> None:
         print("=" * 50)
-        print("  井戸端AI — WP00 音声往復")
+        print("  井戸端AI — WP01 音声往復")
         print(f"  プロファイル: {config.profile.value} / 拠点: {config.site}")
         print(f"  モード: {self._mode}")
         print(f"  LLM: {config.llm.gateway_url} ({config.llm.chat_model})")
@@ -262,49 +273,79 @@ class VoiceLoop:
     async def _respond_and_speak(
         self, text: str, language: str, timing: TurnTiming | None
     ) -> None:
+        """LLM の応答を 1 文ずつ受け、1 文できるごとに合成して流す。
+
+        LLM（文の生成）と合成・再生は並行に進む。合成は直列（VOICEVOX は CPU で十分速い）。
+        ゲートは 1 文目を流す直前に閉じ、最後の文を鳴らし終えてから後マージン後に開く。
+        """
         # 応答は 1 つずつ順に話す（重なり防止）
         async with self._turn_lock:
-            reply = await self._dialogue.respond(text, language)
-            if timing is not None:
-                timing.t_llm_done = time.monotonic()
-            if not reply:
-                return
-            print(f"[井戸端AI] {reply}")
-            await self._speak(reply, timing)
+            sentences: asyncio.Queue[str | None] = asyncio.Queue()
+            producer = asyncio.create_task(
+                self._produce_sentences(text, language, sentences, timing), name="llm-stream"
+            )
+            self._reply_count += 1
+            utterance_id = f"u{self._reply_count:04d}"
+            sink = self._open_sink()
+            seq = 0
+            muted = False
+            try:
+                while (sentence := await sentences.get()) is not None:
+                    print(f"[井戸端AI] {sentence}")
+                    try:
+                        wav, query = await self._tts.synthesize_with_query(sentence)
+                    except httpx.HTTPError:
+                        logger.warning("VOICEVOX 合成に失敗。この文は音声なしで続行します。")
+                        continue
+                    if not muted:
+                        self._gate.mute()
+                        muted = True
+                        if timing is not None:
+                            timing.t_audio_start = time.monotonic()
+                    try:
+                        remaining = await sink.push(
+                            SpokenSentence(utterance_id, seq, sentence, wav, query)
+                        )
+                    except Exception:
+                        logger.warning("音声を流せません。この文はスキップします。", exc_info=True)
+                        continue
+                    seq += 1
+                    # 安全装置: 再生終了の見込み + マージンで、通知が無くてもゲートは開く
+                    self._gate.mute(expected_sec=remaining)
+                await producer
+                if seq > 0:
+                    await sink.finish()
+            finally:
+                if not producer.done():
+                    producer.cancel()
+                if muted:
+                    self._gate.schedule_unmute()
             if timing is not None:
                 print(f"[計測] 発話終了→ {timing.summary()}")
 
-    async def _speak(self, text: str, timing: TurnTiming | None) -> None:
-        """VOICEVOX で合成し、再生（または WAV 書き出し）する。再生中はゲートを閉じる。
-
-        合成後に想定再生時間を渡してゲートの安全装置を張る。再生が戻らなくても
-        「再生時間 + 後マージン + 安全マージン」でゲートは開く。
-        """
-        self._gate.mute()
+    async def _produce_sentences(
+        self,
+        text: str,
+        language: str,
+        out: asyncio.Queue[str | None],
+        timing: TurnTiming | None,
+    ) -> None:
+        """LLM の応答を文に切って out に積む。最後に None を積む。"""
         try:
-            try:
-                wav = await self._tts.synthesize(text)
-            except (httpx.ConnectError, httpx.HTTPStatusError):
-                logger.warning("VOICEVOX 合成に失敗。音声なしで続行します。")
-                return
-            try:
-                self._gate.mute(expected_sec=TTSClient.wav_duration_sec(wav))
-            except Exception:
-                logger.warning("合成音声の長さを読めません。再生をスキップします。", exc_info=True)
-                return
-            # 合成完了 = 再生（または書き出し）開始とみなす
-            if timing is not None:
-                timing.t_audio_start = time.monotonic()
-            if self._output_wav_dir is not None:
-                self._reply_count += 1
-                out = self._output_wav_dir / f"reply_{self._reply_count:02d}.wav"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(wav)
-                print(f"[音声] {out}")
-            else:
-                await self._tts.play(wav)
+            async for sentence in self._dialogue.respond(text, language):
+                if timing is not None and not timing.t_first_sentence:
+                    timing.t_first_sentence = time.monotonic()
+                await out.put(sentence)
         finally:
-            self._gate.schedule_unmute()
+            if timing is not None:
+                timing.t_llm_done = time.monotonic()
+            await out.put(None)
+
+    def _open_sink(self) -> SpeechSink:
+        """1 応答ぶんの出力先を作る。"""
+        if self._output_wav_dir is not None:
+            return WavDirWriter(self._output_wav_dir / f"reply_{self._reply_count:02d}.wav")
+        return LocalSpeaker(self._tts.open_player())
 
     async def _shutdown(self) -> None:
         await self._drain_turns()
@@ -327,7 +368,7 @@ async def _with_tail_silence(source: WavFileInput) -> AsyncIterator[np.ndarray]:
 
 def main() -> None:
     """エントリポイント。"""
-    parser = argparse.ArgumentParser(description="井戸端AI 音声往復 CLI（WP00）")
+    parser = argparse.ArgumentParser(description="井戸端AI 音声往復 CLI（WP01）")
     parser.add_argument("--mode", choices=["text", "voice"], default="text")
     parser.add_argument(
         "--input-wav", type=Path, nargs="+", default=[],
@@ -338,12 +379,12 @@ def main() -> None:
         help="応答音声を再生せず WAV で書き出すディレクトリ（自動確認用）",
     )
     parser.add_argument(
-        "--audio-device", type=int, default=None,
-        help="音声入力デバイス ID（省略時は .env の IDOBATA_AUDIO_INPUT_DEVICE）",
+        "--audio-device", type=parse_device, default=None,
+        help="音声入力デバイス（番号か名前の一部。省略時は .env の IDOBATA_AUDIO_INPUT_DEVICE）",
     )
     parser.add_argument(
-        "--output-device", type=int, default=None,
-        help="TTS 音声出力デバイス ID（省略時は .env の IDOBATA_AUDIO_OUTPUT_DEVICE）",
+        "--output-device", type=parse_device, default=None,
+        help="TTS 音声出力デバイス（番号か名前の一部。省略時は .env の IDOBATA_AUDIO_OUTPUT_DEVICE）",
     )
     parser.add_argument("--list-devices", action="store_true", help="音声デバイス一覧を表示して終了")
     parser.add_argument("--debug", action="store_true", help="DEBUG ログ（発話本文を含む）")

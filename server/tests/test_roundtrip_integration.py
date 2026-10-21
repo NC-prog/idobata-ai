@@ -49,8 +49,9 @@ async def test_wav_asr_llm_tts_roundtrip() -> None:
         assert "住民票" in final.text
         assert final.language == "ja"
 
-        reply = await Dialogue(LLMClient()).respond(final.text, final.language)
-        assert reply
+        sentences = [s async for s in Dialogue(LLMClient()).respond(final.text, final.language)]
+        assert sentences
+        reply = "".join(sentences)
         assert "<think>" not in reply
 
         wav = await tts.synthesize(reply)
@@ -58,4 +59,18 @@ async def test_wav_asr_llm_tts_roundtrip() -> None:
         assert sr > 0 and len(data) > sr  # 1 秒以上の音声
     finally:
         await asr.close()
+        await tts.close()
+
+
+async def test_user_dict_fixes_place_name_reading() -> None:
+    """拠点 YAML の読みを登録すると「能美」が「ノウミ」と読まれる。"""
+    from src.site_context import load_site_words
+
+    tts = TTSClient()
+    try:
+        await tts.sync_user_dict(load_site_words("etajima", config.asr.site_context_dir))
+        _, query = await tts.synthesize_with_query("能美の秋祭りはいつですか")
+        kana = "".join(m["text"] for p in query["accent_phrases"] for m in p["moras"])
+        assert kana.startswith("ノウミ")
+    finally:
         await tts.close()

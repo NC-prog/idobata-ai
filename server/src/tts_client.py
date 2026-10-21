@@ -9,15 +9,18 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import queue
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 import httpx
 import numpy as np
 
-from .config import config
+from .config import DeviceSpec, config
+from .site_context import SiteWord
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +76,25 @@ def _resolve_future(fut: asyncio.Future[None], exc: BaseException | None) -> Non
         fut.set_exception(exc)
 
 
+def _dict_word_differs(
+    current: dict[str, Any], reading: str, accent: int, priority: int
+) -> bool:
+    """登録済みの語（GET /user_dict の値）が、登録したい内容と違うか。"""
+    return (
+        current.get("pronunciation") != reading
+        or current.get("accent_type") != accent
+        or current.get("priority") != priority
+    )
+
+
 class TTSClient:
     """VOICEVOX 音声合成クライアント。"""
 
-    def __init__(self, output_device_id: int | None = None) -> None:
+    def __init__(self, output_device_id: DeviceSpec = None) -> None:
         self.base_url = config.voicevox.base_url
         self.speaker_id = config.voicevox.speaker_id
         self.output_device_id = output_device_id
-        self.client = httpx.AsyncClient(timeout=30.0)
+        self.client = httpx.AsyncClient(timeout=config.voicevox.timeout)
         self._prewarmed = False
         self._play_timeout_margin = config.audio_output.play_timeout_margin_sec
         self._write_block_sec = config.audio_output.write_block_sec
@@ -124,28 +138,98 @@ class TTSClient:
         Returns:
             WAV 形式の音声データ
         """
+        wav, _ = await self.synthesize_with_query(text, speaker_id)
+        return wav
+
+    async def synthesize_with_query(
+        self, text: str, speaker_id: int | None = None
+    ) -> tuple[bytes, dict[str, Any]]:
+        """テキストを音声に変換し、合成に使った audio_query も返す（口パクの時系列用）。"""
         speaker = speaker_id or self.speaker_id
+        cfg = config.voicevox
 
-        query_response = await self.client.post(
-            f"{self.base_url}/audio_query",
-            params={"text": text, "speaker": speaker},
+        query_response = await self._request(
+            "POST", "/audio_query", params={"text": text, "speaker": speaker},
         )
-        query_response.raise_for_status()
-        query = query_response.json()
+        query: dict[str, Any] = query_response.json()
 
-        query["speedScale"] = config.voicevox.speed_scale
-        query["pitchScale"] = config.voicevox.pitch_scale
-        query["intonationScale"] = config.voicevox.intonation_scale
-        query["volumeScale"] = config.voicevox.volume_scale
+        query["speedScale"] = cfg.speed_scale
+        query["pitchScale"] = cfg.pitch_scale
+        query["intonationScale"] = cfg.intonation_scale
+        query["volumeScale"] = cfg.volume_scale
+        query["postPhonemeLength"] = cfg.post_phoneme_length
 
-        synthesis_response = await self.client.post(
-            f"{self.base_url}/synthesis",
-            params={"speaker": speaker},
-            json=query,
+        synthesis_response = await self._request(
+            "POST", "/synthesis", params={"speaker": speaker}, json=query,
         )
-        synthesis_response.raise_for_status()
+        return synthesis_response.content, query
 
-        return synthesis_response.content
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """VOICEVOX への HTTP 呼び出し。接続失敗・タイムアウト・5xx は再試行する。"""
+        cfg = config.voicevox
+        for attempt in range(cfg.max_retries + 1):
+            last = attempt == cfg.max_retries
+            try:
+                response = await self.client.request(method, f"{self.base_url}{path}", **kwargs)
+            except httpx.TransportError:
+                if last:
+                    raise
+                logger.warning("VOICEVOX %s に接続できません。再試行 %d/%d",
+                               path, attempt + 1, cfg.max_retries)
+            else:
+                if response.status_code < 500 or last:
+                    response.raise_for_status()
+                    return response
+                logger.warning("VOICEVOX %s が %d を返しました。再試行 %d/%d",
+                               path, response.status_code, attempt + 1, cfg.max_retries)
+            await asyncio.sleep(cfg.retry_wait_sec)
+        raise AssertionError("unreachable")
+
+    async def sync_user_dict(self, words: list[SiteWord]) -> int:
+        """読み付きの語を VOICEVOX のユーザー辞書に登録する（同じ表記があれば更新）。
+
+        Returns:
+            追加・更新した語の数。VOICEVOX に繋がらない場合は 0（音声は既定の読みで続行）。
+        """
+        cfg = config.voicevox
+        targets = [w for w in words if w.reading]
+        if not cfg.user_dict_enabled or not targets:
+            return 0
+        try:
+            existing: dict[str, dict[str, Any]] = (await self._request("GET", "/user_dict")).json()
+        except httpx.HTTPError:
+            logger.warning("VOICEVOX のユーザー辞書を取得できません。読みの登録をスキップします。")
+            return 0
+        # VOICEVOX は表記を全角に正規化して保存するので、NFKC で揃えて突き合わせる
+        by_surface = {
+            unicodedata.normalize("NFKC", str(v.get("surface", ""))): (uuid, v)
+            for uuid, v in existing.items()
+        }
+
+        changed = 0
+        for word in targets:
+            accent = word.accent if word.accent is not None else cfg.user_dict_default_accent
+            params: dict[str, str | int] = {
+                "surface": word.surface,
+                "pronunciation": word.reading or "",
+                "accent_type": accent,
+                "word_type": cfg.user_dict_word_type,
+                "priority": cfg.user_dict_priority,
+            }
+            current = by_surface.get(unicodedata.normalize("NFKC", word.surface))
+            try:
+                if current is None:
+                    await self._request("POST", "/user_dict_word", params=params)
+                elif _dict_word_differs(current[1], word.reading or "", accent, cfg.user_dict_priority):
+                    await self._request("PUT", f"/user_dict_word/{current[0]}", params=params)
+                else:
+                    continue
+            except httpx.HTTPError:
+                logger.warning("ユーザー辞書への登録に失敗: %s", word.surface, exc_info=True)
+                continue
+            changed += 1
+        logger.info("VOICEVOX ユーザー辞書: %d 語中 %d 語を登録・更新", len(targets), changed)
+        return changed
 
     async def synthesize_to_file(
         self, text: str, output_path: str, speaker_id: int | None = None
@@ -270,7 +354,7 @@ class TTSClient:
         except Exception:
             if device_id is not None and not session.aborted.is_set():
                 logger.warning(
-                    "出力デバイス %d での再生に失敗。デフォルトデバイスにフォールバックします",
+                    "出力デバイス %s での再生に失敗。デフォルトデバイスにフォールバックします",
                     device_id,
                     exc_info=True,
                 )
@@ -287,7 +371,7 @@ class TTSClient:
         sd: Any,
         data: np.ndarray,
         samplerate: int,
-        device_id: int | None,
+        device_id: DeviceSpec,
         session: _PlaybackSession,
     ) -> None:
         """OutputStream を開き、ブロックごとに write() して流し切ってから閉じる。"""
@@ -330,7 +414,7 @@ class TTSClient:
         sd: Any,
         data: np.ndarray,
         samplerate: int,
-        device_id: int | None,
+        device_id: DeviceSpec,
     ) -> tuple[np.ndarray, int]:
         """再生用にリサンプリングとチャネル変換を行う。
 
@@ -395,6 +479,10 @@ class TTSClient:
         result_mc: np.ndarray = data[idx_floor] * (1 - frac) + data[idx_ceil] * frac
         return result_mc
 
+    def open_player(self) -> StreamPlayer:
+        """1 応答ぶん（複数の文）を切れ目なく再生するプレイヤーを作る。"""
+        return StreamPlayer(self)
+
     async def get_speakers(self) -> list[dict[str, Any]]:
         """利用可能な話者一覧を取得する。"""
         response = await self.client.get(f"{self.base_url}/speakers")
@@ -404,6 +492,151 @@ class TTSClient:
     async def close(self) -> None:
         """クライアントを閉じる。"""
         await self.client.aclose()
+
+
+class StreamPlayer:
+    """複数の WAV（1 文ずつ）を 1 本の OutputStream で切れ目なく再生する。
+
+    1 つ目の push() で再生スレッドを起こしてストリームを開き、以降の WAV は届き次第
+    続けて書く。次の WAV がまだ無い間は短い無音を書いてストリームを止めない
+    （開き直すと音が途切れ、ALSA ではアンダーランの雑音にもなる）。
+    finish() で「最後まで鳴らし切る」のを待つ。待ち時間は再生終了の見込み + 余裕で打ち切る。
+    """
+
+    def __init__(self, tts: TTSClient) -> None:
+        self._tts = tts
+        self._queue: queue.Queue[tuple[np.ndarray, int] | None] = queue.Queue()
+        self._session = _PlaybackSession()
+        self._done: asyncio.Future[None] | None = None
+        self._end_at = 0.0  # 再生終了の見込み（monotonic）
+
+    def push(self, wav: bytes) -> float:
+        """1 文ぶんの WAV を再生キューに積む（初回で再生開始）。
+
+        Returns:
+            今から再生終了までの見込み秒数（ゲートの安全装置に渡す）。
+        """
+        import soundfile as sf
+
+        data, sr = sf.read(io.BytesIO(wav), dtype="float32")
+        now = time.monotonic()
+        self._end_at = max(now, self._end_at) + len(data) / sr
+        if self._done is None:
+            loop = asyncio.get_running_loop()
+            self._done = loop.create_future()
+            threading.Thread(
+                target=self._worker, args=(loop, self._done, (data, int(sr))),
+                name="tts-stream", daemon=True,
+            ).start()
+        else:
+            self._queue.put((data, int(sr)))
+        return self._end_at - now
+
+    async def finish(self) -> None:
+        """積んだ WAV を鳴らし切るまで待つ。失敗・タイムアウト時は警告してストリームを閉じる。"""
+        if self._done is None:
+            return
+        self._queue.put(None)
+        timeout = max(0.0, self._end_at - time.monotonic()) + self._tts._play_timeout_margin
+        try:
+            await asyncio.wait_for(asyncio.shield(self._done), timeout)
+        except TimeoutError:
+            logger.warning("連続再生が見込み + %.1f秒で終わらないため、出力ストリームを閉じます",
+                           self._tts._play_timeout_margin)
+            self._session.abort()
+        except asyncio.CancelledError:
+            self._session.abort()
+            raise
+        except Exception:
+            logger.warning("連続再生に失敗しました。スキップします。", exc_info=True)
+
+    def _worker(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        done: asyncio.Future[None],
+        first: tuple[np.ndarray, int],
+    ) -> None:
+        error: BaseException | None = None
+        try:
+            self._run(first)
+        except BaseException as exc:  # noqa: BLE001 — イベントループ側へそのまま渡す
+            error = exc
+        try:
+            loop.call_soon_threadsafe(_resolve_future, done, error)
+        except RuntimeError:
+            pass  # イベントループが先に閉じた
+
+    def _run(self, first: tuple[np.ndarray, int]) -> None:
+        import sounddevice as sd
+
+        device = self._tts.output_device_id
+        try:
+            stream, data, rate = self._open(sd, first, device)
+        except Exception:
+            if device is None:
+                raise
+            logger.warning("出力デバイス %s を開けません。デフォルトデバイスにフォールバックします",
+                           device, exc_info=True)
+            device = None
+            stream, data, rate = self._open(sd, first, device)
+
+        channels = int(stream.channels)
+        fill = np.zeros((max(1, int(rate * config.audio_output.idle_fill_sec)), channels),
+                        dtype=np.float32)
+        t0 = time.monotonic()
+        total = 0.0
+        logger.info("連続再生開始: device=%s", device if device is not None else "default")
+        try:
+            self._write(stream, data, rate)
+            total += data.shape[0] / rate
+            while not self._session.aborted.is_set():
+                try:
+                    item = self._queue.get(timeout=config.audio_output.idle_fill_sec)
+                except queue.Empty:
+                    stream.write(fill)  # 次の文の合成待ち。無音で繋ぐ
+                    continue
+                if item is None:
+                    break
+                chunk = self._conform(item, rate, channels)
+                self._write(stream, chunk, rate)
+                total += chunk.shape[0] / rate
+            if not self._session.aborted.is_set():
+                stream.stop()  # 出力バッファを鳴らし切るまで待つ
+        finally:
+            self._session.detach()
+            if not self._session.aborted.is_set():
+                stream.close()
+        logger.info("連続再生終了: 経過 %.2f秒（音声 %.2f秒）", time.monotonic() - t0, total)
+
+    def _open(
+        self, sd: Any, first: tuple[np.ndarray, int], device: DeviceSpec
+    ) -> tuple[Any, np.ndarray, int]:
+        """1 つ目の WAV に合わせてデバイス向けの形式を決め、ストリームを開いて始める。"""
+        data, rate = self._tts._prepare_audio(sd, first[0], first[1], device)
+        frames = data if data.ndim == 2 else data.reshape(-1, 1)
+        stream = sd.OutputStream(
+            samplerate=rate, channels=int(frames.shape[1]), dtype="float32", device=device,
+        )
+        self._session.attach(stream)
+        stream.start()
+        return stream, frames, rate
+
+    def _conform(self, item: tuple[np.ndarray, int], rate: int, channels: int) -> np.ndarray:
+        """2 つ目以降の WAV を、開いたストリームのレート・チャネル数に合わせる。"""
+        data, sr = item
+        if sr != rate:
+            data = TTSClient._resample_audio(data, sr, rate)
+        frames = data if data.ndim == 2 else data.reshape(-1, 1)
+        if frames.shape[1] != channels:
+            frames = np.repeat(frames[:, :1], channels, axis=1)
+        return frames.astype(np.float32, copy=False)
+
+    def _write(self, stream: Any, frames: np.ndarray, rate: int) -> None:
+        block = max(1, int(rate * self._tts._write_block_sec))
+        for start in range(0, frames.shape[0], block):
+            if self._session.aborted.is_set():
+                return
+            stream.write(np.ascontiguousarray(frames[start : start + block]))
 
 
 async def test_tts() -> None:

@@ -1,6 +1,17 @@
 # 江田島市：ASR コンテキストバイアシング用の語彙（仮・WP00）
 # 各カテゴリ 10 語程度。名称・表記は未確認の仮置きなので、市にヒアリングして差し替える。
+# 読み（reading）を持つ語は VOICEVOX のユーザー辞書にも登録する（書式は src/site_context.py）。
+# accent はアクセント核の位置（0 = 平板）。読みを直していない語は VOICEVOX 既定の解析と同じ値。
 site_name: 江田島市
+place_names:
+  - {surface: 江田島, reading: エタジマ, accent: 0}
+  - {surface: 能美, reading: ノウミ, accent: 0}
+  - {surface: 能美島, reading: ノウミジマ, accent: 0}
+  - {surface: 大柿, reading: オオガキ, accent: 0}
+  - {surface: 沖美, reading: オキミ, accent: 0}
+  - {surface: 小用, reading: コヨウ, accent: 0}
+  - {surface: 切串, reading: キリクシ, accent: 2}
+  - {surface: 中町, reading: ナカマチ, accent: 2}
 offices:
   - 江田島市役所
   - 江田島支所

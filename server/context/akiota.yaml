@@ -1,6 +1,15 @@
 # 安芸太田町：ASR コンテキストバイアシング用の語彙（仮・WP00）
 # 各カテゴリ 10 語程度。名称・表記は未確認の仮置きなので、町にヒアリングして差し替える。
+# 読み（reading）を持つ語は VOICEVOX のユーザー辞書にも登録する（書式は src/site_context.py）。
+# accent はアクセント核の位置（0 = 平板）。読みを直していない語は VOICEVOX 既定の解析と同じ値。
 site_name: 安芸太田町
+place_names:
+  - {surface: 安芸太田, reading: アキオオタ, accent: 0}
+  - {surface: 加計, reading: カケ, accent: 0}
+  - {surface: 戸河内, reading: トゴウチ, accent: 2}
+  - {surface: 筒賀, reading: ツツガ, accent: 0}
+  - {surface: 三段峡, reading: サンダンキョウ, accent: 0}
+  - {surface: 温井, reading: ヌクイ, accent: 0}
 offices:
   - 安芸太田町役場
   - 加計支所

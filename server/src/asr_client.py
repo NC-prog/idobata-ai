@@ -26,10 +26,10 @@ from typing import Any
 
 import httpx
 import numpy as np
-import yaml
 
 from .config import ASRConfig, config
 from .schemas import TranscriptChunk
+from .site_context import load_site_words
 
 logger = logging.getLogger(__name__)
 
@@ -117,30 +117,12 @@ def _language_code(detected: str | None) -> str:
 
 
 def load_site_vocabulary(site: str, context_dir: Path) -> list[str]:
-    """拠点の YAML（``<context_dir>/<site>.yaml``）から語彙リストを読む。
+    """拠点の YAML（``<context_dir>/<site>.yaml``）から語彙（表記）のリストを読む。
 
-    YAML はカテゴリ名 → 語のリストの辞書（``site_name`` などの文字列値は語として扱う）。
+    YAML の書式は ``site_context.load_site_words`` を参照（読み付きの語は表記だけを使う）。
     ファイルが無い・壊れている場合は空リストを返す（ASR は語彙なしで動く）。
     """
-    path = context_dir / f"{site}.yaml"
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        logger.warning("拠点コンテキストがありません: %s", path)
-        return []
-    except yaml.YAMLError:
-        logger.exception("拠点コンテキストの読み込みに失敗: %s", path)
-        return []
-    if not isinstance(data, dict):
-        return []
-
-    words: list[str] = []
-    for value in data.values():
-        items = value if isinstance(value, list) else [value]
-        for item in items:
-            if isinstance(item, str) and item and item not in words:
-                words.append(item)
-    return words
+    return [w.surface for w in load_site_words(site, context_dir)]
 
 
 class ASRClient:
