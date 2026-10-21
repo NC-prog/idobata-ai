@@ -19,7 +19,8 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -163,25 +164,36 @@ class Lookup:
             logger.warning("seed_queue に書けません: %s", self._queue_path, exc_info=True)
             return False
 
+    async def prepare(self) -> None:
+        """描画が要る取得先があれば、ブラウザを先に起こしておく（初回の起動に 2〜3 秒かかる）。"""
+        if any(s.render == "playwright" for s in self.sources):
+            try:
+                await _ensure_browser()
+            except Exception:
+                logger.warning("描画用のブラウザを起動できません（描画が要る取得先は使えません）", exc_info=True)
+
     async def _search(self, query: str) -> LookupResult:
         links: list[tuple[float, str, str, LookupSource]] = []
+        deadline = time.monotonic() + self._cfg.timeout_sec
         async with httpx.AsyncClient(timeout=self._cfg.timeout_sec, follow_redirects=True,
                                      headers={"User-Agent": self._cfg.user_agent}) as client:
-            pages = await asyncio.gather(*(self._fetch(client, self._source_url(s, query), s.render)
-                                           for s in self.sources), return_exceptions=True)
+            # 一覧は持ち時間の内に返ったものだけ使う（遅い取得先ひとつで全体を待たない）
+            pages = await _gather_within(
+                [self._fetch(client, self._source_url(s, query), s.render) for s in self.sources],
+                self._cfg.list_timeout_sec)
             for src, page in zip(self.sources, pages, strict=True):
                 if not isinstance(page, str):
                     continue
                 for url, label in candidate_links(page, self._source_url(src, query), self.allow):
-                    s = score_label(label, query) + (0.5 if src.type == "search" else 0.0)
-                    if s > 0:
-                        links.append((s, url, label, src))
+                    s = score_label(label, query)
+                    if s > 0:  # 検索結果は少し優先する（合わないナビのリンクまで拾わないよう、合ったものだけ）
+                        links.append((s + (0.5 if src.type == "search" else 0.0), url, label, src))
             if self._cfg.web_search_enabled:
                 links += await self._web_search(client, query)
             links.sort(key=lambda x: -x[0])
             chosen = links[: self._cfg.max_pages]
-            bodies = await asyncio.gather(*(self._fetch(client, u, src.render) for _, u, _, src in chosen),
-                                          return_exceptions=True)
+            bodies = await _gather_within([self._fetch(client, u, src.render) for _, u, _, src in chosen],
+                                          deadline - time.monotonic() - self._cfg.margin_sec)
         chunks: list[tuple[str, str, LookupSource, str]] = []
         for (_, url, label, src), body in zip(chosen, bodies, strict=True):
             if isinstance(body, str):
@@ -248,6 +260,37 @@ _browser: Any = None
 _playwright: Any = None
 
 
+async def _gather_within(coros: list[Coroutine[Any, Any, str]], timeout: float) -> list[str | BaseException]:
+    """coros を並行に走らせ、timeout 秒までに終わったものの結果を返す（残りは取り消して TimeoutError）。"""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    if not tasks:
+        return []
+    done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+    for t in pending:
+        t.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    out: list[str | BaseException] = []
+    for t in tasks:
+        if t in done and not t.cancelled():
+            exc = t.exception()
+            out.append(exc if exc is not None else t.result())
+        else:
+            out.append(TimeoutError())
+    return out
+
+
+async def _ensure_browser() -> Any:
+    global _browser, _playwright
+    async with _browser_lock:
+        if _browser is None:
+            from playwright.async_api import async_playwright
+
+            _playwright = await async_playwright().start()
+            _browser = await _playwright.chromium.launch()
+    return _browser
+
+
 async def close_browser() -> None:
     """描画用のブラウザを閉じる（プロセス終了の前に）。"""
     global _browser, _playwright
@@ -261,14 +304,8 @@ async def close_browser() -> None:
 
 async def _render(url: str, user_agent: str, timeout_sec: float) -> str:
     """Playwright の Chromium で描画した HTML（1 つのブラウザを使い回す）。"""
-    global _browser, _playwright
-    async with _browser_lock:
-        if _browser is None:
-            from playwright.async_api import async_playwright
-
-            _playwright = await async_playwright().start()
-            _browser = await _playwright.chromium.launch()
-    page = await _browser.new_page(user_agent=user_agent)
+    browser = await _ensure_browser()
+    page = await browser.new_page(user_agent=user_agent)
     try:
         await page.goto(url, wait_until="networkidle", timeout=int(timeout_sec * 1000))
         html: str = await page.content()

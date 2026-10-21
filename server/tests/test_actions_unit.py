@@ -381,3 +381,19 @@ def test_safe_query_blocks_english_and_banned() -> None:
     assert d.safe_query("道の駅 イベント\n") == "道の駅 イベント"
     assert d.safe_query("michi no eki") is None
     assert d.safe_query("") is None
+
+
+async def test_gather_within_keeps_finished_and_cancels_slow() -> None:
+    import asyncio
+
+    from src.lookup import _gather_within
+
+    async def fast() -> str:
+        return "ok"
+
+    async def slow() -> str:
+        await asyncio.sleep(5)
+        return "late"
+
+    out = await _gather_within([fast(), slow()], 0.1)
+    assert out[0] == "ok" and isinstance(out[1], TimeoutError)

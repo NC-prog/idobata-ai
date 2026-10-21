@@ -419,6 +419,9 @@ class LookupConfig:
     sources_dir: Path = REPO_ROOT / "kb" / "sources"
     # 合計でこの秒数で打ち切る
     timeout_sec: float = 5.0
+    # 一覧・検索結果の取得の持ち時間（これまでに返ったものだけ使う）と、本文の取得を打ち切る余裕
+    list_timeout_sec: float = 2.5
+    margin_sec: float = 0.3
     # 一覧・検索結果から読みに行くページ数
     max_pages: int = 3
     max_chars: int = 1000

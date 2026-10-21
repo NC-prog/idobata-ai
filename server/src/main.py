@@ -128,10 +128,11 @@ class VoiceLoop:
         self._referrals = ReferralStore(config.data_dir, config.site, config.referral.retention_days,
                                         csv_export=referral_csv_enabled(config.site))
         self._visits = VisitLog(config.data_dir, config.site)
+        self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query)
         self._conversation = Conversation(
             self._dialogue, llm, config.llm.chat_model, config.actions, config.referral, facility,
             load_tags(SERVER_ROOT / "context" / "tags.yaml"),
-            lookup=Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query),
+            lookup=self._lookup,
             referrals=self._referrals, visits=self._visits,
             on_state=self._send_state, edge_id=self._edge_id,
         )
@@ -174,6 +175,8 @@ class VoiceLoop:
         await self._tts.prewarm()
         if self._backchannels is not None:
             await self._backchannels.prepare(self._tts, config.actions.backchannel_prepare_budget_sec)
+        if "lookup" in config.actions.enabled:
+            await self._lookup.prepare()
         removed = self._referrals.cleanup() + self._visits.cleanup()
         if removed:
             logger.info("保存期間を過ぎた紹介状・来訪記録を %d 日分消しました", removed)
