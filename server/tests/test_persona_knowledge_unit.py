@@ -33,6 +33,13 @@ class TestFacility:
         assert "LINE" in fac.allow_ascii
         assert "宮島" in fac.outside_places
 
+    def test_facilities_in_building(self) -> None:
+        eta = load_facility("etajima", SERVER_ROOT / "context")
+        aki = load_facility("akiota", SERVER_ROOT / "context")
+        assert eta is not None and aki is not None
+        assert [(f.name, f.location) for f in eta.facilities_in_building] == [("AED", "1階ロビー")]
+        assert any(f.name == "多目的トイレ" for f in aki.facilities_in_building)
+
     def test_akiota_profile_has_no_floors(self) -> None:
         fac = load_facility("akiota", SERVER_ROOT / "context")
         assert fac is not None
@@ -71,7 +78,10 @@ class TestPersona:
         assert "0120-95-0178" in prompt
         assert "[1] (出典: 秋祭りのお知らせ)\n10月25日に開催" in turn  # 出どころの無い古いパック
         assert turn.endswith("【来訪者の発話】\nお祭りは？")
-        assert "今日: 2026年10月21日（水曜日）\n今週末＝10月24日（土）・10月25日（日）" in prompt
+        assert ("今日: 2026年10月21日（水曜日）\n今週末＝10月24日（土）・10月25日（日）\n"
+                "来週末＝10月31日（土）・11月1日（日）") in prompt
+        assert "  - AED: 1階ロビー" in prompt
+        assert "近くの職員にお尋ねください" in prompt
         assert "今日は「晴れ」の予報です。" in prompt
         assert "お住まいの市区町村" in prompt
         assert "[出典:1,3]" in turn
@@ -91,6 +101,8 @@ class TestPersona:
         (date(2026, 10, 24), "今週末＝10月24日（土）・10月25日（日）"),  # 土
         (date(2026, 10, 25), "今週末＝10月24日（土）・10月25日（日）"),  # 日
         (date(2026, 10, 30), "今週末＝10月31日（土）・11月1日（日）"),  # 月をまたぐ
+        (date(2026, 10, 21), "来週末＝10月31日（土）・11月1日（日）"),
+        (date(2026, 10, 25), "来週末＝10月31日（土）・11月1日（日）"),  # 日曜の来週末は次の土日
     ])
     def test_this_weekend(self, day: date, weekend: str) -> None:
         from src.persona import format_today

@@ -17,12 +17,12 @@ import logging
 import re
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 
 from .config import DialogueConfig, config
 from .knowledge import JST, Reference, SearchResult, Weather
-from .persona import build_system_prompt, build_turn_message, source_labels
+from .persona import build_system_prompt, build_turn_message, source_labels, this_weekend
 from .site_context import Facility
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,11 @@ _FALLBACK_REPLY: dict[str, str] = {
 }
 
 # 応答末尾の出典の印（[出典:1,3]）と、文中に紛れた [1] などの番号。読み上げ前に取り除く
-_SOURCE_MARK_RE = re.compile(r"[\[［]\s*(?:出典\s*[:：]?)?\s*([0-9０-９]+(?:\s*[,，、]\s*[0-9０-９]+)*)\s*[\]］]")
+_SOURCE_MARK_RE = re.compile(
+    r"[\[［]\s*(?:出典\s*[:：]?)?\s*([0-9０-９]+(?:\s*[,，、]\s*[0-9０-９]+)*)\s*[\]］]"
+    # 括弧を付け忘れた印（「出典:1」「出典：1,3」）
+    r"|[（(]?出典\s*[:：]\s*([0-9０-９]+(?:\s*[,，、]\s*[0-9０-９]+)*)[）)]?"
+)
 
 # 印を取ったあとに残る句読点の前の空白
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"[ \u3000]+([。、！？!?])")
@@ -158,6 +162,24 @@ class _ThinkFilter:
 
 
 _END = object()
+_ZEN = str.maketrans("０１２３４５６７８９", "0123456789")
+# 年付きの日付（令和8年1月25日 / 2026年1月25日。令和元年も）
+_DATED_RE = re.compile(r"(令和|R)?\s*(元|\d{1,4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+
+
+def latest_dated(text: str) -> date | None:
+    """本文に書かれた年付きの日付のうち、いちばん新しいもの。無ければ None。"""
+    latest: date | None = None
+    for era, y, m, d in _DATED_RE.findall(text.translate(_ZEN)):
+        year = 1 if y == "元" else int(y)
+        if era or year < 100:
+            year += 2018  # 令和
+        try:
+            dt = date(year, int(m), int(d))
+        except ValueError:
+            continue
+        latest = dt if latest is None or dt > latest else latest
+    return latest
 
 
 def _is_non_japanese_kanji(ch: str) -> bool:
@@ -193,10 +215,15 @@ class Dialogue:
         self._weather = weather
         self._now = now
         self._ascii_re = re.compile(rf"[A-Za-zＡ-Ｚａ-ｚ]{{{self._cfg.ascii_run_min},}}")
-        self._allow_ascii = {a.lower() for a in (facility.allow_ascii if facility else ())}
+        self._allow_ascii = {a.lower() for a in (
+            (facility.allow_ascii if facility else ()) + self._cfg.allow_ascii_common)}
         self._banned = tuple(self._cfg.banned_phrases) + (facility.outside_places if facility else ())
         self._llm_source_re = re.compile(self._cfg.llm_source_sentence_pattern)
         self._mentions_source_re = re.compile(r"(?:ホームページ|サイト|お知らせ).{0,8}載って")
+        self._known_facilities = tuple(
+            f.name for f in (facility.facilities_in_building if facility else ()))
+        self._location_re = re.compile(self._cfg.building_location_pattern)
+        self._facility_question_re = re.compile(self._cfg.facility_question_pattern)
         # 直近のターンの検索結果（計測・出典表示用）
         self.last_search_ms: float | None = None
         self.last_references: list[Reference] = []
@@ -259,6 +286,16 @@ class Dialogue:
             yield self._cfg.foreign_reply
             return
 
+        asked = self._asked_unknown_facility(text)
+        if asked is not None:
+            # 登録の無い館内の設備の場所・有無は、場所を作らせないよう決まった文で答える
+            self.last_references, self.last_cited, self.last_search_ms = [], [], None
+            reply = self._cfg.unknown_facility_sentence.format(name=asked)
+            logger.info("登録の無い館内の設備（%s）を聞かれたので、決まった文で答えます", asked)
+            self._history.append((text, reply))
+            yield reply
+            return
+
         refs = await self._search(text)
         messages = self.build_messages(text, language, refs)
         logger.debug("発話 [%s]: %s", language, text)
@@ -315,22 +352,52 @@ class Dialogue:
         self.last_references, self.last_cited, self.last_search_ms = [], [], None
         if self._kb is None:
             return []
+        query = self._expand_dates(text)
         try:
-            result = await asyncio.to_thread(self._kb.search, text)
+            result = await asyncio.to_thread(self._kb.search, query)
         except Exception:
             logger.exception("知識パックの検索に失敗しました（参考資料なしで続けます）")
             return []
         self.last_search_ms = result.elapsed_ms
-        self.last_references = result.references
-        logger.info("知識パック検索: %d 件, %.0f ms", len(result.references), result.elapsed_ms)
-        for r in result.references:
+        refs = result.references
+        if query != text:
+            # 日付を聞かれたときは、書かれた日付（年付き）がすべて過ぎている資料を外す
+            # （1月の「とんど祭り」を今週末の行事として案内したため）
+            today = self._now().date()
+            past = [r for r in refs if (d := latest_dated(r.text)) is not None and d < today]
+            if past:
+                logger.info("日付の過ぎた資料を %d 件外しました", len(past))
+                refs = [r for r in refs if r not in past]
+        self.last_references = refs
+        logger.info("知識パック検索: %d 件, %.0f ms", len(refs), result.elapsed_ms)
+        for r in refs:
             logger.debug("  参考資料 %.3f %s", r.vector_score, r.title)
-        return result.references
+        return refs
+
+    def _expand_dates(self, text: str) -> str:
+        """「今週末」「来週末」「今日」「明日」を具体的な日付にして検索語に足す（行事の資料は日付で書かれている）。"""
+        today = self._now().date()
+        sat, sun = this_weekend(today)
+        week = timedelta(days=7)
+        spans: list[date] = []
+        if "今週末" in text or "この週末" in text or "週末" == text.strip("はに？?、。 "):
+            spans += [sat, sun]
+        if "来週末" in text:
+            spans += [sat + week, sun + week]
+        if "今日" in text:
+            spans.append(today)
+        if "明日" in text:
+            spans.append(today + timedelta(days=1))
+        if not spans:
+            return text
+        # 「1月25日」の行事に「10月25日」が部分一致しないよう、令和の年と月も足す（市町の記事は和暦で書く）
+        months = dict.fromkeys(f"令和{d.year - 2018}年{d.month}月" for d in spans)
+        return text + " " + " ".join([f"{d.month}月{d.day}日" for d in spans] + list(months))
 
     async def _finish_sentence(self, raw: str, cited: set[int]) -> str:
         """読み上げる前の 1 文の後処理: 出典の印を取り除き、英字混じりなら言い直させる。"""
         def take(m: re.Match[str]) -> str:
-            for n in re.split(r"[,，、\s]+", m.group(1)):
+            for n in re.split(r"[,，、\s]+", m.group(1) or m.group(2) or ""):
                 if n:
                     cited.add(int(n.translate(_ZEN_DIGITS)))
             return ""
@@ -340,6 +407,11 @@ class Dialogue:
             sentence = sentence.replace(old, new)
         if self._llm_source_re.search(sentence):
             return ""  # 出典の一言はこちらで足す
+        unknown = self._unknown_facility_location(sentence)
+        if unknown is not None:
+            logger.info("館内の設備（%s）の場所を作った文を差し替えます", unknown)
+            logger.debug("差し替え前: %s", sentence)
+            return self._cfg.unknown_facility_sentence.format(name=unknown)
         if any(p in sentence for p in self._banned):
             logger.warning("言わないことにしている言い回しを含む文を読み上げずに捨てました")
             logger.debug("捨てた文: %s", sentence)
@@ -368,6 +440,31 @@ class Dialogue:
             logger.warning("言い直しても英字が残ったため、この文は読み上げません")
             return ""
         return fixed
+
+    def _is_known_facility(self, word: str) -> bool:
+        return any(word in known or known in word for known in self._known_facilities)
+
+    def _asked_unknown_facility(self, text: str) -> str | None:
+        """来訪者が登録の無い館内の設備の場所・有無を聞いているなら、その設備名。"""
+        if not self._facility_question_re.search(text):
+            return None
+        for word in self._cfg.building_facility_words:
+            if word in text and not self._is_known_facility(word):
+                return word
+        return None
+
+    def _unknown_facility_location(self, sentence: str) -> str | None:
+        """登録されていない館内の設備の場所を言っている文なら、その設備名。"""
+        for word in self._cfg.building_facility_words:
+            if word not in sentence:
+                continue
+            if self._is_known_facility(word):
+                continue  # 登録済み（AED など）は、固定事実どおりに言ってよい
+            # 「近くの職員」は場所の言い方ではない
+            rest = sentence.replace("近くの職員", "")
+            if self._location_re.search(rest):
+                return word
+        return None
 
     def _missing_emergency_numbers(self, reply: str) -> list[str]:
         if self._facility is None:

@@ -327,3 +327,88 @@ async def test_chinese_simplified_kanji_is_rephrased() -> None:
     llm2 = StubLLM(["にこ♡にこハウスは三﨑さんの近くです。"])
     assert await _collect(Dialogue(llm2, DialogueConfig()), "a") == ["にこ♡にこハウスは三﨑さんの近くです。"]
     assert llm2.chat_calls == []
+
+
+async def test_unknown_facility_location_is_replaced() -> None:
+    from src.site_context import BuildingFacility, Facility
+
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー",
+                   facilities_in_building=(BuildingFacility("AED", "1階ロビー"),))
+    llm = StubLLM(["トイレは1階ロビーの奥にあります。", "AEDは1階ロビーにあります。",
+                   "エレベーターは近くの職員にお尋ねください。"])
+    d = Dialogue(llm, DialogueConfig(), facility=fac)
+    assert await _collect(d, "設備") == [
+        "トイレの場所は、近くの職員にお尋ねください。",   # 登録なし → 差し替え
+        "AEDは1階ロビーにあります。",                   # 登録済み → そのまま
+        "エレベーターは近くの職員にお尋ねください。",     # 場所を言っていない → そのまま
+    ]
+
+
+def test_search_query_gets_concrete_dates() -> None:
+    from datetime import datetime
+
+    from src.knowledge import JST
+
+    d = Dialogue(StubLLM(), DialogueConfig(), now=lambda: datetime(2026, 10, 21, 10, 0, tzinfo=JST))
+    assert d._expand_dates("来週末に何かイベントはありますか").endswith(
+        " 10月31日 11月1日 令和8年10月 令和8年11月")
+    assert d._expand_dates("今週末、何かお祭りありますか").endswith(" 10月24日 10月25日 令和8年10月")
+    assert d._expand_dates("ごみの出し方") == "ごみの出し方"
+
+
+async def test_question_about_unregistered_facility_skips_llm() -> None:
+    from src.site_context import BuildingFacility, Facility
+
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー",
+                   facilities_in_building=(BuildingFacility("AED", "1階ロビー"),))
+    llm = StubLLM(["AEDは1階ロビーにあります。"])
+    d = Dialogue(llm, DialogueConfig(), facility=fac)
+    assert await _collect(d, "エレベーターはありますか") == ["エレベーターの場所は、近くの職員にお尋ねください。"]
+    assert await _collect(d, "トイレに行きたいんですが") == ["トイレの場所は、近くの職員にお尋ねください。"]
+    assert llm.calls == []
+    assert await _collect(d, "AEDはどこですか") == ["AEDは1階ロビーにあります。"]  # 登録済みは LLM に任せる
+    assert len(llm.calls) == 1
+
+
+def test_latest_dated() -> None:
+    from datetime import date
+
+    from src.dialogue import latest_dated
+
+    assert latest_dated("令和8年1月10日（土）と令和８年１月２５日（日）") == date(2026, 1, 25)
+    assert latest_dated("2026年10月31日に開催") == date(2026, 10, 31)
+    assert latest_dated("毎週火曜日は休館") is None
+
+
+async def test_past_event_refs_dropped_for_date_questions() -> None:
+    from datetime import datetime
+
+    from src.knowledge import JST, Reference, SearchResult
+
+    past = Reference("街の防災活動", "u1", "とんど祭り 令和8年1月25日（日）", 0.9, 1.0)
+    future = Reference("美術展", "u2", "令和8年10月31日から11月1日", 0.9, 1.0)
+    undated = Reference("図書館", "u3", "毎週火曜日は休館", 0.9, 1.0)
+
+    class KB:
+        def search(self, q: str) -> SearchResult:
+            return SearchResult([past, future, undated], 5.0)
+
+    d = Dialogue(StubLLM(), DialogueConfig(), knowledge=KB(),
+                 now=lambda: datetime(2026, 10, 21, 10, 0, tzinfo=JST))
+    await _collect(d, "今週末、何かお祭りありますか")
+    assert [r.title for r in d.last_references] == ["美術展", "図書館"]
+    await _collect(d, "とんど祭りのことを知りたい")  # 日付を聞いていなければ外さない
+    assert len(d.last_references) == 3
+
+
+async def test_bracketless_source_marker_is_stripped() -> None:
+    from src.knowledge import Reference, SearchResult
+
+    ref = Reference("印鑑登録の手続き", "u", "本文", 0.9, 1.0, "official", "市のホームページ")
+
+    class KB:
+        def search(self, q: str) -> SearchResult:
+            return SearchResult([ref], 5.0)
+
+    d = Dialogue(StubLLM(["登録する印鑑が要ります。出典:1"]), DialogueConfig(), knowledge=KB())
+    assert await _collect(d, "印鑑登録") == ["登録する印鑑が要ります。", "詳しくは市のホームページにも載っています。"]

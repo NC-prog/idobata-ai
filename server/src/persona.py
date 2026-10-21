@@ -39,6 +39,11 @@ def format_facts(facility: Facility | None) -> str:
         lines += [f"  - {format_department(d)}" for d in facility.departments]
     if facility.notes:
         lines += [f"- {n}" for n in facility.notes]
+    lines.append("- 館内の設備（ここに無い設備の場所は分からない）:")
+    if facility.facilities_in_building:
+        lines += [f"  - {f.name}: {f.location}" for f in facility.facilities_in_building]
+    else:
+        lines.append("  - （登録なし）")
     if facility.emergency_lines:
         lines.append("- 緊急連絡先（手続きではないので、いつ案内してもよい）:")
         lines += [f"  - {e.name}: {e.number}" for e in facility.emergency_lines]
@@ -62,18 +67,24 @@ def source_labels(cfg: DialogueConfig, facility: Facility | None, refs: list[Ref
 
 
 def this_weekend(today: date) -> tuple[date, date]:
-    """今週末の土曜・日曜。土曜なら今日と明日、日曜なら昨日と今日。"""
+    """今週末の土曜・日曜。土曜なら今日と明日、日曜なら昨日と今日。来週末はこの 7 日後。"""
     sat = today + timedelta(days=5 - today.weekday()) if today.weekday() <= 5 else today - timedelta(days=1)
     return sat, sat + timedelta(days=1)
+
+
+def _weekend_text(label: str, sat: date, sun: date) -> str:
+    return f"{label}＝{sat.month}月{sat.day}日（土）・{sun.month}月{sun.day}日（日）"
 
 
 def format_today(today: date, weather_lines: list[str]) -> str:
     """【今日】の中身。曜日と「今週末」は計算して書く（LLM に数えさせると間違える。WP03 の評価で
     「今週末は10月22日（木曜日）」と言い、1 か月先の行事を「来週」と言った）。"""
     sat, sun = this_weekend(today)
+    week = timedelta(days=7)
     lines = [
         f"今日: {today.year}年{today.month}月{today.day}日（{_WEEKDAYS[today.weekday()]}曜日）",
-        f"今週末＝{sat.month}月{sat.day}日（土）・{sun.month}月{sun.day}日（日）",
+        _weekend_text("今週末", sat, sun),
+        _weekend_text("来週末", sat + week, sun + week),
     ]
     lines.append("天気: " + ("".join(weather_lines) if weather_lines else "情報なし"))
     return "\n".join(lines)

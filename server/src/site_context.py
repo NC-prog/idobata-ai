@@ -23,6 +23,8 @@ WP03: ``facility`` 節（拠点の固定事実: 施設名・開庁時間・課�
       departments:
         - {name: 市民課, floor: 1階, handles: [住民票, 戸籍]}
         - {name: 子育て支援課, place: 江田島町中央四丁目, handles: [児童手当]}
+      facilities_in_building:   # 公式サイトで分かるものだけ
+        - {name: AED, location: 1階ロビー}
       emergency_lines:
         - {name: マイナンバー総合フリーダイヤル, number: 0120-95-0178}
     allow_ascii: [JR]
@@ -64,6 +66,14 @@ class EmergencyLine:
 
 
 @dataclass(frozen=True)
+class BuildingFacility:
+    """建物の中の設備（トイレ・エレベーター・授乳室・AED など）。公式サイトで分かるものだけ。"""
+
+    name: str
+    location: str
+
+
+@dataclass(frozen=True)
 class Facility:
     """拠点の固定事実（システムプロンプトに直書きする層）。"""
 
@@ -75,6 +85,8 @@ class Facility:
     emergency_lines: tuple[EmergencyLine, ...] = ()
     # 固定事実として話してよい補足（延長窓口、担当の分かれ方など）
     notes: tuple[str, ...] = ()
+    # 建物の中の設備。載っていない設備の場所は案内しない（「近くの職員にお尋ねください」）
+    facilities_in_building: tuple[BuildingFacility, ...] = ()
     allow_ascii: tuple[str, ...] = ()
     # 拠点の外なのに LLM が拠点のものとして挙げやすい場所（含む文は読み上げない）
     outside_places: tuple[str, ...] = ()
@@ -134,6 +146,11 @@ def load_facility(site: str, context_dir: Path) -> Facility | None:
         departments=departments,
         emergency_lines=lines,
         notes=tuple(str(n) for n in raw.get("notes") or [] if n),
+        facilities_in_building=tuple(
+            BuildingFacility(name=str(f["name"]), location=str(f["location"]))
+            for f in raw.get("facilities_in_building") or []
+            if isinstance(f, dict) and f.get("name") and f.get("location")
+        ),
         allow_ascii=tuple(str(a) for a in data.get("allow_ascii") or []),
         outside_places=tuple(str(a) for a in data.get("outside_places") or []),
     )
