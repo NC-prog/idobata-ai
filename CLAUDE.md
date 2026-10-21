@@ -9,8 +9,10 @@
 映像・音声・会話が建物の外に出ないこと（ローカルAI）が訴求の核。構想は `docs/構想メモ.md`。
 
 - 母体は [NC-prog/townhall-assistant](https://github.com/NC-prog/townhall-assistant) の `server/`（参照用 clone: `~/src/townhall-assistant`、**変更しない**）
-- WP00（現在）: standalone プロファイルで「マイク → VAD → Qwen3-ASR → LLM → VOICEVOX → スピーカー」の音声往復のみ。
-  アバター・カメラ・エッジ分離・対話FSM は WP01 以降
+- WP00: standalone プロファイルで「マイク → VAD → Qwen3-ASR → LLM → VOICEVOX → スピーカー」の音声往復
+- WP01（現在）: 応答の文単位先行合成（音声開始 約 1 秒）、固有名詞の VOICEVOX ユーザー辞書、
+  エッジ分離（ブラウザがマイク・スピーカー・VRM アバターを持つ、`--edge`）。結果は `docs/WP01_result.md`
+- 日本語 TTS は VOICEVOX で確定（WP00.5）。カメラ・YOLO11-pose・別機のエッジ PC は WP02、対話FSM は WP03
 
 ## 実行環境（重要）
 
@@ -32,7 +34,8 @@
 |---|---|---|---|---|
 | ASR（Qwen3-ASR-1.7B） | `http://127.0.0.1:8005/v1` | 同左 | `/models/asr` | 0.35（約5.6GB、実測 5.2GB） |
 | LLM（Qwen3-8B-AWQ） | `http://127.0.0.1:8001/v1` | `IDOBATA_BACKEND_URL`（Tailscale 経由の T2／3660。未設定なら起動時エラー） | `/models/llm` | 0.45（約7.2GB、実測 7.3GB、`--enforce-eager`） |
-| TTS（VOICEVOX） | `http://127.0.0.1:50021` | 同左 | - | CPU |
+| TTS（VOICEVOX） | `http://127.0.0.1:50021` | 同左 | - | CPU（8 スレッド、`VOICEVOX_CPU_THREADS`） |
+| エッジ（`--edge`） | ページ `http://localhost:8080/edge/`、WebSocket `ws://127.0.0.1:8765` | 同左 | - | - |
 | 予備 | - | - | - | 0.20（約3.2GB、YOLO11-pose・多言語TTS用。使い切らない） |
 
 - モデル名は必ず `/models/` プレフィックス付き。API key は `"dummy"`
@@ -50,16 +53,25 @@ bash scripts/healthcheck.sh
 # アプリ（server/ で）
 cd server
 uv sync
-uv run python -m src.main --mode text
-uv run python -m src.main --mode voice --audio-device 0 --output-device 20   # 内蔵マイク（ALSA 直）＋内蔵スピーカー
-uv run python -m src.main --list-devices
+uv run python -m src.main --mode text --output-device alsa_output.pci-0000_00_1f.3
+uv run python -m src.main --mode voice --audio-device hw:0,0 --output-device alsa_output.pci-0000_00_1f.3
+uv run python -m src.main --list-devices   # デバイスは番号か名前の一部。番号は USB 機器の抜き差しでずれる
 uv run python -m src.main --mode voice --input-wav tests/fixtures/visitor_procedure_ja.wav --output-wav-dir /tmp/out
+
+# エッジ（ブラウザ）モード: マイク・スピーカー・アバターはブラウザ側
+(cd ../edge && npm ci && npm run build)    # 初回と edge/ を変えたとき。成果物は server/static/edge/
+uv run python -m src.main --mode voice --edge   # → Chrome で http://localhost:8080/edge/ を開き「はじめる」
 
 # 品質
 uv run pytest
+uv run pytest -m integration   # 実サービス（ASR / LLM / VOICEVOX）に繋ぐもの
 uv run mypy --strict src
 uv run ruff check
+(cd ../edge && npm run typecheck && npm run build)
 ```
+
+- 7560 では既定の出力デバイス（PipeWire の ALSA プラグイン）への再生が戻らない。ローカル再生では必ず `--output-device` を指定する
+- Node は nvm で入っている（`~/.nvm`、v24）。sudo 不要
 
 ## コーディング規約
 
@@ -86,14 +98,22 @@ server/
 │   ├── vad.py            # Silero VAD（townhall のまま）
 │   ├── speech_gate.py    # 自己発話ゲート（townhall のまま、後マージン 0.7 秒）
 │   ├── asr_client.py     # Qwen3-ASR。言語フィルタなし、検出言語を返す
-│   ├── llm_client.py     # vLLM（OpenAI 互換）クライアント（townhall のまま）
-│   ├── tts_client.py     # VOICEVOX（townhall のまま）
-│   ├── dialogue.py       # 最小対話：固定ペルソナ + 直近 6 ターン（プロセス内のみ）
-│   ├── edge_bridge.py    # 旧 unity_bridge.py（WP01 で拡張）
-│   ├── caption_feed.py   # 字幕配信（WP01 以降で使用）
-│   ├── announcer.py      # テンプレート発話（WP00 では未使用）
-│   └── main.py           # text / voice の 2 モード
+│   ├── site_context.py   # 拠点 YAML（語・読み・アクセント）。ASR バイアシングと VOICEVOX ユーザー辞書の両方に使う
+│   ├── llm_client.py     # vLLM（OpenAI 互換）クライアント。chat_stream でストリーミング
+│   ├── tts_client.py     # VOICEVOX。ユーザー辞書の同期、StreamPlayer（文ごとの WAV を切れ目なく再生）
+│   ├── dialogue.py       # 最小対話：固定ペルソナ + 直近 6 ターン（プロセス内のみ）。応答を文ごとに yield
+│   ├── speech_output.py  # 応答音声の出力先（LocalSpeaker / WavDirWriter / EdgeSpeaker）
+│   ├── lipsync.py        # audio_query → 口形の時系列（音素同期の口パク）
+│   ├── edge_bridge.py    # エッジとの WebSocket（JSON + PCM/WAV バイナリ、8765）
+│   ├── edge_server.py    # エッジページの静的配信（FastAPI、8080 /edge/）
+│   ├── caption_feed.py   # 字幕配信（WP03 で使用予定）
+│   ├── announcer.py      # テンプレート発話（未使用）
+│   └── main.py           # text / voice の 2 モード、--edge
+├── static/edge/          # edge/ のビルド成果物（git 管理外）
 └── tests/
+edge/                     # エッジページ（Vite + TypeScript、three.js + @pixiv/three-vrm）
+├── src/                  # main.ts / avatar.ts / audio.ts / link.ts / protocol.ts
+└── public/               # mic-processor.js（AudioWorklet）、models/（VRM サンプル）、backgrounds/
 ```
 
 ## ブランチ運用

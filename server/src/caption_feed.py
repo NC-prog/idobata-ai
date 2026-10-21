@@ -15,7 +15,7 @@ from collections import deque
 from collections.abc import Callable, Coroutine
 from typing import Any, Protocol
 
-from .edge_bridge import UnityBridge
+from .edge_bridge import EdgeBridge
 from .schemas import TranscriptChunk
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ class CaptionFeed:
 
     def __init__(
         self,
-        bridge: UnityBridge,
+        bridge: EdgeBridge,
         session_manager: CaptionSession,
         history_size: int = 50,
     ) -> None:

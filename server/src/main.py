@@ -3,6 +3,8 @@
 - ``--mode text`` : 標準入力の 1 行 → dialogue → 応答表示 + VOICEVOX 再生
 - 応答は LLM のストリーミングを文に切り、1 文目から合成・再生する（WP01）
 - ``--mode voice``: マイク → SpeechGate → VAD → ASR → dialogue → VOICEVOX 再生
+- ``--edge``: マイク・スピーカー・アバターをブラウザ（エッジ）に置く。音声は WebSocket で
+  受け取り、応答は文ごとに口パク付きでエッジへ送る（``http://localhost:8080/edge/``）
 - ``--mode voice --input-wav a.wav b.wav ...``: マイクの代わりに WAV を順に流す疑似音声モード。
   ``--output-wav-dir`` を付けると再生せず応答音声を WAV で書き出す（無人での自動確認用）。
 
@@ -19,18 +21,27 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import httpx
 import numpy as np
 
 from .asr_client import ASRClient, load_site_vocabulary
-from .audio_input import MicrophoneInput, WavFileInput, list_audio_devices
+from .audio_input import EdgeAudioInput, MicrophoneInput, WavFileInput, list_audio_devices
 from .config import ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue
+from .edge_bridge import EdgeBridge
+from .edge_server import EdgeServer
 from .llm_client import LLMClient
 from .site_context import load_site_words
 from .speech_gate import SpeechGate
-from .speech_output import LocalSpeaker, SpeechSink, SpokenSentence, WavDirWriter
+from .speech_output import (
+    EdgeSpeaker,
+    LocalSpeaker,
+    SpeechSink,
+    SpokenSentence,
+    WavDirWriter,
+)
 from .tts_client import TTSClient
 from .vad import SpeechEventType, VADBackend, create_vad
 
@@ -77,6 +88,7 @@ class VoiceLoop:
         audio_device: DeviceSpec,
         output_device: DeviceSpec,
         output_wav_dir: Path | None,
+        edge: bool = False,
     ) -> None:
         self._mode = mode
         self._input_wavs = input_wavs
@@ -99,6 +111,15 @@ class VoiceLoop:
         self._reply_count = 0
         self._turn_lock = asyncio.Lock()
         self._turn_tasks: set[asyncio.Task[None]] = set()
+        # --edge: マイク・スピーカー・アバターをブラウザ（エッジ）側に置く
+        self._edge: EdgeBridge | None = None
+        self._edge_server: EdgeServer | None = None
+        if edge:
+            self._edge = EdgeBridge(config.edge.ws_host, config.edge.ws_port)
+            self._edge_server = EdgeServer(
+                config.edge.http_host, config.edge.http_port, config.edge.static_dir
+            )
+        self._bg_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------
     # 起動
@@ -109,6 +130,10 @@ class VoiceLoop:
         # 固有名詞の読みを先に登録する（プリウォームの合成より前に）
         await self._tts.sync_user_dict(load_site_words(config.site, config.asr.site_context_dir))
         await self._tts.prewarm()
+        if self._edge is not None and self._edge_server is not None:
+            self._edge.on_hello = self._on_edge_hello
+            await self._edge.start()
+            await self._edge_server.start()
         self._print_banner()
         try:
             if self._mode == "text":
@@ -126,10 +151,15 @@ class VoiceLoop:
         print(f"  LLM: {config.llm.gateway_url} ({config.llm.chat_model})")
         if self._mode == "voice":
             print(f"  ASR: {config.asr.base_url}")
-            if not self._input_wavs:
+            if self._edge is not None and not self._input_wavs:
+                print("  音声入力: エッジ（ブラウザのマイク）")
+            elif not self._input_wavs:
                 print(f"  音声入力デバイス: [{self._audio_device}]")
             if self._input_wavs:
                 print(f"  入力WAV: {', '.join(p.name for p in self._input_wavs)}")
+        if self._edge_server is not None:
+            print(f"  エッジ: {self._edge_server.url} を Chromium で開く"
+                  f"（WebSocket ws://{config.edge.ws_host}:{config.edge.ws_port}）")
         if self._output_wav_dir is not None:
             print(f"  応答音声の書き出し先: {self._output_wav_dir}")
         elif self._tts.output_device_id is not None:
@@ -159,6 +189,8 @@ class VoiceLoop:
                 self._dialogue.reset()
                 print("[履歴を消去しました]")
                 continue
+            await self._send_caption(text, role="user")
+            await self._send_state("thinking")
             await self._respond_and_speak(text, "ja", None)
 
     # ------------------------------------------------------------------
@@ -185,6 +217,18 @@ class VoiceLoop:
                 # （閉じたまま次のファイルを流すと、冒頭がゲートで捨てられる）
                 await self._drain_turns()
                 await self._wait_gate_open()
+            return
+
+        if self._edge is not None:
+            edge_input = EdgeAudioInput(config.audio_input)
+            self._edge.on_pcm = edge_input.push_pcm
+            print("エッジの接続を待っています。ブラウザで画面を開き「はじめる」を押してください"
+                  "（Ctrl+C で終了）")
+            try:
+                await self._run_pipeline(vad, edge_input)
+            finally:
+                self._edge.on_pcm = None
+                await edge_input.stop()
             return
 
         mic_cfg = replace(config.audio_input, device_id=self._audio_device)
@@ -225,6 +269,7 @@ class VoiceLoop:
                 if event.event_type == SpeechEventType.SPEECH_START:
                     segment_frames = [frame]
                     t_speech_start = event.timestamp_sec
+                    await self._send_state("listening")
                 elif event.event_type == SpeechEventType.SPEECH_END:
                     if segment_frames:
                         await self._on_segment(segment_frames, t_speech_start)
@@ -236,6 +281,7 @@ class VoiceLoop:
         """1 セグメントを ASR に掛け、確定テキストが出たら応答タスクを起こす。"""
         assert self._asr is not None
         timing = TurnTiming(t_speech_end=time.monotonic())
+        await self._send_state("thinking")
         final_text = ""
         language = "ja"
         async for chunk in self._asr.transcribe_segment(
@@ -246,10 +292,12 @@ class VoiceLoop:
                 language = chunk.language
         timing.t_asr_done = time.monotonic()
         if not final_text:
+            await self._send_state("idle")
             return
 
         self._asr.push_rolling_context(final_text)
         print(f"[聞き取り:{language}] {final_text}")
+        await self._send_caption(final_text, role="user")
         # 応答生成中も音声フレームの消費を止めない（マイクのキューが詰まらないように）
         task = asyncio.create_task(
             self._respond_and_speak(final_text, language, timing), name="turn"
@@ -320,6 +368,8 @@ class VoiceLoop:
                     producer.cancel()
                 if muted:
                     self._gate.schedule_unmute()
+                elif self._edge is not None:
+                    await self._send_state("idle")  # 1 文も流せなかった
             if timing is not None:
                 print(f"[計測] 発話終了→ {timing.summary()}")
 
@@ -345,13 +395,48 @@ class VoiceLoop:
         """1 応答ぶんの出力先を作る。"""
         if self._output_wav_dir is not None:
             return WavDirWriter(self._output_wav_dir / f"reply_{self._reply_count:02d}.wav")
+        if self._edge is not None:
+            return EdgeSpeaker(self._edge, config.edge.playback_timeout_margin_sec)
         return LocalSpeaker(self._tts.open_player())
+
+    # ------------------------------------------------------------------
+    # エッジ
+    # ------------------------------------------------------------------
+
+    def _on_edge_hello(self, hello: dict[str, Any]) -> None:
+        """エッジがつながったら、拠点と季節（背景）と現在の状態を送る。"""
+        async def greet() -> None:
+            assert self._edge is not None
+            await self._edge.send_theme(config.site, current_season())
+            await self._edge.send_state("idle")
+
+        task = asyncio.create_task(greet(), name="edge-hello")
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _send_state(self, value: str) -> None:
+        if self._edge is not None:
+            await self._edge.send_state(value)
+
+    async def _send_caption(self, text: str, *, role: str) -> None:
+        if self._edge is not None:
+            await self._edge.send_caption(text, final=True, role=role)
 
     async def _shutdown(self) -> None:
         await self._drain_turns()
         if self._asr is not None:
             await self._asr.close()
         await self._tts.close()
+        if self._edge_server is not None:
+            await self._edge_server.stop()
+        if self._edge is not None:
+            await self._edge.stop()
+
+
+def current_season(month: int | None = None) -> str:
+    """月から季節（エッジの背景の切替に使う）を返す。"""
+    m = month if month is not None else time.localtime().tm_mon
+    return config.edge.seasons[(m - 3) % 12 // 3]
 
 
 async def _with_tail_silence(source: WavFileInput) -> AsyncIterator[np.ndarray]:
@@ -386,6 +471,10 @@ def main() -> None:
         "--output-device", type=parse_device, default=None,
         help="TTS 音声出力デバイス（番号か名前の一部。省略時は .env の IDOBATA_AUDIO_OUTPUT_DEVICE）",
     )
+    parser.add_argument(
+        "--edge", action="store_true",
+        help="マイク・スピーカー・アバターをブラウザ（エッジ）側に置く（http://localhost:8080/edge/）",
+    )
     parser.add_argument("--list-devices", action="store_true", help="音声デバイス一覧を表示して終了")
     parser.add_argument("--debug", action="store_true", help="DEBUG ログ（発話本文を含む）")
     args = parser.parse_args()
@@ -403,6 +492,8 @@ def main() -> None:
     for noisy in ("httpx", "httpx2", "openai", "websockets", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    if args.edge and args.output_wav_dir is not None:
+        parser.error("--edge と --output-wav-dir は同時に指定できません")
     if args.input_wav and args.mode != "voice":
         parser.error("--input-wav は --mode voice と一緒に指定してください")
 
@@ -412,6 +503,7 @@ def main() -> None:
         audio_device=args.audio_device,
         output_device=args.output_device,
         output_wav_dir=args.output_wav_dir,
+        edge=args.edge,
     )
     try:
         asyncio.run(app.run())

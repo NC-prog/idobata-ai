@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>井戸端AI</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="background"></div>
+    <canvas id="avatar"></canvas>
+    <div id="captions">
+      <p id="caption-user" class="caption user"></p>
+      <p id="caption-assistant" class="caption assistant"></p>
+    </div>
+    <div id="status" aria-live="polite">未接続</div>
+    <div id="start" hidden>
+      <button id="start-button" type="button">はじめる</button>
+      <p>マイクの使用を許可してください</p>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

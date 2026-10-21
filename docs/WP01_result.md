@@ -153,3 +153,171 @@
 - `uv run pytest`: 155 passed（integration 2 件は別に `-m integration` で 2 passed）
 - `uv run mypy --strict src`: Success（16 files）
 - `uv run ruff check`: All checks passed
+
+---
+
+## B. エッジ分離＋ブラウザアバター
+
+実施: 2026-10-21
+
+### 結論（B）
+
+- **`--mode voice --edge` で、ブラウザをエッジにした 3 往復が通った**
+  - ブラウザのマイクで聞き取り、応答はブラウザで再生、口は音素に合わせて動く
+  - `playback_ended` の後にゲートが開く
+- 確認は**ヘッドレス Chrome** で行った。マイクの代わりに、来訪者役の WAV を偽のマイクとして流した（下記）
+  - 音声開始は **0.79 / 1.07 / 0.97 秒**（1.3 秒未満）
+- **人が画面の前で実マイクを使った確認はまだ**。マイクは A-4 の内蔵マイク雑音の件があるので、Avaya B109 を選ぶ必要がありそう
+- ローカル再生モード（`--edge` なし）も引き続き動く（A の確認を再実行して 0.69〜1.41 秒。下記「計測」）
+
+### B-1. エッジ ⇄ フロントの契約（実装したもの）
+
+- WebSocket は 1 本（`ws://127.0.0.1:8765`）で、JSON（テキスト）とバイナリを混在させる。ページは同じプロセスの FastAPI から `http://localhost:8080/edge/` で配信する
+- 指示書の表どおり: `hello` / PCM16 バイナリ / `playback_ended`（上り）、`state` / `caption` / `speak`＋WAV / `theme`（下り）。`interrupt` は受けてログに出すだけ
+- **契約に 1 つ足した: `playback_ended` に `last_seq`（最後に鳴らし終えた文の番号）**
+  - 次の文の合成が間に合わないと、ブラウザの再生キューは文と文の間で一瞬空になる
+  - `utterance_id` だけでは、この途中の通知と「応答の最後まで鳴らした」通知を見分けられない
+  - フロントは `last_seq` が最後に送った文の番号以上になるまで待つ
+- 口パク `mouth`（`src/lipsync.py`）: audio_query の `prePhonemeLength` から始めて、各モーラの子音長・母音長を積み上げる。母音 a/i/u/e/o を `aa/ih/ou/ee/oh` に写す
+  - N・cl・句読点の無音は閉口なので出さない
+  - 無声化した母音（「です」の「ス」）も出さない
+  - 統合テストで、最後の口形区間が WAV の長さ（文末の無音を除く）に収まることを確認した
+- 状態の遷移（フロント側で送る）:
+  - VAD の発話開始 → `listening`
+  - 発話終了 → `thinking`（ASR が空なら `idle`）
+  - 1 文目を送るとき → `speaking`
+  - `playback_ended`（最後の文）→ `idle`
+- 字幕:
+  - 来訪者: ASR 確定時に `caption{role:user, final:true}`
+  - アバター: 文を送るたびに、そこまでの全文を `caption{role:assistant}`
+  - ページ側では、アバターの字幕を「その文が鳴り始めたとき」に出す（届いた時点で先に出すと、音声より先に字幕が読めてしまうため）
+- `audio_input.EdgeAudioInput`: 20ms（320 サンプル）単位で届く PCM16 を、VAD の 512 サンプルに詰め直す。VAD 以降のパイプラインは変更なし
+- `--edge` のときは `EdgeSpeaker` が `speak`＋WAV を送り、`playback_ended` を待ってからゲートを開く
+  - 通知が来なくても、再生終了の見込み + 3 秒で開く
+  - `--edge` なしなら、従来どおりローカル再生（`LocalSpeaker`）
+- `hello` を受けたら `theme{site, season}`（季節は月から決める）と `state:idle` を送る
+
+### B-2. エッジページ（`edge/`）
+
+- Vite 8 + TypeScript 7、three.js 0.186 + @pixiv/three-vrm 3.5
+- `npm run build`（`tsc --noEmit` → `vite build`）の成果物は `server/static/edge/` に出る（git 管理外）
+- マイク: `getUserMedia({audio:{echoCancellation, noiseSuppression, autoGainControl: true}})` で取る
+  - 16kHz の AudioContext を作り、ブラウザ側でリサンプルする
+  - AudioWorklet（`public/mic-processor.js`）で PCM16 にして、20ms ごとに送る
+  - 送信が詰まったら（bufferedAmount 64KB 超）古い音声を溜めずに捨てる
+  - `hello.caps.aec` には、トラックが実際に AEC 有効になったか（`getSettings().echoCancellation`）を入れる
+- 再生: 届いた WAV を `decodeAudioData` し、前の文の終わりに続けて `start()` する（隙間なし）
+  - デコードは届いた順に直列で行う
+  - キューが空になったら `playback_ended` を送る
+- アバター（`src/avatar.ts`）:
+  - 腕を下ろした姿勢で、胸から上を写す
+  - idle: 呼吸（spine の小さな揺れ）と、3〜6 秒おきのまばたき
+  - listening: 少し前傾して、相手（カメラ）を見る
+  - thinking: 視線と顔を少し外す
+  - speaking: 口パク（viseme を 1/28 秒程度で追従）と軽い頷き
+  - 表情は happy / relaxed を 0.1〜0.25 だけ乗せる
+- 字幕: 画面下に 2 行（来訪者 = 黄色、アバター = 白）。文字は画面高の 3.4〜4.2%（1080p で 37〜45px）
+- 背景: `theme` で `public/backgrounds/<site>_<season>.jpg` に切り替える
+  - 今回は単色グラデーションのプレースホルダ（Pillow で生成、2 拠点 × 4 季節）。実写は市町から受け取って差し替える
+- 起動の流れ:
+  - 通常は「はじめる」ボタン（AudioContext の自動再生制限とマイク許可のため、1 回だけ押す）
+  - 自動再生が許可された起動（キオスク用フラグ `--autoplay-policy=no-user-gesture-required`）なら、ボタンなしで始まる
+  - WebSocket が切れたら 0.5〜5 秒間隔で張り直す
+
+### 決めたこと（B）
+
+- **VRM モデル**: `VRM1_Constraint_Twist_Sample.vrm`。three-vrm リポジトリの examples に同梱されている唯一のモデル
+  - モデル内のライセンス設定（VRMC_vrm.meta）を読んで確認した。推測ではない
+  - `edge/public/models/README.md` に転記した
+
+  | 項目 | 値 |
+  |---|---|
+  | 配布元 | github.com/pixiv/three-vrm `packages/three-vrm/examples/models/`（dev ブランチ、2026-10-21 取得） |
+  | 作者 / 著作権 | pixiv Inc. / (c) 2022 pixiv Inc. |
+  | ライセンス | VRM パブリック・ライセンス 1.0（https://vrm.dev/licenses/1.0/） |
+  | avatarPermission | everyone（ライセンス文書の「アバター利用」＝人格を与えて操作し視聴させること、を誰にでも許諾） |
+  | commercialUsage | corporation（法人の商用利用まで可） |
+  | allowRedistribution / modification | true / allowModificationRedistribution |
+  | creditNotation | unnecessary |
+  | allowPoliticalOrReligiousUsage | true（allowAntisocialOrHateUsage は false） |
+
+- **Node の入れ方**: 7560 には既に **nvm（`~/.nvm`）で Node v24.22.0 / npm** が入っていたので、そのまま使った（sudo 不要）。新しい機体では次のとおり:
+  ```bash
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+  nvm install 24
+  ```
+- **ブラウザ**: 7560 に Chromium は無く、Google Chrome（`/usr/bin/google-chrome`）があったので、それで確認した。ページは Chromium でも同じ
+- `server/static/edge/` は git に入れない。`edge/` を変えたら `npm run build` する
+- 字幕を音声に合わせて出すのはページ側で行う。フロントの `caption` は契約どおり全文を送る
+
+### 確認方法と計測（B）
+
+ヘッドレス Chrome をエッジにして無人で確認した。
+
+```bash
+google-chrome --headless=new --use-fake-ui-for-media-stream --use-fake-device-for-media-stream \
+  --use-file-for-fake-audio-capture=<来訪者役 3 発話を 22 秒の無音で区切った WAV> \
+  --autoplay-policy=no-user-gesture-required --mute-audio --use-angle=gl-egl \
+  --remote-debugging-port=9222 http://localhost:8080/edge/
+```
+
+- ページは自動で開始した。`hello`（`caps.aec: true`）を受け、3 往復とも ASR → 応答 → `speak` → ブラウザで再生 → `playback_ended` → `[GATE] unmute` の順になった
+- DevTools プロトコルで撮ったスクリーンショットで、次を確認した
+  - 胸から上の構図
+  - 発話中に口が開く
+  - 来訪者・アバターの 2 行字幕
+  - 背景が `etajima_autumn` になる
+- 計測（`[計測]` の音声開始は、1 文目の `speak` を送った時刻。ブラウザ側のデコード・開始の余裕 0.03 秒が加わる）:
+
+| 往復 | ASR | LLM 1文目確定 | **音声開始** | LLM 完了 |
+|---|---|---|---|---|
+| 1 挨拶 | 0.29 | 0.63 | **0.97** | 1.38 |
+| 2 手続き | 0.40 | 0.60 | **1.07** | 1.85 |
+| 3 雑談 | 0.35 | 0.47 | **0.79** | 1.25 |
+
+- 注意: ヘッドレス Chrome の既定はソフトウェア描画（SwiftShader）で、Chrome が CPU を 1400% 使う
+  - その状態では VOICEVOX・ASR と CPU を取り合い、音声開始が 1.49〜2.37 秒まで落ちた
+  - `--use-angle=gl-egl`（Intel 内蔵 GPU で描画）で上の値になった
+  - 画面のある通常の Chrome は GPU で描画するので問題ないはずだが、**キオスク起動ではソフトウェア描画にならないことを確認する**（chrome://gpu）
+- ローカル再生モード（`--edge` なし、内蔵スピーカー）の再確認: 0.77 / 1.41 / 0.69 秒
+  - 2 往復目は 1 文目が読点なしの長文だったため（1 文目の合成待ち）
+  - 同じ質問を 4 回繰り返すと 0.65〜1.11 秒
+  - **最終設定での計測 19 回（疑似音声 6・実再生 9・エッジ 3・名前指定の確認 1）のうち、1.3 秒を超えたのはこの 1 回だけ**
+
+### 人間が確認すること（B）
+
+1. **画面のある Chrome で 3 往復**
+   - `uv run python -m src.main --mode voice --edge` を起動し、`http://localhost:8080/edge/` を開いて「はじめる」→ マイクを許可
+   - 確認すること: 口の動きが声に合っているか、字幕の大きさ、待機・傾聴・考え中・発話の見た目の違い（薄くしたので、物足りなければ `avatar.ts` の `POSES`）
+2. **ブラウザのマイク**: Chrome は OS（PipeWire）の既定の入力を使う。内蔵マイクは A-4 の雑音の件があるので、Chrome のサイト設定（アドレスバーの鍵アイコン → マイク）で **Avaya B109** を選ぶ必要がありそう
+   - AEC がブラウザ側で効いているか（`hello` の `caps.aec` はログに出る）
+3. **VRM のライセンス**: 上の表の転記で、役所のロビーでのデモ用途に問題ないか（アバター利用・法人商用・政治宗教用途とも許諾あり）
+4. **キオスク起動**（WP02 の準備）: `--autoplay-policy=no-user-gesture-required` を付けるとボタンなしで始まる。描画がソフトウェアになっていないか
+
+### 次の起動手順
+
+```bash
+# サービス（ASR / LLM / VOICEVOX）。VOICEVOX は 8 スレッドで作り直される
+docker compose -f deploy/standalone/docker-compose.yaml --env-file deploy/standalone/.env up -d --build
+bash scripts/healthcheck.sh
+
+# エッジページのビルド（初回と edge/ を変えたとき）
+cd edge && npm ci && npm run build && cd ..
+
+# エッジ（ブラウザ）モード
+cd server && uv sync
+uv run python -m src.main --mode voice --edge
+# → Chrome で http://localhost:8080/edge/ を開き「はじめる」（マイクは Avaya B109 を選ぶ）
+
+# ローカル再生モード（従来）。デバイスは番号より名前の一部で指定する
+uv run python -m src.main --mode voice --audio-device Avaya --output-device alsa_output.pci-0000_00_1f.3
+```
+
+- `deploy/standalone/.env` には音声デバイスの指定が無い。その場合、ローカル再生は既定デバイスに出て戻らなくなるので、CLI で指定するか、`.env.example` の 2 行（名前での指定）を `.env` に写す
+
+### 品質（B の時点、最終）
+
+- `uv run pytest`: **174 passed**（`-m integration` は 3 passed）
+- `uv run mypy --strict src`: Success（18 files）
+- `uv run ruff check`: All checks passed
+- `edge/`: `npm run typecheck`（tsc --noEmit）と `npm run build` が通る。`npm ci` からのクリーンビルドも確認した

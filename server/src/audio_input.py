@@ -1,7 +1,7 @@
 """音声入力ソース。
 
-マイクまたは WAV ファイルから 16kHz モノラル float32 のフレームを
-AsyncIterator として供給する。
+マイク、WAV ファイル、またはエッジ（ブラウザ）から 16kHz モノラル float32 の
+フレームを AsyncIterator として供給する。
 """
 
 from __future__ import annotations
@@ -258,6 +258,61 @@ class WavFileInput:
         """入力を停止する。"""
         self._stopped = True
         logger.info("WAV 入力停止")
+
+
+class EdgeAudioInput:
+    """エッジ（ブラウザ）から WebSocket で届く PCM16 をフレームとして供給する。
+
+    エッジは 20ms（320 サンプル）ごとに送ってくるので、VAD の frame_size（512）に
+    詰め直して float32 で返す。``push_pcm`` はイベントループのスレッドから呼ぶ
+    （EdgeBridge の受信処理）。キューが満杯なら古い方を捨てずに新しいフレームを捨てる。
+    """
+
+    def __init__(self, cfg: AudioInputConfig, max_queue: int = 200) -> None:
+        self._cfg = cfg
+        self._queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=max_queue)
+        self._pending = np.zeros(0, dtype=np.float32)
+        self._dropped_frames = 0
+        self._stopped = False
+
+    def push_pcm(self, data: bytes) -> None:
+        """PCM16 LE mono のバイト列を受け取る。"""
+        if self._stopped:
+            return
+        if len(data) % 2:
+            data = data[:-1]
+        samples = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
+        self._pending = np.concatenate([self._pending, samples])
+        size = self._cfg.frame_size
+        while len(self._pending) >= size:
+            frame, self._pending = self._pending[:size], self._pending[size:]
+            try:
+                self._queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                self._dropped_frames += 1
+                if self._dropped_frames % 100 == 1:
+                    logger.warning(
+                        "エッジ音声フレームをドロップしました（累計 %d フレーム）",
+                        self._dropped_frames,
+                    )
+
+    def __aiter__(self) -> AsyncIterator[np.ndarray]:
+        return self
+
+    async def __anext__(self) -> np.ndarray:
+        frame = await self._queue.get()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    async def stop(self) -> None:
+        """入力を停止する。"""
+        self._stopped = True
+        try:
+            self._queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+        logger.info("エッジ音声入力停止 (ドロップ: %d フレーム)", self._dropped_frames)
 
 
 def list_audio_devices() -> None:

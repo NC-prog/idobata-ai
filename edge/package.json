@@ -1,0 +1,21 @@
+{
+  "name": "idobata-edge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "井戸端AI エッジページ（ブラウザのマイク・スピーカー・VRM アバター）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "^3.5.5",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}

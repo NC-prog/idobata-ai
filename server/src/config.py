@@ -226,10 +226,18 @@ class CaptionConfig:
 
 @dataclass(frozen=True)
 class EdgeConfig:
-    """エッジ（アバター表示側）との WebSocket の設定。"""
+    """エッジ（ブラウザのアバター画面）との接続の設定。"""
 
     ws_host: str = LOCALHOST
     ws_port: int = 8765
+    # エッジページの静的配信（edge/ を Vite でビルドした成果物）
+    http_host: str = LOCALHOST
+    http_port: int = 8080
+    static_dir: Path = SERVER_ROOT / "static" / "edge"
+    # playback_ended を待つ上限 = 再生終了の見込み + この秒数
+    playback_timeout_margin_sec: float = 3.0
+    # 季節（背景 edge/public/backgrounds/<site>_<season>.jpg）。3〜5 月が spring、以降 3 か月ずつ
+    seasons: tuple[str, str, str, str] = ("spring", "summer", "autumn", "winter")
 
 
 @dataclass(frozen=True)

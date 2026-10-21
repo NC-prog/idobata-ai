@@ -74,3 +74,19 @@ async def test_user_dict_fixes_place_name_reading() -> None:
         assert kana.startswith("ノウミ")
     finally:
         await tts.close()
+
+
+async def test_mouth_timeline_fits_in_synthesized_wav() -> None:
+    """口パクの最後の区間が、合成した WAV の長さに収まる（時刻の積み上げが音声と合う）。"""
+    from src.lipsync import mouth_timeline
+
+    tts = TTSClient()
+    try:
+        wav, query = await tts.synthesize_with_query("こんにちは、今日はいい天気ですね。")
+        duration = TTSClient.wav_duration_sec(wav)
+        keys = mouth_timeline(query)
+        end = keys[-1]["t"] + keys[-1]["d"]
+        post = float(query["postPhonemeLength"])
+        assert duration - post - 0.15 < end <= duration - post + 0.01
+    finally:
+        await tts.close()

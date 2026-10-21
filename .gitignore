@@ -6,3 +6,8 @@ dist/
 .env
 outputs/
 models/
+
+# エッジページのビルド成果物（edge/ で npm run build）
+server/static/edge/
+# エッジのサンプル VRM（ライセンス確認済み、edge/public/models/README.md）は管理する
+!edge/public/models/

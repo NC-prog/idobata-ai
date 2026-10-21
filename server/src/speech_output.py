@@ -2,14 +2,16 @@
 
 - ``LocalSpeaker``: この機体のスピーカーで切れ目なく再生する（StreamPlayer）
 - ``WavDirWriter``: 再生せず、1 応答ぶんを 1 つの WAV に繋いで書き出す（無人での自動確認用）
+- ``EdgeSpeaker``: エッジ（ブラウザ）へ ``speak``（口パク付き）+ WAV を送り、エッジで鳴らす
 
-どちらも ``push()`` で 1 文ずつ受け取り、``finish()`` で「鳴らし終わった」まで待つ。
+いずれも ``push()`` で 1 文ずつ受け取り、``finish()`` で「鳴らし終わった」まで待つ。
 """
 
 from __future__ import annotations
 
 import io
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -17,7 +19,9 @@ from typing import Any, Protocol
 import numpy as np
 import soundfile as sf  # type: ignore[import-untyped]
 
-from .tts_client import StreamPlayer
+from .edge_bridge import EdgeBridge
+from .lipsync import mouth_timeline
+from .tts_client import StreamPlayer, TTSClient
 
 logger = logging.getLogger(__name__)
 
@@ -82,3 +86,53 @@ class WavDirWriter:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         sf.write(str(self._path), np.concatenate(self._chunks), self._rate)
         print(f"[音声] {self._path}")
+
+
+class EdgeSpeaker:
+    """エッジで再生する。``finish()`` はエッジの ``playback_ended`` を待つ。
+
+    エッジは届いた順に文を隙間なく鳴らす前提で、再生終了の見込みを積み上げて返す。
+    ``playback_ended`` が来ない（エッジの切断・タブの停止）場合も、
+    見込み + timeout_margin_sec で待つのをやめる。
+    """
+
+    def __init__(self, bridge: EdgeBridge, timeout_margin_sec: float) -> None:
+        self._bridge = bridge
+        self._margin = timeout_margin_sec
+        self._end_at = 0.0
+        self._utterance_id: str | None = None
+        self._last_seq = -1
+        self._spoken: list[str] = []
+
+    async def push(self, sentence: SpokenSentence) -> float:
+        duration = TTSClient.wav_duration_sec(sentence.wav)
+        header = {
+            "type": "speak",
+            "utterance_id": sentence.utterance_id,
+            "seq": sentence.seq,
+            "text": sentence.text,
+            "mouth": mouth_timeline(sentence.query),
+        }
+        if self._utterance_id is None:
+            await self._bridge.send_state("speaking")
+        await self._bridge.send_speak(header, sentence.wav)
+        self._spoken.append(sentence.text)
+        await self._bridge.send_caption("".join(self._spoken), final=False, role="assistant")
+        self._utterance_id = sentence.utterance_id
+        self._last_seq = sentence.seq
+        now = time.monotonic()
+        self._end_at = max(now, self._end_at) + duration
+        return self._end_at - now
+
+    async def finish(self) -> None:
+        if self._utterance_id is None:
+            return
+        await self._bridge.send_caption("".join(self._spoken), final=True, role="assistant")
+        timeout = max(0.0, self._end_at - time.monotonic()) + self._margin
+        ok = await self._bridge.wait_playback_ended(self._utterance_id, self._last_seq, timeout)
+        if not ok:
+            logger.warning(
+                "エッジから playback_ended が %.1f秒来ません（%s seq=%d）。再生済みとみなします",
+                timeout, self._utterance_id, self._last_seq,
+            )
+        await self._bridge.send_state("idle")

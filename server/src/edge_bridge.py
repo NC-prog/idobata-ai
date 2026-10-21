@@ -1,6 +1,21 @@
-"""Unity WebSocket Bridge.
+"""エッジ（ブラウザ）⇄ フロントAI の WebSocket ブリッジ（WP01）。
 
-Live2D アバターとの通信を管理する。websockets v17+ 対応済み。
+旧 unity_bridge。1 本の WebSocket で JSON（テキストフレーム）と音声（バイナリフレーム）を
+混在させる。契約は docs/WP01_edge_and_avatar.md B-1 と docs/WP01_result.md。
+
+上り（エッジ → フロント）
+- JSON ``hello``: ``{type, edge_id, sample_rate, caps:{aec}}``
+- バイナリ: PCM16 mono 16kHz（20ms ごと）→ ``on_pcm`` に渡す（EdgeAudioInput）
+- JSON ``playback_ended``: ``{type, utterance_id, last_seq}`` 再生キューが空になった
+  （``last_seq`` は最後に鳴らし終えた文の番号。契約への追加。文と文の間で一瞬キューが
+  空になった通知と、応答の最後の通知を見分けるのに使う）
+- JSON ``interrupt``: 予約（WP03）
+
+下り（フロント → エッジ）
+- JSON ``state`` / ``caption`` / ``theme``
+- JSON ``speak`` + 直後にバイナリ（その文の WAV）
+
+音声を送ってくるエッジは 1 台（最後に hello したもの）とする。表示用の下りは全接続に送る。
 """
 
 from __future__ import annotations
@@ -8,6 +23,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import websockets
@@ -15,213 +32,167 @@ from websockets.asyncio.server import Server, ServerConnection
 
 logger = logging.getLogger(__name__)
 
+# エッジの状態（アバターの見た目）
+STATES = ("idle", "listening", "thinking", "speaking")
 
-class UnityBridge:
-    """Unity との WebSocket 通信を管理するクラス。"""
+PcmHandler = Callable[[bytes], None]
+HelloHandler = Callable[[dict[str, Any]], None]
 
-    def __init__(self, host: str = "localhost", port: int = 8765) -> None:
+
+@dataclass
+class _PlaybackWaiter:
+    utterance_id: str
+    last_seq: int
+    future: asyncio.Future[None] = field(repr=False)
+
+
+class EdgeBridge:
+    """エッジとの WebSocket サーバ。"""
+
+    def __init__(self, host: str, port: int) -> None:
         self.host = host
         self.port = port
         self.clients: set[ServerConnection] = set()
         self.server: Server | None = None
-        self._running = False
+        self._audio_client: ServerConnection | None = None
+        self._send_lock = asyncio.Lock()
+        self._waiters: list[_PlaybackWaiter] = []
+        # 受信したうち、各発話で鳴らし終えた最大の文番号（待ちより先に届いた通知用）
+        self._played: dict[str, int] = {}
+        self.on_pcm: PcmHandler | None = None
+        self.on_hello: HelloHandler | None = None
 
     async def start(self) -> None:
         """WebSocket サーバーを開始する。"""
         self.server = await websockets.serve(
-            self._handle_client,
-            self.host,
-            self.port,
+            self._handle_client, self.host, self.port, max_size=2**22,
         )
-        self._running = True
-        logger.info("Unity Bridge started on ws://%s:%d", self.host, self.port)
+        logger.info("Edge Bridge: ws://%s:%d", self.host, self.port)
 
     async def stop(self) -> None:
         """WebSocket サーバーを停止する。"""
-        self._running = False
         if self.server:
             self.server.close()
             await self.server.wait_closed()
-        logger.info("Unity Bridge stopped")
-
-    async def _handle_client(self, websocket: ServerConnection) -> None:
-        """クライアント接続を処理する。"""
-        self.clients.add(websocket)
-        client_info = str(websocket.remote_address)
-        logger.info("Unity connected: %s", client_info)
-
-        try:
-            async for message in websocket:
-                logger.debug("Received from Unity: %s", message)
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("Unity disconnected: %s", client_info)
-        finally:
-            self.clients.discard(websocket)
-
-    async def send_command(self, command: dict[str, Any]) -> None:
-        """全クライアントにコマンドを送信する。"""
-        if not self.clients:
-            logger.warning("No Unity clients connected")
-            return
-
-        message = json.dumps(command, ensure_ascii=False)
-
-        disconnected: set[ServerConnection] = set()
-        for client in self.clients:
-            try:
-                await client.send(message)
-            except websockets.exceptions.ConnectionClosed:
-                disconnected.add(client)
-
-        self.clients -= disconnected
-
-    # ========== 既存コマンド（type ベース、互換維持） ==========
-
-    async def talk_start(self) -> None:
-        """発話開始（リップシンク開始）。"""
-        await self.send_command({"type": "talk_start"})
-        logger.info("Sent: talk_start")
-
-    async def talk_end(self) -> None:
-        """発話終了（リップシンク停止）。"""
-        await self.send_command({"type": "talk_end"})
-        logger.info("Sent: talk_end")
-
-    async def bow(self) -> None:
-        """お辞儀モーション。"""
-        await self.send_command({"type": "motion", "name": "bow"})
-        logger.info("Sent: bow motion")
-
-    async def celebrate(self) -> None:
-        """祝福モーション。"""
-        await self.send_command({"type": "motion", "name": "celebrate"})
-        logger.info("Sent: celebrate motion")
-
-    async def set_expression(self, value: float) -> None:
-        """表情設定 (0.0 = 通常, 1.0 = 笑顔)。"""
-        await self.send_command({"type": "expression", "value": value})
-        logger.info("Sent: expression %s", value)
-
-    async def set_lipsync(self, value: float) -> None:
-        """リップシンク値を直接設定 (0.0 - 1.0)。"""
-        await self.send_command({"type": "lipsync", "value": value})
-
-    # ========== 新コマンド（command ベース） ==========
-
-    async def send_caption(self, text: str, *, final: bool = False) -> None:
-        """字幕テキストを送信する。
-
-        Args:
-            text: 字幕テキスト
-            final: 確定テキストかどうか
-        """
-        await self.send_command({
-            "command": "caption",
-            "text": text,
-            "final": final,
-        })
-
-    async def show_panel(self, panel: str, markdown: str) -> None:
-        """パネルを表示する。
-
-        Args:
-            panel: パネル種別（"summary" 等）
-            markdown: 表示する Markdown テキスト
-        """
-        await self.send_command({
-            "command": "show_panel",
-            "panel": panel,
-            "markdown": markdown,
-        })
-        logger.info("Sent: show_panel (%s)", panel)
-
-    async def hide_panel(self) -> None:
-        """パネルを非表示にする。"""
-        await self.send_command({"command": "hide_panel"})
-        logger.info("Sent: hide_panel")
-
-    async def set_presenter(self, name: str, dept: str) -> None:
-        """現在の発表者を設定する。
-
-        Args:
-            name: 発表者名
-            dept: 部署名
-        """
-        await self.send_command({
-            "command": "set_presenter",
-            "name": name,
-            "dept": dept,
-        })
-        logger.info("Sent: set_presenter %s (%s)", name, dept)
+        for w in self._waiters:
+            if not w.future.done():
+                w.future.cancel()
+        logger.info("Edge Bridge stopped")
 
     @property
     def is_connected(self) -> bool:
-        """Unity が接続されているか。"""
-        return len(self.clients) > 0
+        """音声を送ってくるエッジが接続しているか。"""
+        return self._audio_client is not None
 
+    # ------------------------------------------------------------------
+    # 受信
+    # ------------------------------------------------------------------
 
-# グローバルインスタンス（シングルトン的に使用）
-_bridge_instance: UnityBridge | None = None
+    async def _handle_client(self, websocket: ServerConnection) -> None:
+        self.clients.add(websocket)
+        peer = str(websocket.remote_address)
+        logger.info("エッジ接続: %s", peer)
+        try:
+            async for message in websocket:
+                if isinstance(message, bytes):
+                    if websocket is self._audio_client and self.on_pcm is not None:
+                        self.on_pcm(message)
+                    continue
+                self._handle_json(websocket, message)
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        finally:
+            self.clients.discard(websocket)
+            if websocket is self._audio_client:
+                self._audio_client = None
+            logger.info("エッジ切断: %s", peer)
 
+    def _handle_json(self, websocket: ServerConnection, message: str) -> None:
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError:
+            logger.warning("エッジから JSON でないテキストを受信しました")
+            return
+        if not isinstance(data, dict):
+            return
+        kind = data.get("type")
+        if kind == "hello":
+            self._audio_client = websocket
+            logger.info(
+                "エッジ hello: edge_id=%s sample_rate=%s caps=%s",
+                data.get("edge_id"), data.get("sample_rate"), data.get("caps"),
+            )
+            if self.on_hello is not None:
+                self.on_hello(data)
+        elif kind == "playback_ended":
+            self._on_playback_ended(str(data.get("utterance_id", "")), data.get("last_seq"))
+        elif kind == "interrupt":
+            logger.info("エッジ interrupt（WP03 まで未対応）")
+        else:
+            logger.debug("未知のメッセージ: %s", kind)
 
-def get_bridge() -> UnityBridge:
-    """UnityBridge のグローバルインスタンスを取得する。"""
-    global _bridge_instance
-    if _bridge_instance is None:
-        _bridge_instance = UnityBridge()
-    return _bridge_instance
+    def _on_playback_ended(self, utterance_id: str, last_seq: Any) -> None:
+        seq = last_seq if isinstance(last_seq, int) else -1
+        logger.debug("playback_ended: %s last_seq=%d", utterance_id, seq)
+        self._played[utterance_id] = max(seq, self._played.get(utterance_id, -1))
+        for w in list(self._waiters):
+            if w.utterance_id == utterance_id and seq >= w.last_seq and not w.future.done():
+                w.future.set_result(None)
 
+    async def wait_playback_ended(self, utterance_id: str, last_seq: int, timeout: float) -> bool:
+        """エッジが utterance_id の last_seq 番目の文まで鳴らし終えるのを待つ。
 
-async def test_bridge() -> None:
-    """テスト用: コマンドラインからの動作確認。"""
-    bridge = get_bridge()
-    await bridge.start()
+        Returns:
+            True: 通知が来た / False: timeout 秒以内に来なかった（エッジの切断など）
+        """
+        if self._played.get(utterance_id, -1) >= last_seq:
+            self._played.pop(utterance_id, None)
+            return True
+        loop = asyncio.get_running_loop()
+        waiter = _PlaybackWaiter(utterance_id, last_seq, loop.create_future())
+        self._waiters.append(waiter)
+        try:
+            await asyncio.wait_for(waiter.future, timeout)
+            return True
+        except TimeoutError:
+            return False
+        finally:
+            self._waiters.remove(waiter)
+            self._played.pop(utterance_id, None)
 
-    print("\n=== Unity Bridge Test Server ===")
-    print("Unity からの接続を待っています...")
-    print("コマンド: talk, stop, bow, celebrate, smile, normal, quit")
-    print("=" * 35)
+    # ------------------------------------------------------------------
+    # 送信
+    # ------------------------------------------------------------------
 
-    async def input_loop() -> None:
-        loop = asyncio.get_event_loop()
-        while True:
-            try:
-                command = await loop.run_in_executor(None, input, "\n> ")
-                command = command.strip().lower()
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        """全接続に JSON を送る。"""
+        await self._broadcast([json.dumps(payload, ensure_ascii=False)])
 
-                if command in ("quit", "q"):
-                    print("終了します...")
-                    break
-                elif command == "talk":
-                    await bridge.talk_start()
-                    print("-> リップシンク開始")
-                elif command == "stop":
-                    await bridge.talk_end()
-                    print("-> リップシンク停止")
-                elif command == "bow":
-                    await bridge.bow()
-                    print("-> お辞儀")
-                elif command == "celebrate":
-                    await bridge.celebrate()
-                    print("-> 祝福")
-                elif command == "smile":
-                    await bridge.set_expression(1.0)
-                    print("-> 笑顔")
-                elif command == "normal":
-                    await bridge.set_expression(0.0)
-                    print("-> 通常表情")
-                elif command == "status":
-                    status = "接続中" if bridge.is_connected else "未接続"
-                    print(f"-> Unity: {status} ({len(bridge.clients)} clients)")
-                else:
-                    print("不明なコマンド。talk/stop/bow/celebrate/smile/normal/status/quit")
+    async def send_state(self, value: str) -> None:
+        """アバターの状態（idle / listening / thinking / speaking）。"""
+        if value not in STATES:
+            raise ValueError(f"未知の状態: {value}")
+        await self.send_json({"type": "state", "value": value})
 
-            except EOFError:
-                break
+    async def send_caption(self, text: str, *, final: bool, role: str = "user") -> None:
+        """字幕（caption_feed からも使う）。"""
+        await self.send_json({"type": "caption", "role": role, "text": text, "final": final})
 
-    await input_loop()
-    await bridge.stop()
+    async def send_theme(self, site: str, season: str) -> None:
+        """衣装・背景の切替（WP01 は背景だけ）。"""
+        await self.send_json({"type": "theme", "site": site, "season": season})
 
+    async def send_speak(self, header: dict[str, Any], wav: bytes) -> None:
+        """1 文ぶんの ``speak`` と WAV を、間に他の送信が挟まらないよう続けて送る。"""
+        await self._broadcast([json.dumps(header, ensure_ascii=False), wav])
 
-if __name__ == "__main__":
-    asyncio.run(test_bridge())
+    async def _broadcast(self, frames: list[str | bytes]) -> None:
+        if not self.clients:
+            return
+        async with self._send_lock:
+            for client in list(self.clients):
+                try:
+                    for frame in frames:
+                        await client.send(frame)
+                except websockets.exceptions.ConnectionClosed:
+                    self.clients.discard(client)
