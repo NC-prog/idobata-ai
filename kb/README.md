@@ -8,7 +8,8 @@
 
 ```bash
 # リポジトリのルートで（kb/ は server/ とは別の uv 環境）
-CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima              # 全部（15〜25 分）
+CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima              # 全部（40〜60 分。毎週日曜 3:00）
+CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --daily      # 更新の速い区画だけ（数分。毎朝 6:00）
 CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --weather-only   # 天気だけ（数秒）
 ```
 
@@ -17,6 +18,12 @@ CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --we
 - フロント（`server/`）は `manifest.json` の変化を 60 秒ごとに見て、再起動なしで新しい版に切り替える。天気（`weather.json`）は更新されたら読み直す
 - `kb/pack/<site>` はそこへのリンク（git 管理外）
 - `--from-cache`: 取得し直さず、今のパックのページをキャッシュから作り直す（チャンク分け・人名除去の規則を変えたとき）
+- `--daily`: `daily: true` の seed（お知らせ・イベント・広報・防災・休館日）だけを**深さ 1** で取り、今の版に差分で足す
+  - 取ったページの本文ハッシュ（`page_hash`）が前の版と同じなら、そのチャンクとベクトルをそのまま使う
+  - 変わったページ・新しいページだけを作り直す。取らなかったページはそのまま残る（消えたページは毎週の全体で落ちる）
+  - 変わったページが無ければ版を作らない
+- **埋め込みの使い回し**: 全体の作り直しでも、埋め込む文（タイトル + 本文）が前の版と同じチャンクはベクトルを使い回し、
+  変わったものだけ埋め込む。ログの「ベクトル: 新しく埋め込み N 件 / 使い回し M 件」で確かめられる
 - 前回の `ETag` / `Last-Modified` を `$IDOBATA_DATA_DIR/kb/cache/<site>/` に覚えておき、変わっていないページは本文を取り直さない
 
 | ファイル | 中身 |
@@ -36,6 +43,7 @@ CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --we
   - `require_text`: 本文にこの語を含むページだけ採用する（県の観光サイトから拠点の分だけ、など）
   - `max_fetches`: その seed での取得の上限
   - `recheck_days`: キャッシュがこの日数より新しければ取り直さない（大きなサイトを数日かけて回す）
+  - `daily: true`: 更新の速い区画。毎朝の `--daily` ではこの seed だけを深さ 1 で取る
 - `exclude_breadcrumb_keywords` / `exclude_title_keywords`: **個人名を含みうるページ（議会・会議録・入札・人事・職員採用・首長の部屋・選挙）を外す**。知識パックに人名を入れない
 - `weather`: 気象庁の府県予報区（`area_code`）・一次細分区域（`area_sub_code`）と、気温を取るアメダスの観測点（`amedas`）
   - 観測点の ID は気象庁のアメダス地点一覧（`https://www.jma.go.jp/bosai/amedas/const/amedastable.json`）で確かめて書く
@@ -58,18 +66,24 @@ CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --we
 
 ## 自動更新（既定で有効）
 
-systemd の user タイマー（sudo 不要）で、**毎朝 6:00 に全体**、**毎時 05 分に天気**を更新する。
+systemd の user タイマー（sudo 不要）で更新する:
+
+| タイマー | いつ | 中身 |
+|---|---|---|
+| `kb-daily@<拠点>` | 毎朝 6:00 | `--daily`（更新の速い区画だけ、数分。江田島で約 185 リクエスト・4〜5 分） |
+| `kb-full@<拠点>` | 毎週日曜 3:00 | 全体の作り直し（40〜60 分。変わっていないチャンクは再埋め込みしない） |
+| `kb-weather@<拠点>` | 毎時 05 分 | 天気だけ（数秒） |
 
 ```bash
 bash deploy/standalone/install-kb-timers.sh            # .env の IDOBATA_SITE（既定 etajima）
 bash deploy/standalone/install-kb-timers.sh akiota     # 別の拠点も
 systemctl --user list-timers 'kb-*'                    # 次の実行時刻
-journalctl --user -u 'kb-nightly@etajima' -n 50        # ログ
-systemctl --user disable --now kb-nightly@etajima.timer kb-weather@etajima.timer   # 止める
+journalctl --user -u 'kb-daily@etajima' -n 50          # ログ
+systemctl --user disable --now kb-daily@etajima.timer kb-full@etajima.timer kb-weather@etajima.timer   # 止める
 ```
 
-- ユニットは `deploy/standalone/kb-{nightly,weather}@.{service,timer}`（`%i` が拠点）。install スクリプトが uv とリポジトリのパスを埋めて `~/.config/systemd/user/` に置く
-- 全体と天気は `flock` で重ならない（全体の作り直し中の天気は飛ばす）
+- ユニットは `deploy/standalone/kb-{daily,full,weather}@.{service,timer}`（`%i` が拠点）。install スクリプトが uv とリポジトリのパスを埋めて `~/.config/systemd/user/` に置く（以前の `kb-nightly@` は外す）
+- 毎朝・全体・天気は `flock` で重ならない（作り直し中の天気は飛ばす）
 - ログアウト中や再起動直後（ログイン前）も動かすには linger が要る。スクリプトは `loginctl enable-linger` を試し、できなければ `sudo loginctl enable-linger <ユーザー>` を人間に頼むよう表示する（7560 では sudo なしで有効にできた）
 
 site プロファイルでは、作った `~/idobata-data/kb/<site>/` を rsync で現地機に配る前提（配布スクリプトは未作成）。

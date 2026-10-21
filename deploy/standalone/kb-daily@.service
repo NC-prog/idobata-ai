@@ -1,0 +1,14 @@
+# 井戸端AI 知識パックの毎朝の更新（更新の速い区画だけ）。%i は拠点
+# sources/<拠点>.yaml で daily: true の seed（お知らせ・イベント・広報・防災・休館日）だけを深さ 1 で取り、
+# 本文ハッシュが変わったページ・新しいページだけを作り直して差し替える（変わっていないページは再埋め込みしない）
+[Unit]
+Description=idobata-ai knowledge pack daily update (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO__
+Environment=CUDA_VISIBLE_DEVICES=
+ExecStart=/usr/bin/flock __DATA__/kb/.%i.lock __UV__ run --project kb python kb/build.py --site %i --daily
+Nice=10

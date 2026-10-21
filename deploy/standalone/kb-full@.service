@@ -1,7 +1,8 @@
-# 井戸端AI 知識パックの全体の作り直し（systemd の user サービス、sudo 不要）。%i は拠点（etajima / akiota）
+# 井戸端AI 知識パックの全体の作り直し（毎週日曜 3:00。systemd の user サービス、sudo 不要）。%i は拠点
+# 本文が前の版と同じチャンクはベクトルを使い回す（再埋め込みしない）
 # install-kb-timers.sh が __UV__ と __REPO__ を埋めて ~/.config/systemd/user/ に置く
 [Unit]
-Description=idobata-ai knowledge pack build (%i)
+Description=idobata-ai knowledge pack full rebuild (%i)
 Wants=network-online.target
 After=network-online.target
 

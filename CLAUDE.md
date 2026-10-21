@@ -64,7 +64,8 @@ uv run python -m src.main --mode voice --input-wav tests/fixtures/visitor_proced
 
 # 知識パック（kb/ は別の uv 環境。埋め込みは CPU）。--weather-only で天気だけ
 CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajima
-bash ../deploy/standalone/install-kb-timers.sh   # 自動更新（毎朝 6:00 全体・毎時 05 分天気、systemd user、有効化済み）
+CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajima --daily   # 更新の速い区画だけ（差分）
+bash ../deploy/standalone/install-kb-timers.sh   # 自動更新（毎朝 6:00 差分・毎週日曜 3:00 全体・毎時 05 分天気。有効化済み）
 uv run python -m tests.eval.run --site etajima   # 評価セット 20 問（LLM と知識パックを使う）
 
 # エッジ（ブラウザ）モード: マイク・スピーカー・アバターはブラウザ側

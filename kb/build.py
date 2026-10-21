@@ -19,6 +19,7 @@ sources の exclude / exclude_title_keywords で外す。
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import logging
@@ -106,6 +107,8 @@ class Seed:
     # 出どころの信頼度（official / semi / news）と、応答で出典を言うときの言い方
     trust: str = ""
     label: str = ""
+    # 更新の速い区画（お知らせ・イベント・広報・防災・休館日）。毎朝の --daily では、これだけを深さ 1 で取る
+    daily: bool = False
 
     def matches(self, patterns: list[str], url: str) -> bool:
         return any(re.search(p, url) for p in patterns)
@@ -446,7 +449,7 @@ def extract_links(html: str, base: str) -> list[str]:
     return out
 
 
-def crawl(src: Sources, crawler: Crawler) -> list[Page]:
+def crawl(src: Sources, crawler: Crawler, daily: bool = False) -> list[Page]:
     """seeds から幅優先で辿る（sitemap の seed は載っている URL を候補にする）。
 
     各 seed の include に合い、範囲（scope_breadcrumbs）・本文の条件（require_text）を満たし、
@@ -455,6 +458,10 @@ def crawl(src: Sources, crawler: Crawler) -> list[Page]:
     pages: dict[str, Page] = {}
     fetched: dict[str, Page | None] = {}  # seed をまたいで同じページを取り直さない
     for seed in src.seeds:
+        if daily and not seed.daily:
+            continue
+        if daily:  # 毎朝は更新の速い区画だけを深さ 1 で
+            seed = dataclasses.replace(seed, depth=min(seed.depth, 1))
         seen: set[str] = set()
         seed_fetches = 0
         if seed.sitemap:
@@ -544,6 +551,19 @@ class Chunk:
     text: str
     trust: str = ""
     label: str = ""
+    # 元のページの本文ハッシュ（毎朝の差分で、変わっていないページのチャンクとベクトルを使い回す）
+    page_hash: str = ""
+
+    def embed_text(self) -> str:
+        return f"{DOC_PREFIX}{self.title}\n{self.text}"
+
+
+def page_hash(page: Page) -> str:
+    return hashlib.sha1(f"{page.title}\n{page.text}".encode()).hexdigest()
+
+
+def embed_key(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()
 
 
 def split_sections(markdown: str) -> list[str]:
@@ -635,11 +655,12 @@ def clean_title(title: str) -> str:
     return re.sub(r"\s+", " ", t).strip() or title
 
 
-def make_chunks(pages: list[Page]) -> list[Chunk]:
+def make_chunks(pages: list[Page], seen_text: set[str] | None = None) -> list[Chunk]:
     chunks: list[Chunk] = []
-    seen_text: set[str] = set()
+    seen_text = set() if seen_text is None else seen_text
     for page in pages:
         page.title = clean_title(page.title)
+        phash = page_hash(page)
         for i, text in enumerate(chunk_text(redact_names(page.text))):
             key = hashlib.sha1(text.encode()).hexdigest()
             if key in seen_text:  # 複数ページに出る同じ文面（共通の案内など）は 1 つにする
@@ -647,7 +668,7 @@ def make_chunks(pages: list[Page]) -> list[Chunk]:
             seen_text.add(key)
             cid = hashlib.sha1(f"{page.url}#{i}".encode()).hexdigest()[:16]
             chunks.append(Chunk(cid, page.url, page.title, page.fetched_at, text,
-                                page.trust, page.label))
+                                page.trust, page.label, phash))
     return chunks
 
 
@@ -737,21 +758,86 @@ def build_observation(cfg: dict[str, Any], client: httpx.Client) -> dict[str, An
 # ----------------------------------------------------------------------
 
 
-def embed_and_save(chunks: list[Chunk], out: Path) -> None:
+def load_previous(pack: Path) -> tuple[list[Chunk], dict[str, Any]]:
+    """今の版のチャンクと、埋め込みの文 → ベクトル（使い回し用）。版が無ければ空。"""
+    import lancedb
+    import pyarrow.parquet as pq
+
+    if not (pack / "chunks.parquet").is_file():
+        return [], {}
+    rows = pq.read_table(pack / "chunks.parquet").to_pylist()
+    chunks = [Chunk(r["id"], r["source_url"], r["title"], r["fetched_at"], r["text"],
+                    r.get("trust") or "", r.get("label") or "", r.get("page_hash") or "")
+              for r in rows]
+    vectors: dict[str, Any] = {}
+    try:
+        table = lancedb.connect(str(pack / "index.lancedb")).open_table(LANCE_TABLE)
+        by_id = {r["id"]: r["vector"] for r in table.to_arrow().to_pylist()}
+        for c in chunks:
+            if c.id in by_id:
+                vectors[embed_key(c.embed_text())] = by_id[c.id]
+    except Exception:
+        logger.warning("前の版のベクトルを読めません（全部埋め込み直します）", exc_info=True)
+    return chunks, vectors
+
+
+def merge_daily(previous: list[Chunk], pages: list[Page]) -> tuple[list[Chunk], dict[str, int]]:
+    """毎朝の差分: 取ったページのうち本文ハッシュが変わったもの・新しいものだけを作り直す。
+
+    取らなかったページ（毎朝の対象外）と、変わっていなかったページのチャンクはそのまま残す。
+    消えたページは毎週の全体の作り直しで落とす。
+    """
+    by_url: dict[str, list[Chunk]] = {}
+    for c in previous:
+        by_url.setdefault(c.source_url, []).append(c)
+    stats = {"unchanged": 0, "changed": 0, "new": 0, "no_chunks": 0}
+    candidates: list[Page] = []
+    for page in pages:
+        old = by_url.get(page.url)
+        page.title = clean_title(page.title)
+        if old and old[0].page_hash and old[0].page_hash == page_hash(page):
+            stats["unchanged"] += 1
+            continue
+        candidates.append(page)
+    replaced = {p.url for p in candidates if p.url in by_url}
+    kept = [c for c in previous if c.source_url not in replaced]
+    seen_text = {hashlib.sha1(c.text.encode()).hexdigest() for c in kept}
+    new_chunks: list[Chunk] = []
+    for page in candidates:
+        made = make_chunks([page], seen_text)
+        if not made and page.url not in by_url:
+            stats["no_chunks"] += 1  # 短い・重複だけのページ（パックに入らない）は「新規」に数えない
+            continue
+        stats["changed" if page.url in by_url else "new"] += 1
+        new_chunks += made
+    return kept + new_chunks, stats
+
+
+def embed_and_save(chunks: list[Chunk], out: Path, reuse: dict[str, Any] | None = None) -> dict[str, int]:
+    """埋め込んで保存する。埋め込みの文が前の版と同じチャンクはベクトルを使い回す（再埋め込みしない）。"""
     import lancedb
     import pyarrow as pa
     import pyarrow.parquet as pq
-    import torch
-    from sentence_transformers import SentenceTransformer
 
-    torch.set_num_threads(max(1, (os.cpu_count() or 4) // 2))
-    model = SentenceTransformer(EMBED_MODEL, device="cpu")  # GPU の予備枠は使わない
-    texts = [f"{DOC_PREFIX}{c.title}\n{c.text}" for c in chunks]
-    t0 = time.monotonic()
-    vectors = model.encode(
-        texts, batch_size=EMBED_BATCH, normalize_embeddings=True, show_progress_bar=False,
-    )
-    logger.info("埋め込み %d 件: %.1f 秒（CPU）", len(chunks), time.monotonic() - t0)
+    reuse = reuse or {}
+    texts = [c.embed_text() for c in chunks]
+    keys = [embed_key(t) for t in texts]
+    todo = [i for i, k in enumerate(keys) if k not in reuse]
+    vectors: list[Any] = [reuse.get(k) for k in keys]
+    if todo:
+        import torch
+        from sentence_transformers import SentenceTransformer
+
+        torch.set_num_threads(max(1, (os.cpu_count() or 4) // 2))
+        model = SentenceTransformer(EMBED_MODEL, device="cpu")  # GPU の予備枠は使わない
+        t0 = time.monotonic()
+        new = model.encode([texts[i] for i in todo], batch_size=EMBED_BATCH,
+                           normalize_embeddings=True, show_progress_bar=False)
+        for i, v in zip(todo, new, strict=True):
+            vectors[i] = v.tolist()
+        logger.info("埋め込み %d 件: %.1f 秒（CPU）", len(todo), time.monotonic() - t0)
+    stats = {"embedded": len(todo), "reused": len(chunks) - len(todo)}
+    logger.info("ベクトル: 新しく埋め込み %d 件 / 使い回し %d 件", stats["embedded"], stats["reused"])
 
     table = pa.table({
         "id": [c.id for c in chunks],
@@ -761,16 +847,18 @@ def embed_and_save(chunks: list[Chunk], out: Path) -> None:
         "text": [c.text for c in chunks],
         "trust": [c.trust for c in chunks],
         "label": [c.label for c in chunks],
+        "page_hash": [c.page_hash for c in chunks],
     })
     pq.write_table(table, out / "chunks.parquet")
+    dim = len(next(v for v in vectors if v is not None))
     db = lancedb.connect(str(out / "index.lancedb"))
     db.create_table(
         LANCE_TABLE,
         data=pa.table({"id": table["id"], "vector": pa.array(
-            [v.tolist() for v in vectors], type=pa.list_(pa.float32(), int(vectors.shape[1]))
-        )}),
+            [list(v) for v in vectors], type=pa.list_(pa.float32(), dim))}),
         mode="overwrite",
     )
+    return stats
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -844,6 +932,8 @@ def main() -> int:
     ap.add_argument("--site", required=True)
     ap.add_argument("--weather-only", action="store_true", help="天気（weather.json）だけ更新する")
     ap.add_argument("--max-pages", type=int, default=None, help="試運転用に取得ページ数を絞る")
+    ap.add_argument("--daily", action="store_true",
+                    help="毎朝: daily の区画だけを深さ 1 で取り、変わったページだけ作り直して差し替える")
     ap.add_argument("--from-cache", action="store_true",
                     help="取得し直さず、今のパックのページをキャッシュから作り直す（チャンク・人名除去の変更用）")
     args = ap.parse_args()
@@ -872,11 +962,27 @@ def main() -> int:
     crawler = Crawler(src, root / "cache" / args.site)
     t0 = time.monotonic()
     try:
-        pages = pages_from_cache(pack, crawler, src) if args.from_cache else crawl(src, crawler)
+        if args.from_cache:
+            pages = pages_from_cache(pack, crawler, src)
+        else:
+            pages = crawl(src, crawler, daily=args.daily)
     finally:
         crawler.close()
     logger.info("取得完了: 採用 %d ページ, %s, %.0f 秒", len(pages), crawler.stats, time.monotonic() - t0)
-    chunks = make_chunks(pages)
+    previous, reuse = load_previous(pack)
+    merge_stats: dict[str, int] = {}
+    if args.daily:
+        if not previous:
+            logger.error("今の版がありません。先に全体の作り直し（--daily なし）をしてください")
+            return 1
+        chunks, merge_stats = merge_daily(previous, pages)
+        logger.info("毎朝の差分: 変わらず %(unchanged)d / 変更 %(changed)d / 新規 %(new)d ページ"
+                    "（チャンクにならないページ %(no_chunks)d）", merge_stats)
+        if not merge_stats["changed"] and not merge_stats["new"]:
+            logger.info("変わったページがないので、版は作り直しません")
+            return 0
+    else:
+        chunks = make_chunks(pages)
     logger.info("チャンク %d 件", len(chunks))
     if not chunks:
         logger.error("チャンクが 0 件です。sources を見直してください")
@@ -888,17 +994,23 @@ def main() -> int:
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
-    embed_and_save(chunks, staging)
+    embed_stats = embed_and_save(chunks, staging, reuse)
     shutil.copy2(pack / "weather.json", staging / "weather.json")
+    n_pages = len({c.source_url for c in chunks})
     write_json(staging / "manifest.json", {
         "site": args.site,
         "generated_at": datetime.now(JST).isoformat(timespec="seconds"),
-        "pages": len(pages),
+        "mode": "daily" if args.daily else ("from-cache" if args.from_cache else "full"),
+        "pages": n_pages,
         "chunks": len(chunks),
+        "fetched_pages": len(pages),
+        "daily_merge": merge_stats,
+        "embedding_stats": embed_stats,
         "embedding": {"model": EMBED_MODEL, "query_prefix": QUERY_PREFIX,
                       "doc_prefix": DOC_PREFIX, "normalized": True},
         "crawl_stats": crawler.stats,
         "sources": [{"url": s.url, "depth": s.depth, "include": s.include, "sitemap": s.sitemap,
+                     "daily": s.daily,
                      "render": s.render, "trust": s.trust or src.default_trust,
                      "label": s.label or src.default_label} for s in src.seeds],
         "allow_domains": src.allow_domains,
@@ -908,7 +1020,7 @@ def main() -> int:
     swap_link(root / args.site, version)
     prune_versions(root, args.site)
     logger.info("知識パック: %s → %s（%d ページ, %d チャンク）", root / args.site, version.name,
-                len(pages), len(chunks))
+                n_pages, len(chunks))
     return 0
 
 

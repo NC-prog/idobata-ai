@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 知識パックの自動更新（毎朝 6:00 の全体・毎時 05 分の天気）を systemd の user タイマーで有効にする。
+# 知識パックの自動更新を systemd の user タイマーで有効にする:
+#   毎朝 6:00 更新の速い区画（--daily）/ 毎週日曜 3:00 全体の作り直し / 毎時 05 分 天気
 # sudo は使わない。使い方: bash deploy/standalone/install-kb-timers.sh [拠点]（省略時は .env の IDOBATA_SITE）
 set -euo pipefail
 
@@ -13,11 +14,16 @@ UV="$(command -v uv)"
 UNIT_DIR="$HOME/.config/systemd/user"
 
 mkdir -p "$UNIT_DIR" "$DATA/kb"
-for f in kb-nightly@.service kb-nightly@.timer kb-weather@.service kb-weather@.timer; do
+# 以前の版（毎朝の全体の作り直し）のタイマーが残っていれば外す
+if systemctl --user is-enabled "kb-nightly@$SITE.timer" >/dev/null 2>&1; then
+  systemctl --user disable --now "kb-nightly@$SITE.timer" || true
+fi
+rm -f "$UNIT_DIR/kb-nightly@.service" "$UNIT_DIR/kb-nightly@.timer"
+for f in kb-daily@.service kb-daily@.timer kb-full@.service kb-full@.timer kb-weather@.service kb-weather@.timer; do
   sed -e "s|__UV__|$UV|g" -e "s|__REPO__|$REPO|g" -e "s|__DATA__|$DATA|g" "$HERE/$f" > "$UNIT_DIR/$f"
 done
 systemctl --user daemon-reload
-systemctl --user enable --now "kb-nightly@$SITE.timer" "kb-weather@$SITE.timer"
+systemctl --user enable --now "kb-daily@$SITE.timer" "kb-full@$SITE.timer" "kb-weather@$SITE.timer"
 systemctl --user list-timers "kb-*@$SITE.timer" --no-pager
 
 # ログアウト中・再起動後（ログイン前）も動かすには linger が要る

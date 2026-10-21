@@ -135,3 +135,37 @@ def test_versioned_pack_swap(tmp_path: Path) -> None:
 def test_clean_title() -> None:
     assert build.clean_title("特産品ショップ「えたじまーれ」&nbsp;| 買う | 江田島市観光協会【公式】") == "特産品ショップ「えたじまーれ」"
     assert build.clean_title("住民票などの窓口発行") == "住民票などの窓口発行"
+
+
+def test_merge_daily_reuses_unchanged_pages() -> None:
+    text_a = "ごみの出し方について。" * 10
+    text_b = "秋祭りを開催します。" * 10
+    pa_ = build.Page("https://x/a", "A", text_a, [], "t")
+    pb = build.Page("https://x/b", "B", text_b, [], "t")
+    previous = build.make_chunks([pa_, pb])
+    # A は同じ、B は本文が変わった、C は新しい、D は短すぎてチャンクにならない
+    pb2 = build.Page("https://x/b", "B", "花火大会は10月31日です。" * 10, [], "t2")
+    pc = build.Page("https://x/c", "C", "図書館の休館日のお知らせです。" * 10, [], "t2")
+    pd = build.Page("https://x/d", "D", "短い", [], "t2")
+    a_again = build.Page("https://x/a", "A", text_a, [], "t2")
+    merged, stats = build.merge_daily(previous, [a_again, pb2, pc, pd])
+    assert stats == {"unchanged": 1, "changed": 1, "new": 1, "no_chunks": 1}
+    urls = [c.source_url for c in merged]
+    assert urls.count("https://x/a") == 1 and "https://x/c" in urls and "https://x/d" not in urls
+    assert next(c for c in merged if c.source_url == "https://x/a") is previous[0]  # 使い回し
+    assert "花火大会" in next(c for c in merged if c.source_url == "https://x/b").text
+
+
+def test_embed_reuse_skips_unchanged_text(tmp_path: Path, monkeypatch: Any) -> None:
+    chunks = build.make_chunks([build.Page("https://x/a", "A", "ごみの出し方について。" * 10, [], "t")])
+    reuse = {build.embed_key(c.embed_text()): [0.1] * 4 for c in chunks}
+    import sys
+    import types
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("使い回せるのに埋め込もうとした")
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers",
+                        types.SimpleNamespace(SentenceTransformer=boom))
+    stats = build.embed_and_save(chunks, tmp_path, reuse)
+    assert stats == {"embedded": 0, "reused": len(chunks)}

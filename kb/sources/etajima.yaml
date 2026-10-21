@@ -86,15 +86,43 @@ seeds:
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
     scope_breadcrumbs: ["時刻表"]
+  # ---- 更新の速い区画（daily: true。毎朝 6:00 の --daily では、これだけを深さ 1 で取る）----
   # 行事（新着の行事フィードと、催し・イベントのカレンダー）。分類はまちまちなので範囲は絞らない
   - url: https://www.city.etajima.hiroshima.jp/cms/atom/events
     depth: 1
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
+    daily: true
   - url: https://www.city.etajima.hiroshima.jp/cms/calendars
     depth: 1
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
+    daily: true
+  # 新着のお知らせ・トピックス
+  - url: https://www.city.etajima.hiroshima.jp/cms/atom/news
+    depth: 1
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    daily: true
+  - url: https://www.city.etajima.hiroshima.jp/cms/atom/topics
+    depth: 1
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    daily: true
+  # 防災（暮らしのガイド > 防災）
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/11
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["> 防災"]
+    daily: true
+  # 広報えたじま（本文は PDF が多いので、取れるのは目次・お知らせの記事）
+  - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/29
+    depth: 2
+    include: ["/cms/articles/show/\\d+$"]
+    exclude: *exclude
+    scope_breadcrumbs: ["広報えたじま"]
+    daily: true
   # ---- 市以外の公的・準公的なソース（WP03 追加作業。robots.txt と利用条件を確認済み、docs/WP03_result.md）----
   # 江田島市観光協会: ブラウザで描画するサイト（STUDIO）なので Playwright で描画する。sitemap から行事・お知らせ・名所
   - url: https://etajima-kanko.com/sitemap.xml
@@ -106,6 +134,16 @@ seeds:
     max_fetches: 150
     trust: semi
     label: 観光協会のホームページ
+  # 観光協会の行事・お知らせだけ（毎朝。子の sitemap に lastmod があるので、変わっていないページは取り直さない）
+  - url: https://etajima-kanko.com/sitemap.xml
+    sitemap: true
+    depth: 1
+    render: playwright
+    include: ['^https://etajima-kanko\.com/(event/[^/]+|news/detail/[^/]+)$']
+    max_fetches: 40
+    trust: semi
+    label: 観光協会のホームページ
+    daily: true
   # 江田島市社会福祉協議会（サイトポリシー: 出所を明示すれば引用・転載可）
   - url: https://etajima-syakyo.org/sitemap.xml
     sitemap: true
@@ -113,6 +151,12 @@ seeds:
     include: ['^https://etajima-syakyo\.org/(pages/\d+/?)?$']
     trust: semi
     label: 社会福祉協議会のホームページ
+  - url: https://etajima-syakyo.org/pages/57?detail=1&b_id=727&view=list&block727_limit=20
+    depth: 1
+    include: ['^https://etajima-syakyo\.org/pages/\d+/?$']
+    trust: semi
+    label: 社会福祉協議会のホームページ
+    daily: true
   # 江田島市立図書館（各館の開館時間・休館日・行事）
   - url: https://www.library.etajima.hiroshima.jp/sitemap.xml
     sitemap: true
@@ -121,6 +165,7 @@ seeds:
     exclude: ['/search', '/contact', '/album', '/eventcalendar', '/wp-']
     trust: official
     label: 市立図書館のホームページ
+    daily: true             # お知らせ・行事・休館日（sitemap の lastmod で変わったものだけ取る）
   # Dive! Hiroshima（広島県観光連盟と広島市の共同運営。旧ひろしま観光ナビ）。県全体なので、
   # 本文に「江田島市」を含む名所・行事だけ採る。約 4,300 ページあるので 1 晩 400 件まで、取ったページは 7 日間取り直さない
   - url: https://dive-hiroshima.com/sitemap.xml

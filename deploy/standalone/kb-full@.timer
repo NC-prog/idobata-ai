@@ -1,0 +1,10 @@
+# 毎週日曜 3:00 に知識パック全体を作り直す（取得は 1 秒 1 リクエスト、40〜60 分。消えたページもここで落ちる）
+[Unit]
+Description=idobata-ai knowledge pack full rebuild (%i)
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -71,7 +71,7 @@ class TestPersona:
         assert "0120-95-0178" in prompt
         assert "[1] (出典: 秋祭りのお知らせ)\n10月25日に開催" in turn  # 出どころの無い古いパック
         assert turn.endswith("【来訪者の発話】\nお祭りは？")
-        assert "2026年10月21日（水曜日）。今週末は10月24日（土曜日）と10月25日（日曜日）" in prompt
+        assert "今日: 2026年10月21日（水曜日）\n今週末＝10月24日（土）・10月25日（日）" in prompt
         assert "今日は「晴れ」の予報です。" in prompt
         assert "お住まいの市区町村" in prompt
         assert "[出典:1,3]" in turn
@@ -84,6 +84,18 @@ class TestPersona:
                 Reference("c", "u", "t", 0.9, 1.0, "semi", "観光協会のホームページ")]
         fac = Facility("安芸太田町役場", "ロビー", address_city="安芸太田町")
         assert source_labels(DialogueConfig(), fac, refs) == "観光協会のホームページや町のホームページ"
+
+    @pytest.mark.parametrize(("day", "weekend"), [
+        (date(2026, 10, 19), "今週末＝10月24日（土）・10月25日（日）"),  # 月
+        (date(2026, 10, 23), "今週末＝10月24日（土）・10月25日（日）"),  # 金
+        (date(2026, 10, 24), "今週末＝10月24日（土）・10月25日（日）"),  # 土
+        (date(2026, 10, 25), "今週末＝10月24日（土）・10月25日（日）"),  # 日
+        (date(2026, 10, 30), "今週末＝10月31日（土）・11月1日（日）"),  # 月をまたぐ
+    ])
+    def test_this_weekend(self, day: date, weekend: str) -> None:
+        from src.persona import format_today
+
+        assert weekend in format_today(day, [])
 
     def test_org_word(self) -> None:
         assert organization_word(Facility("安芸太田町役場", "ロビー", address_city="安芸太田町")) == "町"

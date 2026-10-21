@@ -61,16 +61,22 @@ def source_labels(cfg: DialogueConfig, facility: Facility | None, refs: list[Ref
     return "や".join(labels)
 
 
+def this_weekend(today: date) -> tuple[date, date]:
+    """今週末の土曜・日曜。土曜なら今日と明日、日曜なら昨日と今日。"""
+    sat = today + timedelta(days=5 - today.weekday()) if today.weekday() <= 5 else today - timedelta(days=1)
+    return sat, sat + timedelta(days=1)
+
+
 def format_today(today: date, weather_lines: list[str]) -> str:
-    head = f"{today.year}年{today.month}月{today.day}日（{_WEEKDAYS[today.weekday()]}曜日）"
-    # 「今週末」を LLM に数えさせると間違える（WP03 の評価で 1 か月先の行事を「来週」と言った）
-    sat = today + timedelta(days=(5 - today.weekday()) % 7)
-    sun = sat + timedelta(days=1)
-    head += (f"。今週末は{sat.month}月{sat.day}日（土曜日）と{sun.month}月{sun.day}日（日曜日）"
-             if today.weekday() < 5 else f"。今日は週末（{_WEEKDAYS[today.weekday()]}曜日）")
-    if not weather_lines:
-        return f"{head}\n天気: 情報なし"
-    return head + "\n天気: " + "".join(weather_lines)
+    """【今日】の中身。曜日と「今週末」は計算して書く（LLM に数えさせると間違える。WP03 の評価で
+    「今週末は10月22日（木曜日）」と言い、1 か月先の行事を「来週」と言った）。"""
+    sat, sun = this_weekend(today)
+    lines = [
+        f"今日: {today.year}年{today.month}月{today.day}日（{_WEEKDAYS[today.weekday()]}曜日）",
+        f"今週末＝{sat.month}月{sat.day}日（土）・{sun.month}月{sun.day}日（日）",
+    ]
+    lines.append("天気: " + ("".join(weather_lines) if weather_lines else "情報なし"))
+    return "\n".join(lines)
 
 
 def organization_word(facility: Facility | None) -> str:

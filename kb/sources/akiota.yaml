@@ -12,28 +12,22 @@ allow_domains:
   - www.akiota.jp
   - cs-akiota.or.jp
 seeds:
-  - url: https://www.akiota.jp/life/1/        # くらし
-    depth: 3
-    include: ["/soshiki/", "/life/", "/site/"]
-    exclude: &akiota_exclude [".pdf", "/life/3/17/", "/life/4/", "/site/gikai/", "/site/saiyou/", "/site/chocho-shitsu/", "/soshiki/2/", "/soshiki/23/", "/life/2/16/121/"]
-  - url: https://www.akiota.jp/life/2/        # 子育て・教育
-    depth: 3
-    include: ["/soshiki/", "/life/", "/site/kosodate/"]
-    exclude: *akiota_exclude
   - url: https://www.akiota.jp/soshiki/
     depth: 2
     include: ["/soshiki/7/", "/soshiki/8/", "/soshiki/9/", "/soshiki/10/", "/soshiki/13/", "/soshiki/14/", "/soshiki/19/", "/soshiki/20/", "/soshiki/21/", "/soshiki/22/", "/soshiki/24/"]
-    exclude: *akiota_exclude
+    exclude: &akiota_exclude [".pdf", "/life/3/17/", "/life/4/", "/site/gikai/", "/site/saiyou/", "/site/chocho-shitsu/", "/soshiki/2/", "/soshiki/23/", "/life/2/16/121/"]
   - url: https://www.akiota.jp/calendar/      # 行事
     depth: 1
     include: ["/soshiki/", "/site/", "/calendar/"]
     exclude: *akiota_exclude
+    daily: true
   - url: https://cs-akiota.or.jp/news/category/イベント/
     depth: 1
     include: ["/news/"]
     exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
     trust: semi
     label: あきおおたからのホームページ
+    daily: true
   - url: https://cs-akiota.or.jp/special/category/観光/
     depth: 1
     include: ["/special/"]
@@ -45,14 +39,17 @@ seeds:
     depth: 1
     include: ["/soshiki/", "/site/", "/life/"]
     exclude: *akiota_exclude
+    daily: true
   - url: https://www.akiota.jp/rss/10/list3.xml
     depth: 1
     include: ["/soshiki/", "/site/", "/life/"]
     exclude: *akiota_exclude
+    daily: true
   - url: https://www.akiota.jp/rss/10/list6.xml
     depth: 1
     include: ["/soshiki/", "/site/", "/life/"]
     exclude: *akiota_exclude
+    daily: true
   # 道の駅 来夢とごうち（建て替えで休館中、令和10年3月再開予定。案内はあきおおたからに載る）
   - url: https://cs-akiota.or.jp/special/category/道の駅/
     depth: 1
@@ -61,6 +58,12 @@ seeds:
     trust: semi
     label: 道の駅のお知らせ
   # 安芸太田町社会福祉協議会
+  - url: https://www.akiota-shakyo.jp/news/feed/
+    depth: 1
+    include: ['^https://www\.akiota-shakyo\.jp/news/\d+/?$']
+    trust: semi
+    label: 社会福祉協議会のホームページ
+    daily: true
   - url: https://www.akiota-shakyo.jp/wp-sitemap.xml
     sitemap: true
     depth: 1
@@ -79,6 +82,15 @@ seeds:
     recheck_days: 7
     trust: semi
     label: 県の観光サイト
+  # 町のサイトの大きな区画（くらし・子育て）は最後に回す（取得の上限で、後ろのソースが取れなくなるのを防ぐ）
+  - url: https://www.akiota.jp/life/1/        # くらし
+    depth: 3
+    include: ["/soshiki/", "/life/", "/site/"]
+    exclude: *akiota_exclude
+  - url: https://www.akiota.jp/life/2/        # 子育て・教育
+    depth: 3
+    include: ["/soshiki/", "/life/", "/site/kosodate/"]
+    exclude: *akiota_exclude
 exclude_breadcrumb_keywords: [議会, 会議録, 入札, 職員採用, 人事, 町長の部屋, 選挙]
 exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]
 weather:
@@ -95,5 +107,5 @@ crawl:
   rate_limit_sec: 1.0
   user_agent: "idobata-ai-kb/0.1 (+Fuji Seisakusho LLC; municipal lobby guide pilot)"
   respect_robots: true
-  max_pages: 1000
-  max_fetches: 2500
+  max_pages: 1200
+  max_fetches: 4000

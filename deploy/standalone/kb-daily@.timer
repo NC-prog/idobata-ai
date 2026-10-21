@@ -1,0 +1,10 @@
+# 毎朝 6:00 に更新の速い区画だけを取り直す（数分）
+[Unit]
+Description=idobata-ai knowledge pack daily update (%i)
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
