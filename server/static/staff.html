@@ -12,6 +12,7 @@
   .stats div { background:#fff; border:1px solid var(--line); border-radius:6px; padding:8px 12px; }
   .stats b { font-size:20px; }
   h2 { font-size:16px; margin-top:24px; }
+  .unspec { background:#fff0f0 !important; color:#b00020; }
   table { border-collapse:collapse; width:100%; background:#fff; font-size:14px; }
   th, td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
   tr.needs td { background:var(--pending); }
@@ -56,7 +57,11 @@ async function delTidbit(id) {
   load();
 }
 
+let DEPTS = [];
+const unspecified = (r) => !r.department || r.department === "未特定";
+
 async function load() {
+  if (!DEPTS.length) DEPTS = await fetch("api/departments").then((r) => r.json());
   const [refs, st, tbs] = await Promise.all([
     fetch(`api/referrals?day=${dayEl.value}`).then((r) => r.json()),
     fetch(`api/stats?day=${dayEl.value}`).then((r) => r.json()),
@@ -68,13 +73,16 @@ async function load() {
   document.getElementById("stats").innerHTML =
     `<div>来訪者 <b>${st.visits}</b></div><div>紹介状 <b>${st.referrals}</b></div>` +
     `<div>要対応で未完了 <b>${st.pending_action}</b></div>` +
+    `<div class="${st.unspecified ? "unspec" : ""}">課が未特定 <b>${st.unspecified}</b></div>` +
     `<div>言語 ${Object.entries(st.languages).map(([k, v]) => `${esc(k)}:${v}`).join(" ") || "-"}</div>` +
     `<div>話題 ${st.top_tags.map(([t, n]) => `${esc(t)}(${n})`).join(" ") || "-"}</div>`;
   document.getElementById("rows").innerHTML = refs.map((r) => `
     <tr class="${r.needs_action && r.status !== "完了" ? "needs" : ""}">
       <td><b>${esc(r.receipt)}</b></td>
       <td>${esc(r.created_at.slice(11, 16))}</td>
-      <td>${esc(r.department || "（未定）")}<div class="mut">${esc(r.category)}</div></td>
+      <td class="${unspecified(r) ? "unspec" : ""}">${unspecified(r) ? "<b>未特定</b>" : esc(r.department)}
+          <div>${select(["", ...DEPTS], unspecified(r) ? "" : r.department, `post('${r.id}', {department: this.value})`)}</div>
+          <div class="mut">${esc(r.category)}</div></td>
       <td>${esc(r.summary)}<div class="mut">${esc(r.topic_free)}${r.name ? "／氏名: " + esc(r.name) : ""}${r.phone ? "／電話: " + esc(r.phone) : ""}</div></td>
       <td class="${r.urgency === "急ぐ" ? "urgent" : ""}">${esc(r.urgency)}</td>
       <td>${esc(r.contact_pref)}</td>

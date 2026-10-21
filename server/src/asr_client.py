@@ -153,7 +153,7 @@ def load_site_vocabulary(site: str, context_dir: Path) -> list[str]:
     YAML の書式は ``site_context.load_site_words`` を参照（読み付きの語は表記だけを使う）。
     ファイルが無い・壊れている場合は空リストを返す（ASR は語彙なしで動く）。
     """
-    return [w.surface for w in load_site_words(site, context_dir)]
+    return [w.surface for w in load_site_words(site, context_dir) if w.asr]
 
 
 class ASRClient:

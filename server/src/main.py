@@ -38,6 +38,7 @@ from .edge_server import EdgeServer, StaffPanel
 from .knowledge import KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
+from .procedures import load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
 from .site_context import load_facility, load_site_words, referral_csv_enabled
 from .speech_gate import SpeechGate
@@ -137,6 +138,7 @@ class VoiceLoop:
             referrals=self._referrals, visits=self._visits,
             on_state=self._send_state, edge_id=self._edge_id,
             tidbits=self._tidbits, tidbit_cfg=config.tidbit,
+            procedures=load_procedures(config.asr.site_context_dir),
         )
         self._llm = llm
         self._backchannels = (BackchannelBank(config.actions.backchannel_path)
@@ -158,7 +160,8 @@ class VoiceLoop:
         if edge or config.staff.password:
             self._edge_server = EdgeServer(
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir,
-                staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits),
+                staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits,
+                                 tuple(d.name for d in (facility.departments if facility else ()))),
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）

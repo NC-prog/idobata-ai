@@ -1,0 +1,42 @@
+# 手続きの常用語（全拠点共通）。
+#
+# - term: 拠点 YAML の facility.departments[].handles と突き合わせる名前（handles の語と同じ表記にする）
+# - aliases: 来訪者の言い方（略称・表記ゆれ・関連する手続き）。発話にこれがあれば term を言ったものとみなす
+# ASR の語彙には term と aliases をすべて入れる（asr_exclude に書いたものを除く）
+#
+# 担当課は規則で決める（src/procedures.py）。発話から term を拾い、handles にその term を持つ課が
+# 一つなら確定、複数なら来訪者に聞き、無ければ LLM の候補を来訪者に確かめる。
+# readings は VOICEVOX のユーザー辞書に登録する語（読みが自明でないものだけ）。
+
+procedures:
+  - term: 国民健康保険
+    aliases: [国保]
+  - term: 国民健康保険税
+    aliases: [国保税, 国民健康保険料, 国保料]
+  - term: 後期高齢者医療
+    aliases: [後期高齢]
+  - term: 介護保険
+    aliases: [要介護認定, 介護認定]
+  - term: 児童手当
+  - term: 保育施設
+    aliases: [保育所, 保育園]
+  - term: 住民票
+  - term: 住民登録
+    aliases: [転入, 転出, 転居]
+  - term: 戸籍
+  - term: 印鑑登録
+    aliases: [印鑑証明]
+  - term: 税証明書
+    aliases: [課税証明, 納税証明]
+  - term: マイナンバーカード
+  - term: パスポート
+  - term: ごみ
+    aliases: [粗大ごみ]
+  - term: 水道
+
+# ASR に渡さない語（handles と突き合わせるためだけの正式名や、言い方の揺れ。語彙が長いと聞き取りが鈍る）
+asr_exclude: [国民健康保険税, 国保税, 国民健康保険料, 国保料, 後期高齢, 介護認定, 保育施設, 保育園, 住民登録, 税証明書]
+
+readings:
+  - {surface: 国保, reading: コクホ, accent: 1}
+  - {surface: 後期高齢, reading: コウキコウレイ, accent: 4}

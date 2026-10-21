@@ -44,17 +44,20 @@ class StatusUpdate(BaseModel):
     needs_action: bool | None = None
     handled_by_role: str | None = None
     resolution: str | None = None
+    department: str | None = None
 
 
 class StaffPanel:
     """職員パネルの中身（紹介状・来訪記録）。"""
 
     def __init__(self, referrals: ReferralStore, visits: VisitLog, cfg: StaffConfig,
-                 tidbits: TidbitStore | None = None) -> None:
+                 tidbits: TidbitStore | None = None, departments: tuple[str, ...] = ()) -> None:
         self.referrals = referrals
         self.visits = visits
         self.cfg = cfg
         self.tidbits = tidbits
+        # 職員が「未特定」の紹介状に付けられる課（拠点 YAML の facility.departments）
+        self.departments = departments
 
 
 def _is_lan(host: str | None) -> bool:
@@ -103,10 +106,15 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
     async def update_referral(day: str, ref_id: str, body: StatusUpdate) -> dict[str, Any]:
         ref = panel.referrals.update(ref_id, _parse_day(day), status=body.status,
                                      needs_action=body.needs_action,
-                                     handled_by_role=body.handled_by_role, resolution=body.resolution)
+                                     handled_by_role=body.handled_by_role, resolution=body.resolution,
+                                     department=body.department, departments=panel.departments)
         if ref is None:
             raise HTTPException(404, "紹介状がありません")
         return asdict(ref)
+
+    @app.get("/staff/api/departments", dependencies=auth)
+    async def list_departments() -> list[str]:
+        return list(panel.departments)
 
     @app.get("/staff/api/tidbits", dependencies=auth)
     async def list_tidbits() -> list[dict[str, Any]]:

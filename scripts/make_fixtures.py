@@ -80,6 +80,12 @@ UTTERANCES: tuple[Utterance, ...] = (
         text="国保の切り替えで聞きたいことがあって。",
     ),
     Utterance(filename="visitor_onegai_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="お願いします。"),
+    Utterance(
+        filename="visitor_trouble_ja.wav",
+        speaker_id=13,
+        speaker_name="青山龍星",
+        text="ちょっと困ったことがあって。",
+    ),
 )
 
 

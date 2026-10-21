@@ -31,9 +31,11 @@ from .config import ActionsConfig, ReferralConfig, TidbitConfig
 from .dialogue import ChatBackend, Dialogue
 from .knowledge import JST
 from .lookup import Lookup
+from .procedures import Procedures
 from .referrals import (
     CATEGORIES,
     CONTACT_PREFS,
+    UNSPECIFIED_DEPARTMENT,
     URGENCIES,
     ReferralStore,
     TidbitStore,
@@ -93,6 +95,11 @@ class Pending:
     reasks: int = 0
     fields: dict[str, Any] | None = None  # 紹介状の中身（電話番号の確認待ち）
     share_text: str | None = None
+    # 提案したターンの番号と、そのときの話題の始まり（紹介状の要約に使う範囲）
+    turn_index: int = 0
+    topic_floor: int = 0
+    # 提案の後の来訪者の返事（「お願い。電話は…」など）
+    replies: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -130,6 +137,7 @@ class Conversation:
         edge_id: Callable[[], str] = lambda: "",
         tidbits: TidbitStore | None = None,
         tidbit_cfg: TidbitConfig | None = None,
+        procedures: Procedures | None = None,
     ) -> None:
         self.dialogue = dialogue
         self._llm = llm
@@ -145,6 +153,11 @@ class Conversation:
         self._edge_id = edge_id
         self._tidbits = tidbits
         self._tidbit_cfg = tidbit_cfg or TidbitConfig()
+        self._procedures = procedures or Procedures()
+        # この会話のターン（来訪者, 応答）と、いまの話題が始まったターンの番号（プロセス内のみ）
+        self._turns: list[tuple[str, str]] = []
+        self._topic_start = 0
+        self._turn_new_topic = False
         self._words, self._templates = load_templates(cfg.templates_path)
         self._pending: Pending | None = None
         self._session: Session | None = None
@@ -183,6 +196,7 @@ class Conversation:
         """会話の区切り: 来訪記録を 1 行書いて、履歴と提案を消す。"""
         session, history = self._session, self.dialogue.history
         self._session, self._pending = None, None
+        self._turns, self._topic_start = [], 0
         self.dialogue.reset()
         if session is None or self._visits is None or not session.turns:
             return
@@ -204,6 +218,18 @@ class Conversation:
     # ------------------------------------------------------------------
 
     async def respond(self, text: str, language: str = "ja") -> AsyncIterator[str]:
+        """1 発話に応答する。ターンを記録し、行為が終わったら話題の区切りとする。"""
+        index, had_pending = len(self._turns), self._pending is not None
+        self._turn_new_topic = False
+        lines: list[str] = []
+        async for s in self._respond_turn(text, language, index):
+            lines.append(s)
+            yield s
+        self._turns.append((text, "".join(lines)))
+        if had_pending and self._pending is None and not self._turn_new_topic:
+            self._topic_start = len(self._turns)  # 行為が終わった・断られた: 次のターンから別の話題
+
+    async def _respond_turn(self, text: str, language: str, index: int) -> AsyncIterator[str]:
         self._ensure_session(language)
         assert self._session is not None
         if self._session.turns == 0:
@@ -222,6 +248,7 @@ class Conversation:
             logger.info("返事待ちに別の話が来たので、提案を辞退扱いにします")
             self._outcome("declined")
             self._pending = None
+            self._topic_start, self._turn_new_topic = index, True
         if self._pending is not None:
             async for s in self._on_reply(text):
                 yield s
@@ -240,7 +267,7 @@ class Conversation:
         kind = self._adjust_proposal(self.dialogue.last_proposal, text, "".join(reply))
         if kind and self._available(kind):
             line = self._t(kind, "propose")
-            self._pending = Pending(kind, text, language)
+            self._pending = Pending(kind, text, language, turn_index=index, topic_floor=self._topic_start)
             self._session.proposals.append({"action": kind, "outcome": None})
             self.dialogue.extend_last_reply(line)
             logger.info("行為を提案しました: %s", kind)
@@ -318,8 +345,9 @@ class Conversation:
     async def _on_reply(self, text: str) -> AsyncIterator[str]:
         p = self._pending
         assert p is not None
-        verdict = classify_reply(text, self._words)
+        p.replies.append(text)
         lines: list[str] = []
+        verdict = classify_reply(text, self._words)
         if verdict == "unclear":
             if p.reasks < self._cfg.max_reask:
                 p.reasks += 1
@@ -400,12 +428,23 @@ class Conversation:
     # ---- つなぐ（紹介状）------------------------------------------------
 
     async def _do_refer(self, p: Pending) -> AsyncIterator[str]:
-        fields = await self._structure_referral()
+        window = self._refer_window(p)
+        fields = await self._structure_referral(window)
         if fields is None:
             self._pending = None
             yield self._t("refer", "failed")
             return
         p.fields = fields
+        # 担当課は規則だけで決める（直近の発話 = 提案のきっかけとその後の返事。決まらなければ話題全体）。
+        # 一意に決まらなければ「未特定」で保存し、職員が職員パネルで課を付ける。来訪者には聞き返さない
+        recent = "\n".join([p.user_text, *p.replies])
+        cands = (self._procedures.departments_for(recent, self._facility)
+                 or self._procedures.departments_for("\n".join(u for u, _ in window), self._facility))
+        if len(cands) == 1:
+            fields["department"] = cands[0]
+        else:
+            fields["department"] = UNSPECIFIED_DEPARTMENT
+            logger.info("担当課が規則で一意に決まりません（候補 %d）。未特定で保存します", len(cands))
         if fields.get("phone"):
             p.phase, p.reasks = "confirm_phone", 0
             yield self._t("refer", "confirm_phone", phone=phone_for_speech(fields["phone"]))
@@ -425,26 +464,31 @@ class Conversation:
         self.last_receipt = ref.receipt
         if self._session is not None:
             self._session.referral_id = ref.id
-        logger.info("紹介状を保存しました: 受付 %s・%s", ref.receipt, ref.department or "課未定")
-        key = "done" if ref.name else "done_no_name"
-        yield self._t("refer", key, department=ref.department or "担当の課", number=ref.receipt)
+        logger.info("紹介状を保存しました: 受付 %s・%s", ref.receipt, ref.department)
+        unknown = ref.department in ("", UNSPECIFIED_DEPARTMENT)
+        key = ("done_unknown" if unknown else "done") + ("" if ref.name else "_no_name")
+        yield self._t("refer", key, department=ref.department, number=ref.receipt)
 
     def _transcript(self, history: list[tuple[str, str]]) -> str:
         return "\n".join(f"来訪者: {u}\n案内役: {a}" for u, a in history)
 
-    async def _structure_referral(self) -> dict[str, Any] | None:
-        """会話から紹介状の項目を作る。氏名・電話番号は来訪者が言った場合だけ残す（規則で確かめる）。"""
-        history = self.dialogue.history
+    def _refer_window(self, p: Pending) -> list[tuple[str, str]]:
+        """紹介状を作る範囲: 提案のきっかけの発話と、その前後 2 往復（いまの話題の中だけ）。"""
+        start = max(p.turn_index - self._ref_cfg.window_turns, p.topic_floor)
+        before = self._turns[start:p.turn_index + 1]
+        after = [(r, "") for r in p.replies[: self._ref_cfg.window_turns]]
+        return before + after
+
+    async def _structure_referral(self, history: list[tuple[str, str]]) -> dict[str, Any] | None:
+        """会話から紹介状の項目を作る。氏名・電話番号は来訪者が言った場合だけ残す（規則で確かめる）。
+
+        課は LLM に決めさせない（規則で決める。_do_refer）。
+        """
         user_text = "\n".join(u for u, _ in history)
-        departments = [d.name for d in (self._facility.departments if self._facility else ())]
-        # 課の名前だけだと取り違える（国保→社会福祉課）ので、担当業務も添える
-        dept_lines = [f"{d.name}（{'・'.join(d.handles)}）" if d.handles else d.name
-                      for d in (self._facility.departments if self._facility else ())]
         prompt = (self._ref_cfg.structure_prompt
                   + "\nneeds_action は職員の対応が要るか（案内だけで済むなら false）。"
                   + "tags は【タグの一覧】から最大 5 つ選ぶ（一覧に無いものは作らない）。topic_free は話題を 1 行で。"
                   + '\n出力に "needs_action": true, "tags": [], "topic_free": "" も含める。'
-                  + "\n【課の一覧】" + "、".join(dept_lines)
                   + "\n【タグの一覧】" + "、".join(self._tags))
         data = await self._chat_json(prompt, self._transcript(history), self._ref_cfg.summary_max_tokens)
         if data is None or not str(data.get("summary") or "").strip():
@@ -452,7 +496,7 @@ class Conversation:
         name = data.get("name")
         name = str(name).strip() if isinstance(name, str) and name.strip() and name.strip() in user_text else None
         return {
-            "department": str(data.get("department") or "") if data.get("department") in departments else "",
+            "department": "",
             "category": _pick(data.get("category"), CATEGORIES, "その他"),
             "summary": str(data.get("summary")).strip(),
             "urgency": _pick(data.get("urgency"), URGENCIES, "通常"),

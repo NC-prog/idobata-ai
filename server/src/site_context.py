@@ -101,6 +101,8 @@ class SiteWord:
     reading: str | None = None
     # アクセント核の位置。None なら VOICEVOX 登録時に既定値を使う
     accent: int | None = None
+    # ASR の語彙に入れるか（False は VOICEVOX の辞書だけ）
+    asr: bool = True
 
 
 def _load_yaml(site: str, context_dir: Path) -> dict[str, Any]:
@@ -168,8 +170,10 @@ def load_site_words(site: str, context_dir: Path) -> list[SiteWord]:
     """拠点の YAML から語を読む（表記の重複は先勝ち）。
 
     ファイルが無い・壊れている場合は空リストを返す（ASR・TTS は語彙なしで動く）。
-    facility 節の課名も語彙に含める（ASR のバイアシング用）。
+    facility 節の課名と、手続きの常用語（``procedures.yaml``、全拠点共通）も語彙に含める。
     """
+    from .procedures import load_procedures  # procedures は SiteWord を使うので、ここで読む
+
     data = _load_yaml(site, context_dir)
     words: list[SiteWord] = []
     seen: set[str] = set()
@@ -185,6 +189,10 @@ def load_site_words(site: str, context_dir: Path) -> list[SiteWord]:
             word = _parse_item(item)
             if word is None or word.surface in seen:
                 continue
+            seen.add(word.surface)
+            words.append(word)
+    for word in load_procedures(context_dir).words():
+        if word.surface not in seen:
             seen.add(word.surface)
             words.append(word)
     return words

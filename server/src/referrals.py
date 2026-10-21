@@ -37,6 +37,8 @@ CATEGORIES = ("手続き", "相談", "意見", "その他")
 URGENCIES = ("急ぐ", "通常")
 CONTACT_PREFS = ("窓口で待つ", "電話", "後日来庁", "未定")
 VISIT_RETENTION_DAYS = 365
+# 担当課が規則で決まらなかった紹介状の課（職員が職員パネルで付ける）
+UNSPECIFIED_DEPARTMENT = "未特定"
 CSV_HEADER = ("受付番号", "受付日時", "拠点", "担当課", "区分", "要約", "急ぎ", "連絡方法", "氏名", "電話",
               "要対応", "タグ", "話題", "状態", "対応日時", "対応者", "結果", "id")
 
@@ -148,11 +150,17 @@ class ReferralStore:
         return next((r for r in self.list(d) if r.id == ref_id), None)
 
     def update(self, ref_id: str, d: date, *, status: str | None = None, needs_action: bool | None = None,
-               handled_by_role: str | None = None, resolution: str | None = None) -> Referral | None:
-        """職員パネルからの更新。状態を変えたら対応日時を書く（受付から完了までの時間を出すため）。"""
+               handled_by_role: str | None = None, resolution: str | None = None,
+               department: str | None = None, departments: tuple[str, ...] = ()) -> Referral | None:
+        """職員パネルからの更新。状態を変えたら対応日時を書く（受付から完了までの時間を出すため）。
+
+        department は departments（拠点の課の一覧）のどれかのときだけ受け付ける。
+        """
         ref = self.find(ref_id, d)
         if ref is None:
             return None
+        if department is not None and department in departments:
+            ref.department = department
         if status is not None and status in STATUSES and status != ref.status:
             ref.status = status
             ref.handled_at = datetime.now(JST).isoformat(timespec="seconds")
@@ -303,6 +311,7 @@ def today_stats(store: ReferralStore, visits: VisitLog, d: date) -> dict[str, An
         "visits": len(vs),
         "referrals": len(refs),
         "pending_action": sum(1 for r in refs if r.needs_action and r.status != "完了"),
+        "unspecified": sum(1 for r in refs if r.department in ("", UNSPECIFIED_DEPARTMENT)),
         "languages": dict(Counter(v.get("language", "ja") for v in vs)),
         "top_tags": tags.most_common(5),
     }

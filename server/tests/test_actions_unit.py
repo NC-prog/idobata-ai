@@ -18,6 +18,7 @@ from src.config import SERVER_ROOT, ActionsConfig, DialogueConfig, ReferralConfi
 from src.dialogue import Dialogue
 from src.knowledge import JST, Reference
 from src.lookup import LookupResult, candidate_links, chunk_plain, score_label
+from src.procedures import load_procedures
 from src.referrals import (
     ReferralStore,
     TidbitStore,
@@ -31,7 +32,11 @@ from src.site_context import Department, Facility
 
 TAGS = ["子育て", "介護", "保険・年金", "観光", "行事", "雑談"]
 FAC = Facility(name="江田島市役所", location_phrase="1階ロビー",
-               departments=(Department("市民課", "1階"), Department("保健医療課", "2階")))
+               departments=(Department("市民課", "1階", handles=("住民票", "戸籍")),
+                            Department("税務課", "1階", handles=("国民健康保険税", "税証明書")),
+                            Department("保健医療課", "2階", handles=("国民健康保険（資格・給付）", "後期高齢者医療")),
+                            Department("高齢介護課", "2階", handles=("介護保険",))))
+PROCS = load_procedures(SERVER_ROOT / "context")
 
 
 # ------------------------------------------------------------------
@@ -115,7 +120,7 @@ def _conv(llm: StubLLM, tmp_path: Path, lookup: Any = None, enabled: tuple[str, 
         d, llm, "/models/llm", ActionsConfig(enabled=enabled), ReferralConfig(), FAC, TAGS,
         lookup=lookup, referrals=ReferralStore(tmp_path, "etajima", 30, csv_export=True),
         visits=VisitLog(tmp_path, "etajima"), on_state=on_state, edge_id=lambda: "edge-1",
-        tidbits=tidbits,
+        tidbits=tidbits, procedures=PROCS,
     )
 
 
@@ -529,3 +534,95 @@ async def test_staff_panel_lists_and_deletes_tidbits(tmp_path: Path) -> None:
         assert (await c.delete(f"/staff/api/tidbits/{item['id']}", auth=("staff", "pw"))).status_code == 200
         assert (await c.get("/staff/api/tidbits", auth=("staff", "pw"))).json() == []
         assert (await c.delete("/staff/api/tidbits/nope", auth=("staff", "pw"))).status_code == 404
+
+
+# ------------------------------------------------------------------
+# 担当課は規則で決める・紹介状の範囲（WP04 追加）
+# ------------------------------------------------------------------
+
+
+def test_departments_by_rules_with_aliases() -> None:
+    from src.site_context import load_facility
+
+    fac = load_facility("etajima", SERVER_ROOT / "context")
+    assert PROCS.departments_for("国保の切り替えで聞きたいことがあって", fac) == ["保健医療課"]
+    assert PROCS.departments_for("国保税の納付が遅れそうで", fac) == ["税務課"]  # 長い語を優先
+    assert PROCS.departments_for("後期高齢の保険証のことで", fac) == ["保健医療課"]
+    assert PROCS.departments_for("要介護認定を受けたい", fac) == ["高齢介護課"]
+    assert PROCS.departments_for("印鑑証明が欲しい", fac) == ["市民課"]
+    assert PROCS.departments_for("粗大ごみの出し方", fac) == ["生活環境課"]
+    assert PROCS.departments_for("ちょっと困ったことがあって", fac) == []
+    assert len(PROCS.departments_for("住民票と介護保険のことで", fac)) == 2
+
+
+def test_procedure_words_for_asr_and_voicevox() -> None:
+    from src.asr_client import load_site_vocabulary
+    from src.site_context import load_site_words
+
+    vocab = load_site_vocabulary("etajima", SERVER_ROOT / "context")
+    for w in ["国保", "国民健康保険", "後期高齢者医療", "要介護認定", "保育所", "印鑑証明", "課税証明",
+              "納税証明", "転居", "粗大ごみ", "水道"]:
+        assert w in vocab
+    assert "国保税" not in vocab and "後期高齢" not in vocab  # asr_exclude
+    readings = {w.surface: w.reading for w in load_site_words("etajima", SERVER_ROOT / "context")
+                if w.reading and w.surface in ("国保", "後期高齢", "住民票")}
+    assert readings == {"国保": "コクホ", "後期高齢": "コウキコウレイ"}  # 読みが自明でないものだけ
+
+
+async def test_refer_unspecified_department_is_saved_without_naming(tmp_path: Path) -> None:
+    llm = StubLLM([["それは大変ですね。<propose:refer>"]], chat_reply=_refer_json(department="保健医療課"))
+    c = _conv(llm, tmp_path)
+    await _say(c, "ちょっと困ったことがあって")
+    out = await _say(c, "お願い")
+    assert out[1].startswith("担当の方に伝えておきました")  # 課名は言わない、聞き返さない
+    (ref,) = ReferralStore(tmp_path, "etajima", 30, csv_export=True).list(datetime.now(JST).date())
+    assert ref.department == "未特定"  # LLM が課を挙げても使わない
+    assert c.phase == "listen"
+
+
+async def test_refer_ambiguous_department_is_unspecified(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["そうですか。<propose:refer>"]], chat_reply=_refer_json()), tmp_path)
+    await _say(c, "国保と住民票のことで聞きたいことがあって")
+    await _say(c, "お願い")
+    (ref,) = ReferralStore(tmp_path, "etajima", 30, csv_export=True).list(datetime.now(JST).date())
+    assert ref.department == "未特定"
+
+
+async def test_refer_summary_uses_only_current_topic(tmp_path: Path) -> None:
+    class Spy(StubLLM):
+        def __init__(self) -> None:
+            super().__init__([["手元にありません。<propose:lookup>"], ["保健医療課です。<propose:refer>"]],
+                             chat_reply=_refer_json())
+            self.chat_inputs: list[str] = []
+
+        def chat(self, model: str, messages: list[dict[str, Any]], **kw: Any) -> str:
+            self.chat_inputs.append(messages[-1]["content"])
+            return super().chat(model, messages, **kw)
+
+    llm = Spy()
+    c = _conv(llm, tmp_path, StubLookup(LookupResult(found=False)))
+    await _say(c, "今週末は道の駅で何かやってますか")
+    await _say(c, "いらない")
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    await _say(c, "お願いします")
+    transcript = llm.chat_inputs[0]
+    assert "国保の切り替え" in transcript and "お願いします" in transcript
+    assert "道の駅" not in transcript and "いらない" not in transcript  # 前の話題を混ぜない
+
+
+async def test_staff_can_assign_department(tmp_path: Path) -> None:
+    from src.edge_server import StaffPanel, create_app
+
+    store = ReferralStore(tmp_path, "etajima", 30, csv_export=False)
+    ref = store.create(_fields(department="未特定"))
+    panel = StaffPanel(store, VisitLog(tmp_path, "etajima"), StaffConfig(password="pw"),
+                       departments=("市民課", "保健医療課"))
+    transport = httpx.ASGITransport(app=create_app(tmp_path / "none", panel), client=("192.168.1.20", 5000))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        auth = ("staff", "pw")
+        assert (await c.get("/staff/api/departments", auth=auth)).json() == ["市民課", "保健医療課"]
+        assert (await c.get("/staff/api/stats", auth=auth)).json()["unspecified"] == 1
+        url = f"/staff/api/referrals/{ref.created_at[:10]}/{ref.id}"
+        assert (await c.post(url, auth=auth, json={"department": "勝手な課"})).json()["department"] == "未特定"
+        assert (await c.post(url, auth=auth, json={"department": "保健医療課"})).json()["department"] == "保健医療課"
+        assert (await c.get("/staff/api/stats", auth=auth)).json()["unspecified"] == 0

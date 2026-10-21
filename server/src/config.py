@@ -418,7 +418,7 @@ class ActionsConfig:
         r"カキ|魚|夕日|朝日|初雪|桜|渡り鳥|潮|実っ|柿"
     )
     # つなぐ: 発話が手続き（ReferralConfig.procedure_pattern）の相談を求めているとき
-    refer_fallback_cue: str = r"相談|聞きたいこと|困って|分からなくて|わからなくて|どうしたら"
+    refer_fallback_cue: str = r"相談|聞きたいこと|困って|困った|分からなくて|わからなくて|どうしたら"
 
 
 @dataclass(frozen=True)
@@ -456,21 +456,22 @@ class ReferralConfig:
     # 保存期間（日）。起動時に古いものを消す。環境変数 IDOBATA_REFERRAL_RETENTION_DAYS
     retention_days: int = 30
     summary_max_tokens: int = 300
+    # 紹介状を作る範囲: 提案のきっかけの発話の前後この往復数（いまの話題の中だけ）
+    window_turns: int = 2
     # LLM が lookup を提案しても、発話が手続き・相談ならつなぐ（refer）に置き換える
     # （8B は手続きの相談にも lookup を付けがちなため、規則で補正する）
     procedure_pattern: str = (
-        r"手続き?|切り?替え|申請|届け?出|届|証明書|相談|困って|困りごと|聞きたいこと|"
+        r"手続き?|切り?替え|申請|届け?出|届|証明書|相談|困って|困った|困りごと|聞きたいこと|"
         r"国保|国民健康保険|保険証|年金|介護|児童手当|住民票|戸籍|転入|転出|引っ越し|税金|納付|"
         r"生活保護|障害"
     )
     structure_prompt: str = (
         "以下の来訪者との会話から、担当の課へ伝える紹介状を JSON で作ってください。"
-        "department は【課の一覧】のどれか（分からなければ空文字）。"
         "category は 手続き / 相談 / 意見 / その他 のどれか。"
-        "summary は来訪者の言葉を 2〜3 文で要約（推測で足さない）。"
+        "summary は来訪者の言葉を 2〜3 文で要約（推測で足さない。課の名前や案内役の勧めは書かない）。"
         "urgency は 急ぐ / 通常。contact_pref は 窓口で待つ / 電話 / 後日来庁 / 未定。"
         "name と phone は、来訪者が自分で言った場合だけ書き、言っていなければ null。"
-        'JSON だけを出力: {"department":"","category":"","summary":"","urgency":"",'
+        'JSON だけを出力: {"category":"","summary":"","urgency":"",'
         '"contact_pref":"","name":null,"phone":null}'
     )
 

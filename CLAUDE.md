@@ -50,7 +50,9 @@
   一般のウェブ検索（`IDOBATA_LOOKUP_WEB_SEARCH`）は既定オフ
 - 同意付きの行為（WP04）: LLM が応答の末尾に `<propose:lookup|refer|share>` を付け、決まった文で提案し、
   返事は規則で判定する（`server/context/actions.yaml`）。相槌は `server/context/backchannel.yaml`、
-  紹介状のタグは統制語彙 `server/context/tags.yaml`。ASR は返事待ちの間だけ言語を固定する
+  紹介状のタグは統制語彙 `server/context/tags.yaml`。紹介状の担当課は規則だけで決める（`server/context/procedures.yaml` の
+  別名表で発話と `facility.departments[].handles` を突き合わせ、一意でなければ「未特定」で保存して職員が職員パネルで付ける。
+  来訪者に課を聞き返さない・LLM に課を推測させない）。procedures.yaml は ASR の語彙と VOICEVOX 辞書にも使う。ASR は返事待ちの間だけ言語を固定する
   （`deploy/standalone/asr/chat_template.jinja` の `force_language`）
 
 ## 起動・テスト
@@ -137,6 +139,7 @@ server/
 │   ├── actions.py        # 同意付きの行為（提案 → 返事 → 実行）と来訪記録
 │   ├── lookup.py         # 調べる（許可ドメインだけ・5 秒で打ち切り・見つからなければ夜のビルドに回す）
 │   ├── referrals.py      # 紹介状（受付番号・保存・期限・安芸太田は CSV）、来訪記録、小ネタ、今日の集計
+│   ├── procedures.py     # 手続きの常用語（procedures.yaml）と担当課の規則による決定
 │   ├── caption_feed.py   # 字幕配信（WP03 で使用予定）
 │   ├── announcer.py      # テンプレート発話（未使用）
 │   └── main.py           # text / voice の 2 モード、--edge

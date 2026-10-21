@@ -13,6 +13,7 @@
 | `visitor_no_ja.wav` | 辞退「いらない。」 | VOICEVOX:冥鳴ひまり |
 | `visitor_kokuho_ja.wav` | 手続きの相談「国保の切り替えで聞きたいことがあって。」（WP04 つなぐ） | VOICEVOX:玄野武宏 |
 | `visitor_onegai_ja.wav` | 承諾「お願いします。」 | VOICEVOX:玄野武宏 |
+| `visitor_trouble_ja.wav` | 課の決まらない相談「ちょっと困ったことがあって。」（WP04 未特定） | VOICEVOX:青山龍星 |
 
 形式: 24kHz / mono / PCM16、前 0.5 秒・後 0.8 秒の無音つき。
 井戸端AI 側の声（四国めたん）と区別するため、来訪者役は別の話者にしている。
