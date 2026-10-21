@@ -199,6 +199,15 @@ def _is_non_japanese_kanji(ch: str) -> bool:
 _ZEN_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
+def ends_with_closing(reply: str, cfg: DialogueConfig) -> bool:
+    """応答の最後の文（こちらで足す出典の一言は除く）が締めの定型か。"""
+    sentences = [x for x in re.split(r"(?<=[。！？!?])", reply) if x.strip()]
+    source = re.compile(cfg.llm_source_sentence_pattern)
+    while sentences and (source.search(sentences[-1].strip()) or "詳しくは" in sentences[-1]):
+        sentences.pop()
+    return bool(sentences) and re.search(cfg.closing_pattern, sentences[-1]) is not None
+
+
 class Dialogue:
     """固定ペルソナ + 直近履歴での 1 発話 1 応答。"""
 
@@ -352,11 +361,7 @@ class Dialogue:
             async for delta in self._stream(messages):
                 for raw in splitter.feed(think.feed(delta)):
                     sentence = await self._finish_sentence(raw, cited)
-                    if sentence and not sentences and self._is_echo(sentence, text):
-                        logger.info("来訪者の言葉を繰り返す文を読み上げずに捨てました")
-                        continue
-                    if sentence and self._is_repeat(sentence, previous):
-                        logger.info("これまでの応答と同じ文を読み上げずに捨てました")
+                    if self._drop(sentence, text, sentences, previous):
                         continue
                     if sentence:
                         sentences.append(sentence)
@@ -369,7 +374,8 @@ class Dialogue:
             # 言いかけの残りは捨て、言えた文だけを履歴に積む
         else:
             tail = await self._finish_sentence(splitter.flush(), cited)
-            if tail:
+            # 何も言っていないときの最後の文は捨てない（応答が空になる）
+            if tail and (not sentences or not self._drop(tail, text, sentences, previous)):
                 sentences.append(tail)
                 yield tail
         self.last_cited = [refs[i - 1] for i in sorted(cited) if 0 < i <= len(refs)]
@@ -392,6 +398,31 @@ class Dialogue:
         reply = "".join(sentences)
         self._history.append((text, reply))
         logger.debug("応答: %s", reply)
+
+    def _drop(self, sentence: str, text: str, said: list[str], previous: set[str]) -> bool:
+        """読み上げない文か（おうむ返し・これまでと同じ文・重ねた「お困りのことは」の類）。"""
+        if not sentence:
+            return False
+        if not said and self._is_echo(sentence, text):
+            logger.info("来訪者の言葉を繰り返す文を読み上げずに捨てました")
+            return True
+        if self._is_repeat(sentence, previous):
+            logger.info("これまでの応答と同じ文を読み上げずに捨てました")
+            return True
+        if self._extra_help_offer(sentence, text):
+            logger.info("「お困りのことは」「お変わりありませんか」の類を重ねない（1 会話 1 回・尋ねられた直後は言わない）")
+            return True
+        return False
+
+    def _extra_help_offer(self, sentence: str, user_text: str) -> bool:
+        """「お困りのことはありませんか」「お変わりありませんか」の類を言わない場面か（もう言った、または尋ねられた直後）。"""
+        for pat in (self._cfg.help_offer_pattern, self._cfg.checkin_pattern):
+            if not re.search(pat, sentence):
+                continue
+            if re.search(self._cfg.visitor_question_pattern, user_text.strip()):
+                return True
+            return any(re.search(pat, reply) for _, reply in self._history)
+        return False
 
     def _is_repeat(self, sentence: str, previous: set[str]) -> bool:
         s = _ECHO_IGNORE_RE.sub("", sentence)

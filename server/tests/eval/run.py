@@ -1,6 +1,6 @@
 """WP03 評価セットを LLM に掛けて、結果を Markdown の表で出す（音声は使わない）。
 
-    cd server && uv run python -m tests.eval.run [--site etajima] [--out 結果.md]
+    cd server && uv run python -m tests.eval.run [--site etajima] [--set smalltalk] [--out 結果.md]
 
 実サービス（LLM）と知識パックを使う。1 問ごとに履歴を消して、独立した会話として聞く。
 """
@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 
 from src.config import config
-from src.dialogue import Dialogue
+from src.dialogue import Dialogue, ends_with_closing
 from src.knowledge import KnowledgeBase, Weather
 from src.llm_client import LLMClient
 from src.site_context import load_facility
@@ -40,18 +40,19 @@ def _auto_check(reply: str, auto: dict[str, Any], allow: set[str]) -> list[str]:
     return notes
 
 
-async def run(site: str) -> str:
+async def run(site: str, case_set: str = "") -> str:
     facility = load_facility(site, config.asr.site_context_dir)
     kb = KnowledgeBase.load(config.data_dir, site, config.knowledge)
     dialogue = Dialogue(LLMClient(), facility=facility, knowledge=kb,
                         weather=Weather.for_site(config.data_dir, site))
     allow = {a.lower() for a in (facility.allow_ascii if facility else ())}
     cases = yaml.safe_load(
-        (Path(__file__).parent / f"cases_{site}.yaml").read_text(encoding="utf-8")
+        (Path(__file__).parent / f"cases_{site}{'_' + case_set if case_set else ''}.yaml").read_text(encoding="utf-8")
     )
     rows = ["| # | 発話 | 応答（全文） | 参考資料（上位） | 出典表示 | 検索 | 補助判定 |",
             "|---|---|---|---|---|---|---|"]
     ascii_total = 0
+    closing_total = 0
     for case in cases:
         dialogue.reset()
         t0 = time.monotonic()
@@ -61,6 +62,9 @@ async def run(site: str) -> str:
         elapsed = time.monotonic() - t0
         notes = _auto_check(reply, case.get("auto") or {}, allow)
         ascii_total += sum(1 for n in notes if n.startswith("英字"))
+        if ends_with_closing(reply, config.dialogue):
+            closing_total += 1
+            notes.append("締めの定型で終わる")
         refs = " / ".join(f"{r.title}（{r.vector_score:.2f}）" for r in dialogue.last_references[:3])
         cited = " / ".join(r.title for r in dialogue.last_cited)
         search = "-" if dialogue.last_search_ms is None else f"{dialogue.last_search_ms:.0f}ms"
@@ -72,16 +76,18 @@ async def run(site: str) -> str:
               f"{notes or 'OK'}", flush=True)
     rows.append("")
     rows.append(f"英字の混在: {ascii_total} 問")
+    rows.append(f"締めの定型で終わる応答: {closing_total} / {len(cases)} 問")
     return "\n".join(rows)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--site", default=config.site)
+    ap.add_argument("--set", default="", help="評価セットの種類（smalltalk = 雑談。省略で WP03 の 20 問）")
     ap.add_argument("--out", type=Path, default=None, help="表を書き出す Markdown ファイル")
     args = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
-    table = asyncio.run(run(args.site))
+    table = asyncio.run(run(args.site, args.set))
     if args.out:
         args.out.write_text(table + "\n", encoding="utf-8")
         print(f"書き出し: {args.out}")

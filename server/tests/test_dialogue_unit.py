@@ -425,3 +425,23 @@ async def test_greeting_back_is_not_treated_as_echo() -> None:
     llm = StubLLM(["こんにちは。", "ようこそ。"])
     d = Dialogue(llm, DialogueConfig())
     assert await _collect(d, "こんにちは。ちょっと寄ってみました。") == ["こんにちは。", "ようこそ。"]
+
+
+async def test_help_offer_and_checkin_once_and_not_after_questions() -> None:
+    llm = StubLLM(["市民課です。", "最近、お変わりありませんか？"])
+    d = Dialogue(llm, DialogueConfig())
+    assert await _collect(d, "住民票はどこですか") == ["市民課です。"]  # 尋ねられた直後は言わない
+    llm2 = StubLLM(["いいですね。", "最近、お変わりありませんか？"])
+    d2 = Dialogue(llm2, DialogueConfig())
+    assert await _collect(d2, "今日は暖かいですね") == ["いいですね。", "最近、お変わりありませんか？"]
+    llm2.deltas = ["そうですね。", "お変わりはありませんか？"]
+    assert await _collect(d2, "散歩してきました") == ["そうですね。"]  # 1 会話 1 回
+
+
+def test_ends_with_closing() -> None:
+    from src.dialogue import ends_with_closing
+
+    cfg = DialogueConfig()
+    assert ends_with_closing("市民課です。いつでもお気軽にお声がけください。", cfg)
+    assert ends_with_closing("寒いですね。お体に気を付けてください。詳しくは市のホームページにも載っています。", cfg)
+    assert not ends_with_closing("寒いですね。お住まいの近くは、もう紅葉していますか？", cfg)
