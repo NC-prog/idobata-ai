@@ -301,11 +301,12 @@ async def test_llm_tags_only_when_procedure_unknown(tmp_path: Path) -> None:
 
 async def test_medical_and_legal_judgments_are_not_spoken() -> None:
     d = Dialogue(StubLLM(["それは心配ですね。", "認知症の症状の一つかもしれません。", "物忘れは年齢によるものの可能性があります。",
-                          "うつ病の疑いがあります。", "それは違法です。", "認知症の相談は高齢介護課でできます。"]),
+                          "うつ病の疑いがあります。", "それは違法です。", "認知症の相談は高齢介護課でできます。",
+                          "ご主人が認知症の可能性があるとおっしゃるのですね。"]),
                  DialogueConfig())
     out = await _collect(d, "最近物忘れがひどくて")
     assert out == ["それは心配ですね。", "認知症の相談は高齢介護課でできます。"]
-    assert [x["reason"] for x in d.last_dropped] == ["医療・法律の判断"] * 4
+    assert [x["reason"] for x in d.last_dropped] == ["医療・法律の判断"] * 5
     only = Dialogue(StubLLM(["ご主人は認知症かもしれませんね。"]), DialogueConfig())
     assert await _collect(only, "夫が認知症かもしれない") != ["ご主人は認知症かもしれませんね。"]  # 1 文だけでも言わない
 
@@ -321,7 +322,7 @@ async def test_residence_questions_are_dropped_but_scenery_question_stays() -> N
     d = Dialogue(StubLLM(["市民課は1階です。", "お住まいの近くにどの窓口がございましょうか？"]), DialogueConfig())
     assert await _collect(d, "住民票はどこで取れますか") == ["市民課は1階です。"]
     for q in ["どちらにお住まいですか？", "ご住所はどちらですか？", "どの地区から来られましたか？",
-              "お住まいの近くで健康に関する話題はありますか？"]:
+              "お住まいの近くで健康に関する話題はありますか？", "アメリカのどの地域に住んでいたか、教えていただけますか？"]:
         d = Dialogue(StubLLM(["そうなんですね。", q]), DialogueConfig())
         assert await _collect(d, "今日は寒いですね") == ["そうなんですね。"], q
     d = Dialogue(StubLLM(["そうなんですね。", "お住まいの近くは、もう紅葉していますか？"]), DialogueConfig())
@@ -351,4 +352,10 @@ async def test_worry_proposes_refer_to_community_center_department(tmp_path: Pat
     await _say(c2, "やっぱり物忘れが心配で")
     assert c2.phase == "listen"
     assert c2._worry_department() == "社会福祉課"
+
+
+async def test_refer_tag_on_plain_smalltalk_is_dropped(tmp_path: Path) -> None:
+    c = _conv(SpyLLM([["はい、臨時職員です。<propose:refer>"]], chat_reply="{}"), tmp_path)
+    out = await _say(c, "あなたは市役所の職員さんですか")
+    assert out == ["はい、臨時職員です。"] and c.phase == "listen"
 

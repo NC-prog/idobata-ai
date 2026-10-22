@@ -390,6 +390,11 @@ class Conversation:
                 and not re.search(self._cfg.lookup_fallback_topic, text)):
             logger.info("尋ねていない発話への lookup の提案を捨てます")
             return None
+        if (kind == "refer" and not procedure and not self._is_worry(text)
+                and not re.search(self._cfg.refer_fallback_cue, text) and not re.search(self._cfg.worry_cue_pattern, text)):
+            # 手続きでも困りごと・不安でもない発話（「あなたは職員さんですか」）に付いた refer は合わない
+            logger.info("手続き・困りごとの無い発話に付いた refer の提案を捨てます")
+            return None
         refer_offered = self._session is not None and any(x.get("action") == "refer" for x in self._session.proposals)
         if kind != "refer" and self._is_worry(text) and self._available("refer") and not refer_offered:
             # 健康・物忘れ・介護の不安は、雑談や調べるにせず専門の窓口につなぐ
