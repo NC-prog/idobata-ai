@@ -195,3 +195,11 @@ def test_pose_detector_on_local_weights() -> None:
     det = PoseDetector(CameraConfig(device="cpu"), CFG, root)
     out = det.detect(buf.tobytes(), debug=True)
     assert out is not None and out.people == [] and out.debug_jpeg  # 誰もいない画面
+
+
+async def test_missing_weights_means_listening(tmp_path: Path) -> None:
+    cam = CameraClient(CameraConfig(), CFG, tmp_path / "none")
+    task = asyncio.create_task(cam.run())
+    cam.push_jpeg(b"\xff\xd8")
+    await asyncio.wait_for(task, 10)  # 読めなければ推論ループを抜ける
+    assert cam.failed and not cam.active and cam.listening  # フレームが来ていても耳を塞がない

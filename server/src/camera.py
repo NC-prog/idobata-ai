@@ -293,6 +293,8 @@ class CameraClient:
     last_people: list[tuple[float, bool]] = field(default_factory=list, init=False)
     _started_at: float | None = field(default=None, init=False)
     _stale_warned: bool = field(default=False, init=False)
+    # 姿勢推定を読めなかった（重みが無い・壊れている）。輪の判定をやめ、従来どおり聞く（耳を塞がない）
+    failed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.tracker = PartyTracker(self.party_cfg)
@@ -309,7 +311,7 @@ class CameraClient:
     @property
     def active(self) -> bool:
         """フレームが最近届いているか（届かなければ輪の判定はしない＝従来どおり聞く）。"""
-        if self._last_frame_at is None:
+        if self._last_frame_at is None or self.failed:
             return False
         stale = time.monotonic() - self._last_frame_at > self.cfg.stale_sec
         if stale and not self._stale_warned:
@@ -347,7 +349,12 @@ class CameraClient:
             if data is None:
                 continue
             if self._detector is None:
-                self._detector = await asyncio.to_thread(PoseDetector, self.cfg, self.party_cfg, self.model_root)
+                try:
+                    self._detector = await asyncio.to_thread(PoseDetector, self.cfg, self.party_cfg, self.model_root)
+                except Exception:
+                    logger.exception("姿勢推定を読み込めません。カメラ無しとして（輪の判定をせず）従来どおり聞きます")
+                    self.failed = True
+                    return
                 logger.info("姿勢推定（RTMDet-nano＋RTMPose-s）を読み込みました（%s）", self._detector.device)
             try:
                 det = await asyncio.to_thread(self._detector.detect, data, self.debug)

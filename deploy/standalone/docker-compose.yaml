@@ -7,7 +7,7 @@
 #
 # GPU 配分（--gpu-memory-utilization は GPU 全体 16GB に対する割合）:
 #   asr 0.35（約5.6GB）+ llm 0.45（約7.2GB）= 0.80。残り 0.20（約3.2GB）は
-#   WP01 以降の YOLO11-pose と多言語 TTS 用に空けておく。
+#   WP01 以降の姿勢推定（WP02: rtmlib、フロントのプロセス）と多言語 TTS 用に空けておく。
 #   指示書の当初値は asr 0.30 だったが、Qwen3-ASR-1.7B の重み 3.9GiB + CUDA 文脈で
 #   KV キャッシュ枠が残らず起動しないため 0.35 に上げた（docs/WP00_result.md 参照）。
 #

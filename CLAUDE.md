@@ -16,7 +16,7 @@
   Ruri v3 埋め込み → LanceDB、気象庁の予報）。手続きの詳細は出典があるときだけ言う。結果は `docs/WP03_result.md`
 - WP06（現在）: 会話の文字記録（7 日・管理者だけが読む・保全）と誤り探しの素材（`scripts/export_review.py`）、
   アバターの呼び名の語彙、紹介状の要約の窓、設備の作り話・雑談の資料の安全装置。結果は `docs/WP06_result.md`
-- WP02（現在）: カメラ（エッジのブラウザが撮って JPEG で送る）と YOLO11-pose で目の前の「輪」を決め、輪の中の人とだけ話す。
+- WP02（現在）: カメラ（エッジのブラウザが撮って JPEG で送る）と姿勢推定（rtmlib の RTMDet＋RTMPose）で目の前の「輪」を決め、輪の中の人とだけ話す。
   セッション限りの話者の区別（ECAPA、A・B…）、能動的な切り出し・沈黙・別れ、別機エッジの設計。結果は `docs/WP02_result.md`
 - 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
 
@@ -42,7 +42,7 @@
 | LLM（Qwen3-8B-AWQ） | `http://127.0.0.1:8001/v1` | `IDOBATA_BACKEND_URL`（Tailscale 経由の T2／3660。未設定なら起動時エラー） | `/models/llm` | 0.45（約7.2GB、実測 7.3GB、`--enforce-eager`） |
 | TTS（VOICEVOX） | `http://127.0.0.1:50021` | 同左 | - | CPU（8 スレッド、`VOICEVOX_CPU_THREADS`） |
 | エッジ（`--edge`） | ページ `http://localhost:8080/edge/`、WebSocket `ws://127.0.0.1:8765` | 同左 | - | - |
-| 予備 | - | - | - | 0.20（約3.2GB、YOLO11-pose・多言語TTS用。使い切らない。WP02 でフロントのプロセスが YOLO＋話者埋め込みで約 0.4GB） |
+| 予備 | - | - | - | 0.20（約3.2GB、姿勢推定・多言語TTS用。使い切らない。WP02 でフロントのプロセスが姿勢推定＋話者埋め込みで約 0.5GB） |
 
 - モデル名は必ず `/models/` プレフィックス付き。API key は `"dummy"`
 - Qwen3 の思考モードは既定オフ（サーバに `--reasoning-parser` を付けず、リクエストで `chat_template_kwargs.enable_thinking=false`）
@@ -66,9 +66,11 @@
 - 短い返事（うん・はい・そう）: 返事待ちの間だけ VAD のしきい値と最小発話長を下げ、短い区間は無音を足して ASR に渡す。
   日本語の会話で短い区間が他言語と判定されたら日本語に固定して聞き直す（`VADConfig` / `ASRConfig`）
 - カメラ（WP02）: カメラは**エッジのブラウザが開いて** 320×180 の JPEG・5fps を WebSocket で送る（Python から直接開かない）。
-  フロントはメモリ上でだけ YOLO11-pose に掛け、**フレームを保存しない・顔識別をしない**。輪（PARTY）が無いときは ASR に渡さない。
-  `IDOBATA_CAMERA=0` でカメラ無し（従来どおり）。ultralytics は AGPL-3.0 で、既定では利用状況を外に送るので `YOLO_OFFLINE=1`・`sync=False` で止めている。
-  モデルの重みは `~/idobata-data/models/`（yolo11n-pose.pt、speechbrain の spkrec-ecapa-voxceleb）。エッジのブラウザは GPU で描画させる
+  フロントはメモリ上でだけ姿勢推定（rtmlib: RTMDet-nano＋RTMPose-s、Apache-2.0、ONNX Runtime の CUDA か CPU）に掛け、
+  **フレームを保存しない・顔識別をしない**。輪（PARTY）が無いときは ASR に渡さない。`IDOBATA_CAMERA=0` でカメラ無し（従来どおり）。
+  **ultralytics（AGPL-3.0）は使わない**（WP02 で置き換えた）。`onnxruntime-gpu` を使い、CPU 版 `onnxruntime` は uv の override で外している。
+  モデルの重みは `~/idobata-data/models/`（`rtmpose/` の ONNX、speechbrain の spkrec-ecapa-voxceleb）。実行時には取りに行かない。
+  エッジのブラウザは GPU で描画させる（`chrome://gpu`）
 - 挨拶は時間帯で変える（`src/timeofday.py`。5〜10 時 おはようございます、10〜17 時 こんにちは、17 時以降 こんばんは）。
   応答・相槌・定型文（`{greeting}`）・アナウンスで同じ判定を使い、LLM が別の時間帯の挨拶を言ったら読み上げ前に直すASR は返事待ちの間だけ言語を固定する
   （`deploy/standalone/asr/chat_template.jinja` の `force_language`）
@@ -164,7 +166,7 @@ server/
 │   ├── lookup.py         # 調べる（許可ドメインだけ・5 秒で打ち切り・見つからなければ夜のビルドに回す）
 │   ├── referrals.py      # 紹介状（受付番号・保存・期限・安芸太田は CSV）、来訪記録、小ネタ、今日の集計
 │   ├── procedures.py     # 手続きの常用語（procedures.yaml）と担当課の規則による決定
-│   ├── camera.py         # カメラと「輪」（YOLO11-pose・ByteTrack。フレームはメモリのみ。WP02 A）
+│   ├── camera.py         # カメラと「輪」（rtmlib の RTMDet＋RTMPose・簡易トラッカー。フレームはメモリのみ。WP02 A）
 │   ├── speaker.py        # セッション限りの話者の区別（ECAPA。A・B…。埋め込みはメモリのみ。WP02 B）
 │   ├── openers.py        # 切り出し・沈黙・別れの定型文（context/openers.yaml。WP02 C）
 │   ├── transcripts.py    # 会話の文字記録（WP06）

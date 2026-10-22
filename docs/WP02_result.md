@@ -8,16 +8,27 @@
 
 | もの | 版 | ライセンス | 用途・注意 |
 |---|---|---|---|
-| `ultralytics` | 8.4.183 | **AGPL-3.0**（PyPI の分類と配布元の表示） | YOLO11-pose と ByteTrack。作業指示どおり使ったが、**AGPL はネットワーク越しに使わせる場合もソースの提供義務がかかる**。市の窓口での運用・配布の形によっては、Ultralytics の Enterprise ライセンスか、別の姿勢推定（Apache/MIT の RTMPose・MediaPipe など）への置き換えを判断してほしい（止まる条件には挙がっていないので進めた） |
-| `yolo11n-pose.pt` | v8.3.0 の配布物 | AGPL-3.0（ultralytics の重み） | `~/idobata-data/models/yolo11n-pose.pt`、sha256 `869e83fc…5e9319dc0`。GitHub の ultralytics/assets のリリースから取得 |
-| `lap` | 0.5.13 | BSD-2-Clause | ByteTrack が使う（ultralytics が実行時に pip で入れようとするので、uv で先に入れた） |
+| `rtmlib` | 0.0.16 | **Apache-2.0**（PyPI の表示 "Apache License 2.0"、配布元 github.com/Tau-J/rtmlib） | 姿勢推定（RTMDet と RTMPose を ONNX Runtime で動かす）。**E 章で ultralytics（AGPL-3.0）から置き換えた** |
+| `onnxruntime-gpu` | 1.31.0 | MIT | rtmlib の実行（CUDA、使えなければ CPU）。rtmlib が要求する CPU 版 `onnxruntime` は uv の override で外した（E 章） |
+| RTMDet-nano（人） `rtmdet_nano_8xb32-100e_coco-obj365-person-05d8511e` | ONNX（20230831 の書き出し） | 下の「重みの条項」 | 人の矩形。`~/idobata-data/models/rtmpose/`、`end2end.onnx` の sha256 `8297e829…0b95d6` |
+| RTMPose-s `rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504` | ONNX（20230831 の書き出し） | 下の「重みの条項」 | COCO 17 点。`end2end.onnx` の sha256 `9aeb635b…eebaf47d` |
 | `speechbrain` | 1.1.2 | Apache-2.0 | 話者埋め込み（B） |
 | `speechbrain/spkrec-ecapa-voxceleb` | Hugging Face | **Apache-2.0**（モデルカードの `license: "apache-2.0"`、ゲート無し。学習データは VoxCeleb） | `~/idobata-data/models/spkrec-ecapa-voxceleb/`。モデルカードの依頼: 研究・業務で使うときは SpeechBrain を引用してほしい（"Please, cite SpeechBrain if you use it for your research or business."） |
 
 - 比べた候補: `Wespeaker/wespeaker-voxceleb-resnet34-LM` と `pyannote/wespeaker-voxceleb-resnet34-LM` は CC-BY-4.0（表示義務あり）、
   `pyannote/embedding` は MIT だがゲート付き（利用者情報の登録が要る）。条項が最も明確で手続きの要らない ECAPA（Apache-2.0）にした
-- **ultralytics の利用状況の送信を止めた**: 既定では使用状況を外へ送る（`settings.sync`）。`YOLO_OFFLINE=1` と `sync=False` を
-  コードで設定している（「会話・音声・映像は建物の外に出さない」）。実行時の自動 pip インストールも、依存を先に入れて起きないようにした
+- **姿勢推定の重みの配布元と条項**（転記）:
+  - 配布元: OpenMMLab（`https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/<名前>.zip`）。
+    MMPose の `projects/rtmpose/README.md` のモデル一覧に載っているもの（RTMDet-nano は「Pipeline」の表の det、RTMPose-s は Body 2d の表の onnx）
+  - 条項: 重みそのものに別の利用条件の記載は無い。MMPose のリポジトリは Apache License 2.0
+    （`LICENSE` の冒頭 "Copyright 2018-2020 Open-MMLab. All rights reserved. / Apache License / Version 2.0, January 2004"）
+  - 学習データ（README の記載）: RTMPose-s の `body7` は "model trained on 7 public datasets: AI Challenger, MS COCO, CrowdPose, MPII,
+    sub-JHMDB, Halpe, PoseTrack18"。RTMDet-nano は名前のとおり COCO と Objects365 の人（`coco-obj365-person`）。
+    **学習データの各データセットには、それぞれの利用条件がある**（研究目的に限るものが含まれうる）。重みの利用がそれに縛られるかは、
+    Apache-2.0 の重みとして使ってよいかを含めて、法務の確認を勧める（ultralytics の AGPL ほど明確な制約ではないが、確かめてはいない）
+- 重みは実行時に取りに行かない（無ければ姿勢推定を止め、カメラ無しとして従来どおり聞く）。取得は最初の設置のときに 1 回だけ
+- 置き換え前に使っていた `ultralytics` 8.4.183（**AGPL-3.0**）・`yolo11n-pose.pt`・`lap` は依存と lock から外した
+  （ultralytics は既定で利用状況を外に送る作りだった。使っていた間は `YOLO_OFFLINE=1`・`sync=False` で止めていた）
 
 ## A. カメラと「輪」
 
@@ -65,7 +76,7 @@
   Intel UHD（7560 の内蔵 GPU）を使わせると、タイマー 40/40 回、`toBlob` 8.6ms、描画 61fps、受信 5.0fps。
   **エッジのブラウザは GPU で描画させること**（D の設計書に書く）
 
-**作った映像**（canvas の映像をカメラとして差し込み。人の写真は ultralytics に同梱の `zidane.jpg`・`bus.jpg`）＋差し込んだ音声:
+**作った映像**（canvas の映像をカメラとして差し込み。人の写真は ultralytics の配布物にある `zidane.jpg`・`bus.jpg`。リポジトリには入れていない）＋差し込んだ音声:
 
 | 確かめたこと | 結果 |
 |---|---|
@@ -217,20 +228,73 @@ GPU の予備枠に約 120 MiB を足しても YOLO と合わせて 1GB に届�
 - Playwright の「headless shell」はこのフラグを無視した（通常の Chromium では効く。Chrome も同じエンジン）
 - **Windows 機での実測はしていない**（手元に無かった）。設計書の 8 章に残した
 
+## E. 追加の修正（姿勢推定の置き換え・返事待ちの沈黙・chrome://gpu）
+
+### E-1 姿勢推定を ultralytics（AGPL-3.0）から rtmlib（Apache-2.0）に
+
+- **RTMDet-nano**（人の矩形、入力 320×320）→ **RTMPose-s**（COCO 17 点、入力 192×256）を rtmlib で動かす（`server/src/camera.py` の `PoseDetector`）。
+  キーポイントは COCO 17 点のままなので、輪の判定（距離・正面・滞留）は変えていない
+- **追跡**: rtmlib の `PoseTracker` は内部でトラック ID を持つが外に返さないので使わず、**簡易トラッカーを自前で書いた**（`SimpleTracker`）。
+  前のフレームの矩形と IoU ≥ 0.3 の人を同じ人に（IoU の大きい組から）、残りは中心の距離が画面の対角の 0.15 以内で最も近い人に。
+  15 フレーム（5fps で 3 秒）見えなければ忘れる。ID はセッション限り・メモリのみ
+- **ONNX Runtime**: `onnxruntime-gpu`（CUDA。torch が入れた nvidia の CUDA・cuDNN を `preload_dlls` で使う）。CUDA が使えなければ
+  警告を出して CPU で動く（`camera.device`）。rtmlib は CPU 版の `onnxruntime` を要求するが、GPU 版と同じ import 名で両方入ると壊れるので、
+  `pyproject.toml` の `[tool.uv] override-dependencies` で CPU 版を外した
+- `ultralytics`・`ultralytics-platform`・`ultralytics-thop`・`lap` は依存と `uv.lock` から外した（`torchvision` も外れた）
+- **重みが無い・読めないとき**は姿勢推定を止め、**カメラ無しとして従来どおり聞く**（確認の途中で、重みが無いと推論の
+  タスクだけが落ち、フレームは届き続けるので輪が NONE のまま＝ずっと聞かない状態になることが分かったので直した）
+
+### E-2 計測（置き換え前後）
+
+| | ultralytics（YOLO11n-pose、FP16） | **rtmlib（RTMDet-nano＋RTMPose-s、ONNX Runtime CUDA）** |
+|---|---|---|
+| 1 フレームの推論（単体、2 人の写真 320×180） | — | 中央値 **7.5ms**、95% 8.2ms（CPU なら 14.9ms） |
+| 1 フレームの推論（動かしたまま、人なし） | 中央値 7.5ms（本物のカメラ） | 中央値 **4.4ms**、95% 5.0ms |
+| 1 フレームの推論（動かしたまま、2 人。LLM・TTS も動いている） | 中央値 6.5〜7.3ms（1〜2 人） | 中央値 **8.9ms**、95% 9.8〜21.0ms |
+| VRAM（姿勢推定だけの単体のプロセス） | 294 MiB（CUDA の文脈込み） | **174 MiB** |
+| VRAM（フロントのプロセス全体。話者埋め込みの torch を含む） | — | **512 MiB**（姿勢推定を読めなかったときは 264 MiB＝話者埋め込みの分。差の約 250 MiB が ONNX Runtime） |
+
+- 目標の 20ms 以下は中央値で満たす。2 人のときの 95% が 21.0ms になった回がある（RTMPose は人ごとに 1 回推論するので人数に比例する。
+  LLM・ASR と GPU を分け合っている）。5fps（200ms 間隔）には十分収まる
+- 予備枠（約 3.2GB）に対してフロントのプロセス 512 MiB
+
+### E-3 確認（`--edge`、作った映像＋来訪者役の WAV）
+
+| 確かめたこと | 結果 |
+|---|---|
+| 誰もいないときの部屋の会話 | 聞き取らない（`輪が無いので…`） |
+| 人が来る（`zidane.jpg`） | **2.34〜2.39 秒で PARTY、count=2**（YOLO では片方の左目の信頼度が足りず count=1 だった。RTMPose は両方の目・鼻を 0.8 以上で取る） |
+| 切り出し | 輪ができてから 0.00 秒 |
+| 会話 → 提案「担当の課に伝えておきましょうか？」→ 黙る | **7 秒後に提案をもう一度**（`提案の返事待ちに黙っているので、提案をもう一度言います（refer）`）。その後 10 秒黙っていても沈黙の一言は出ない |
+| 立ち去る | 別れの一言 → 8 秒で区切る |
+| 本物のカメラ | **未確認**。この確認のとき、カメラ（/dev/video0）はデスクトップの Google Chrome（別のアプリ）が使っていて開けなかった（`camera_status ok=False`）。止めずにそのままにした |
+
+### E-4 提案の返事待ちの沈黙（`actions.Conversation.silence_reask`）
+
+提案（PROPOSED）の返事待ちのまま `party.silence_sec` 黙ったら、沈黙の一言ではなく**提案の文をもう一度**（「このこと、担当の課に伝えておきましょうか？」）。
+1 回だけで、2 回目からは黙って待つ（沈黙の一言の回数には数えない）。提案文は対話履歴の直前の応答の後ろに足す。
+
+### E-5 chrome://gpu の確認
+
+`docs/edge_pc_setup.md` には「うまくいかないとき」の表にしか無かったので、**30 分の手順の 18 分の行に足した**（キオスクではない普通の Chrome で
+`chrome://gpu` を開き、WebGL・WebGL2 が「Hardware accelerated」であること。「Software only」ならドライバを入れ直す）。
+
 ## 残っていること・人が確かめること
 
 1. **カメラの前に人が立つ確認**（離席していたため、輪・切り出し・沈黙・別れは写真の映像で確かめた。本物のカメラでは、席にいた方で
    `NONE → PRESENT → PARTY`（2.0 秒）と顔をそらして外れるところまで見た）
 2. **`party.min_box_ratio` の距離の校正**（2〜2.5m に立って `/edge/debug/party` の `people` を読む。外付けカメラに替えたらもう一度）
 3. 話者の区別の、人の声での確認（VOICEVOX の似た声どうしは分けられなかった。男女・男男は 12/12）
-4. **ultralytics の AGPL-3.0** の扱いの判断（0 章）
+4. ~~ultralytics の AGPL-3.0~~ → E 章で rtmlib（Apache-2.0）に置き換えた。**姿勢推定の重みの学習データの条件**の確認（0 章）は残る
 5. Windows 機での別機エッジの実測（設計書 8 章）
-6. 沈黙の一言が、行為の提案の返事待ちにも出る（C の気づいたこと）
+6. ~~沈黙の一言が、行為の提案の返事待ちにも出る~~ → E 章で、返事待ちは提案をもう一度（1 回だけ）にした
+7. 置き換え後の姿勢推定で、本物のカメラの前に人が立つ確認（E 章の確認のときは、カメラが別のアプリに使われていた）
+8. RTMPose のキーポイントの信頼度（SimCC の値。見えている点で 0.8〜1.06）に対して `camera.kpt_conf` 0.5 が合っているか、横向き・後ろ向きでの値
 
 ## 品質
 
 ```
-uv run pytest            → 356 passed, 5 deselected（integration）
+uv run pytest            → 360 passed, 5 deselected（integration）（E 章の後）
 uv run mypy --strict src → Success: no issues found in 30 source files
 uv run ruff check . ../scripts → All checks passed!
 (cd edge && npm run typecheck && npm run build) → OK
