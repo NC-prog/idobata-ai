@@ -68,8 +68,9 @@ def test_backchannel_rules_rotate_and_skip_short_replies() -> None:
     first = bank.choose("住民票はどこで取れますか")
     second = bank.choose("いつ開いてますか")
     assert first is not None and second is not None and first[0] != second[0]  # 同じ相槌を続けない
-    assert bank.choose("母が亡くなって、つらくて") == ("ええ", 0.6)  # 打ち明けは間を長く
-    assert bank.choose("今日は寒いですね")[0] in ("ええ", "ほんとに")  # type: ignore[index]
+    assert bank.choose("母が亡くなって、つらくて") == ("そうでしたか", 0.6)  # 打ち明けは間を長く
+    assert bank.choose("今日は寒いですね")[0] in ("そうですか", "なるほど", "ほんとに")  # type: ignore[index]
+    assert all(w != "ええ" for w, _ in bank.all_variants())  # 「ええ」は実機で不自然だった（WP05）
 
 
 def test_strip_leading_backchannel() -> None:
@@ -112,8 +113,19 @@ class StubLookup:
         return self.result
 
 
+class FakeClock:
+    """monotonic の代わり（保存直後の断片・電話番号の続きを待つ期限を試す）。"""
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
 def _conv(llm: StubLLM, tmp_path: Path, lookup: Any = None, enabled: tuple[str, ...] = ("lookup", "refer"),
-          states: list[str] | None = None, tidbits: TidbitStore | None = None) -> Conversation:
+          states: list[str] | None = None, tidbits: TidbitStore | None = None,
+          clock: FakeClock | None = None) -> Conversation:
     d = Dialogue(llm, DialogueConfig(), facility=FAC, enabled_actions=enabled, now=_noon)
 
     async def on_state(v: str) -> None:
@@ -124,7 +136,7 @@ def _conv(llm: StubLLM, tmp_path: Path, lookup: Any = None, enabled: tuple[str, 
         d, llm, "/models/llm", ActionsConfig(enabled=enabled), ReferralConfig(), FAC, TAGS,
         lookup=lookup, referrals=ReferralStore(tmp_path, "etajima", 30, csv_export=True),
         visits=VisitLog(tmp_path, "etajima"), on_state=on_state, edge_id=lambda: "edge-1",
-        tidbits=tidbits, procedures=PROCS, now=_noon,
+        tidbits=tidbits, procedures=PROCS, now=_noon, clock=clock or FakeClock(),
     )
 
 
@@ -568,7 +580,8 @@ def _saved(tmp_path: Path) -> Any:
 
 async def test_refer_full_intake_flow(tmp_path: Path) -> None:
     llm = SpyLLM([["国保の切り替えですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()])
-    c = _conv(llm, tmp_path)
+    clock = FakeClock()
+    c = _conv(llm, tmp_path, clock=clock)
     await _say(c, "国保の切り替えで聞きたいことがあって")
     out = await _say(c, "お願いします")
     assert out == [R["acting"], "切り替えのきっかけは、退職ですか、転入ですか？"]
@@ -595,6 +608,7 @@ async def test_refer_full_intake_flow(tmp_path: Path) -> None:
     assert "山田" not in llm.chat_inputs[-1] and "090" not in llm.chat_inputs[-1]
     # プロセス内の記録にも残さない
     assert all("山田" not in u and "090" not in u for u, _ in c._turns)
+    clock.t += 11  # 保存直後 10 秒の断片の無視が明けてから
     assert await _say(c, "うん") == [TEMPLATES["common"]["ack"]]  # 終わった直後の相づち
 
 
@@ -778,3 +792,147 @@ def test_summary_filter_keeps_department_the_visitor_said(tmp_path: Path) -> Non
     c = _conv(StubLLM([]), tmp_path)
     s = "市民課で住民票を取りたい。保健医療課を案内された。"
     assert c._visitor_only(s, "市民課で住民票を取りたいんです") == "市民課で住民票を取りたい。"
+
+
+async def test_taught_local_talk_becomes_share_candidate(tmp_path: Path) -> None:
+    store = TidbitStore(tmp_path, "etajima", 7)
+    llm = StubLLM([["能美のことは、まだ詳しくなくて。どんなところか、教えていただけますか？"], ["すてきですね。"]])
+    c = _conv(llm, tmp_path, enabled=SHARE, tidbits=store)
+    await _say(c, "能美ってどんなところか知ってますか")
+    out = await _say(c, "能美は海がきれいで、夕方は島がよく見えるんですよ")
+    assert out[-1] == TEMPLATES["share"]["propose"]  # 教わった地元の話は小ネタの候補
+
+
+def test_short_segment_padding_and_voiced_length() -> None:
+    import numpy as np
+
+    from src.main import pad_segment, voiced_ms
+
+    frames = [np.zeros(512, np.float32) for _ in range(5)]
+    frames[2] = np.full(512, 0.2, np.float32)
+    padded = pad_segment(frames, 1.0, 16000)
+    assert sum(len(f) for f in padded) == 16000  # 1.0 秒にそろえる
+    assert padded[0].sum() == 0 and padded[-1].sum() == 0  # 前後は無音
+    assert pad_segment(padded, 0.8, 16000) == padded  # 長ければそのまま
+    assert voiced_ms(frames, 16000, 0.1, 0.005) == 32.0  # 声のあるフレームだけ数える
+
+
+# ------------------------------------------------------------------
+# 電話番号の断片の連結・保存後の仕切り直し・問いは 1 つ・個人情報を尋ねる文（WP05 実機の指摘）
+# ------------------------------------------------------------------
+
+
+async def _to_ask_phone(c: Conversation) -> None:
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    await _say(c, "お願いします")
+    for answer in ["分からない", "分からない", "分からない", "いいです", "いいです"]:
+        await _say(c, answer)
+    assert c.phase == "ask_contact"
+
+
+def test_phone_digits_and_format() -> None:
+    from src.referrals import format_phone, phone_digits
+
+    assert phone_digits("ゼロ九ゼロの") == "090"
+    assert phone_digits("一二三四の") == "1234"
+    assert phone_digits("５６７８ー") == "5678"
+    assert format_phone("09012345678") == "090-1234-5678"
+    assert format_phone("0823431111") == "0823-43-1111"
+    assert format_phone("0312345678") == "03-1234-5678"
+    assert format_phone("0901234") is None
+    # 区切りの途中までを番号とみなさない（最初の断片だけで保存された原因）
+    assert find_phone("090の1234の") is None
+
+
+async def test_phone_fragments_are_joined_then_read_back(tmp_path: Path) -> None:
+    clock = FakeClock()
+    c = _conv(StubLLM([["国保の切り替えですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()]),
+              tmp_path, clock=clock)
+    await _to_ask_phone(c)
+    assert await _say(c, "電話で、090の") == []  # 続きを待つ（何も言わない）
+    assert c.phase == "ask_phone" and c.phone_deadline == clock.t + 6
+    clock.t += 3
+    assert await _say(c, "一二三四の") == []
+    clock.t += 3
+    assert await _say(c, "五六七八") == [R["confirm_phone"].format(phone="0 9 0、1 2 3 4、5 6 7 8")]
+    assert c.phone_deadline is None
+    await _say(c, "はい")
+    ref = _saved(tmp_path)
+    assert ref.phone == "090-1234-5678" and ref.contact_pref == "電話"
+    # 預かった断片も、履歴・プロセス内の記録に番号を残さない
+    kept = repr(c.dialogue.history) + repr(c._turns)
+    assert "090" not in kept and "1234" not in kept and "一二三四" not in kept
+
+
+async def test_phone_timeout_reasks_once_then_saves_without_number(tmp_path: Path) -> None:
+    clock = FakeClock()
+    c = _conv(StubLLM([["国保の切り替えですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()]),
+              tmp_path, clock=clock)
+    await _to_ask_phone(c)
+    assert await _say(c, "電話でお願いします") == [R["ask_phone"]]
+    assert await _say(c, "090の1234") == []
+    assert [s async for s in c.on_phone_timeout()] == []  # 期限前は何もしない
+    clock.t += 6.1
+    assert [s async for s in c.on_phone_timeout()] == [R["phone_reask"]]
+    assert c.phase == "ask_phone" and c.phone_deadline is None
+    assert await _say(c, "090の") == []
+    clock.t += 6.1
+    out = [s async for s in c.on_phone_timeout()]
+    assert out[0].startswith(R["phone_wrong"]) and c.last_receipt in out[0]
+    assert _saved(tmp_path).phone is None
+
+
+async def test_after_save_history_is_one_line_and_fragments_are_ignored(tmp_path: Path) -> None:
+    clock = FakeClock()
+    llm = StubLLM([["何でもどうぞ。"], ["国保の切り替えですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()])
+    c = _conv(llm, tmp_path, clock=clock)
+    await _say(c, "おはよう")
+    await _to_ask_phone(c)
+    await _say(c, "090の1234の5678")
+    await _say(c, "はい")
+    history = c.dialogue.history
+    assert len(history) == 3 and history[0] == ("おはよう", "何でもどうぞ。")
+    # 提案までの話は残り、聞き取りの質問と答えは「受付番号 ○ で○○課に伝達済み」の 1 行になる
+    assert history[-2][1].endswith(R["propose"])
+    assert history[-1] == (ReferralConfig().history_note_user,
+                           f"受付番号 {c.last_receipt} で保健医療課に伝達済み。")
+    assert not any("切り替えのきっかけ" in a or R["ask_name"] in a for _, a in history)
+    # 保存直後 10 秒以内の、数字だけ・1〜2 語だけの断片は無視する（名前や番号を聞き返さない）
+    for frag in ("五六七八", "はい", "5678"):
+        assert c.ignores(frag)
+        assert await _say(c, frag) == []
+    assert not c.ignores("駐車場はどこにありますか")
+    clock.t += 10.5
+    assert not c.ignores("五六七八")
+
+
+async def test_one_question_per_reply_and_no_personal_questions(tmp_path: Path) -> None:
+    llm = StubLLM([
+        ["こんにちは！", "今日はどんなご用でいらっしゃいましたか？", "何かお探しですか？", "ゆっくりどうぞ。"],
+        ["ありがとうございます。", "お名前を教えていただけますか？", "お電話番号は？"],
+    ])
+    c = _conv(llm, tmp_path)
+    assert await _say(c, "こんにちは") == ["こんにちは！", "今日はどんなご用でいらっしゃいましたか？", "ゆっくりどうぞ。"]
+    out = await _say(c, "五六七八")
+    assert out == ["ありがとうございます。"]  # 聞き取りの外では氏名・番号を尋ねない
+
+
+async def test_proposal_drops_llm_questions_and_keeps_only_the_proposal(tmp_path: Path) -> None:
+    llm = StubLLM([["国保の切り替えですね。", "退職されたのですか？", "保健医療課が担当です。<propose:refer>"]],
+                  chat_reply=[PHRASED, _refer_json()])
+    c = _conv(llm, tmp_path)
+    out = await _say(c, "国保の切り替えで聞きたいことがあって")
+    # LLM の問いと、その後の文も提案が決まるまで預かる。問いだけ落とし、順番は変えない
+    assert out == ["国保の切り替えですね。", "保健医療課が担当です。", R["propose"]]
+    assert [s for s in out if s.endswith("？")] == [R["propose"]]
+    # 読み上げなかった問いは履歴にも残さない
+    assert c.dialogue.history[-1][1] == "国保の切り替えですね。保健医療課が担当です。" + R["propose"]
+    assert c.phase == "proposed"
+
+
+async def test_question_is_kept_when_no_proposal_follows(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["寒くなりましたね。", "お出かけですか？", "ゆっくりどうぞ。"]]), tmp_path)
+    out = await _say(c, "今日は寒いですね")
+    assert out == ["寒くなりましたね。", "お出かけですか？", "ゆっくりどうぞ。"]
+    assert c.dialogue.history[-1][1] == "".join(out) and c.phase == "listen"
+

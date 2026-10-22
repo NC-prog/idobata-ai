@@ -19,7 +19,7 @@ import logging
 import sys
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -32,12 +32,13 @@ from .asr_client import ASRClient, language_name, load_site_vocabulary
 from .audio_input import EdgeAudioInput, MicrophoneInput, WavFileInput, list_audio_devices
 from .backchannel import BackchannelBank, BackchannelClip, strip_leading_backchannel
 from .config import SERVER_ROOT, ConfigError, DeviceSpec, config, parse_device
-from .dialogue import Dialogue
+from .dialogue import Dialogue, speech_text
 from .edge_bridge import EdgeBridge
 from .edge_server import EdgeServer, StaffPanel
 from .knowledge import KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
+from .persona import load_persona
 from .procedures import AsrFixes, load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
 from .site_context import load_facility, load_site_words, referral_csv_enabled
@@ -125,6 +126,8 @@ class VoiceLoop:
             weather=Weather.for_site(config.data_dir, config.site),
             avatar_name=config.actions.avatar_name,
             enabled_actions=config.actions.enabled,
+            persona=load_persona(config.persona),
+            procedures=load_procedures(config.asr.site_context_dir),
         )
         # 同意付きの行為（調べる・つなぐ）と来訪記録（WP04）
         self._referrals = ReferralStore(config.data_dir, config.site, config.referral.retention_days,
@@ -171,6 +174,8 @@ class VoiceLoop:
         self._knowledge = KnowledgeStore(config.data_dir, config.site, config.knowledge)
         # 最後に確定した来訪者の発話の時刻（monotonic）。待機に戻ったら None
         self._last_utterance_at: float | None = None
+        # 電話番号の断片の続きを待つタイマー（期限を過ぎたら聞き直す）
+        self._phone_timer: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # 起動
@@ -333,6 +338,9 @@ class VoiceLoop:
                 was_muted = False
             # --- /自己発話ゲート ---
 
+            if not vad.in_speech:  # 返事待ちの間だけ、柔らかい短い返事も区間にする
+                vad.set_threshold(config.vad.reply_threshold if self._conversation.expects_short_reply
+                                  else config.vad.threshold)
             event = vad.process_frame(frame)
             if event is not None:
                 if event.event_type == SpeechEventType.SPEECH_START:
@@ -341,7 +349,7 @@ class VoiceLoop:
                     t_speech_start = event.timestamp_sec
                     await self._send_state("listening")
                 elif event.event_type == SpeechEventType.SPEECH_END:
-                    if segment_frames:
+                    if segment_frames and self._long_enough(segment_frames):
                         await self._on_segment(segment_frames, t_speech_start)
                     segment_frames = []
             elif vad.in_speech:
@@ -349,23 +357,52 @@ class VoiceLoop:
             else:
                 preroll.append(frame)
 
+    async def _transcribe(self, frames: list[np.ndarray], t_speech_start: float,
+                          force: str | None) -> tuple[str, str]:
+        assert self._asr is not None
+        text, language = "", "ja"
+        async for chunk in self._asr.transcribe_segment(
+            frames, t_speech_start, sample_rate=config.vad.sample_rate, force_language=force
+        ):
+            if chunk.is_final:
+                text, language = chunk.text, chunk.language
+        return text, language
+
+    def _long_enough(self, frames: list[np.ndarray]) -> bool:
+        """発話区間の声の長さが最小発話長以上か。
+
+        Silero は話し始めより遅れて start を出し、末尾には無音（min_silence_ms）が付くので、区間の長さではなく
+        音量がピークの一定割合を超えるフレームを数える（雑音のクリックは 1〜2 フレームで落ちる）。
+        """
+        cfg = config.vad
+        min_ms = cfg.reply_min_speech_ms if self._conversation.expects_short_reply else cfg.min_speech_ms
+        speech_ms = voiced_ms(frames, cfg.sample_rate, cfg.voiced_peak_ratio, cfg.voiced_min_rms)
+        if speech_ms < min_ms:
+            logger.info("短すぎる発話区間を捨てました（%.0f ms < %d ms）", speech_ms, min_ms)
+            return False
+        return True
+
     async def _on_segment(self, frames: list[np.ndarray], t_speech_start: float) -> None:
         """1 セグメントを ASR に掛け、確定テキストが出たら応答タスクを起こす。"""
         assert self._asr is not None
         timing = TurnTiming(t_speech_end=time.monotonic())
         await self._send_state("thinking")
-        final_text = ""
-        language = "ja"
         # 提案の返事待ちは短い発話（うん・はい）が多く、言語判定を誤りやすいので会話の言語に固定する
+        short_reply = self._conversation.expects_short_reply
         force = (language_name(self._conversation.language)
-                 if config.asr.force_language_on_reply and self._conversation.expects_short_reply
-                 else None)
-        async for chunk in self._asr.transcribe_segment(
-            frames, t_speech_start, sample_rate=config.vad.sample_rate, force_language=force
-        ):
-            if chunk.is_final:
-                final_text = chunk.text
-                language = chunk.language
+                 if config.asr.force_language_on_reply and short_reply else None)
+        voiced = voiced_ms(frames, config.vad.sample_rate, config.vad.voiced_peak_ratio, config.vad.voiced_min_rms)
+        frames = pad_segment(frames, config.vad.reply_pad_to_sec if short_reply else config.vad.pad_to_sec,
+                             config.vad.sample_rate)
+        final_text, language = await self._transcribe(frames, t_speech_start, force)
+        session_lang = self._conversation.session_language
+        if (force is None and session_lang and (not final_text or language != session_lang)
+                and voiced <= config.asr.retry_short_foreign_ms and language_name(session_lang)):
+            # 日本語の会話の途中の短い返事がほかの言語と判定された（「うん」→「嗯」）か、聞き取れなかった:
+            # 会話の言語に固定して聞き直す
+            logger.info("短い区間の言語判定が会話と違うので、会話の言語に固定して聞き直します（%s → %s）",
+                        language, session_lang)
+            final_text, language = await self._transcribe(frames, t_speech_start, language_name(session_lang))
         timing.t_asr_done = time.monotonic()
         if not final_text:
             await self._send_state("idle")
@@ -374,6 +411,11 @@ class VoiceLoop:
         self._last_utterance_at = time.monotonic()
         self._asr.push_rolling_context(final_text)
         final_text = self._asr_fixes.apply(final_text)
+        if self._conversation.ignores(final_text):
+            # 紹介状の保存直後の断片（読み上げに重なった番号の残りなど）: 相槌も字幕も出さない
+            logger.info("紹介状の保存直後の短い断片を無視しました")
+            await self._send_state("idle")
+            return
         shown = self._shown_user_text(final_text)
         print(f"[聞き取り:{language}] {shown}")
         await self._send_caption(shown, role="user")
@@ -421,7 +463,8 @@ class VoiceLoop:
     # ------------------------------------------------------------------
 
     async def _respond_and_speak(
-        self, text: str, language: str, timing: TurnTiming | None
+        self, text: str, language: str, timing: TurnTiming | None,
+        source: Callable[[], AsyncIterator[str]] | None = None,
     ) -> None:
         """LLM の応答を 1 文ずつ受け、1 文できるごとに合成して流す。
 
@@ -432,7 +475,7 @@ class VoiceLoop:
         async with self._turn_lock:
             sentences: asyncio.Queue[str | None] = asyncio.Queue()
             producer = asyncio.create_task(
-                self._produce_sentences(text, language, sentences, timing), name="llm-stream"
+                self._produce_sentences(text, language, sentences, timing, source), name="llm-stream"
             )
             self._reply_count += 1
             utterance_id = f"u{self._reply_count:04d}"
@@ -462,8 +505,11 @@ class VoiceLoop:
                             continue
                     shown = self._conversation.redact(sentence)  # 読み上げは本物、画面とコンソールは伏せる
                     print(f"[井戸端AI] {shown}")
+                    spoken = speech_text(sentence)  # 括弧書きは字幕だけ
+                    if not spoken:
+                        continue
                     try:
-                        wav, query = await self._tts.synthesize_with_query(sentence)
+                        wav, query = await self._tts.synthesize_with_query(spoken)
                     except httpx.HTTPError:
                         logger.warning("VOICEVOX 合成に失敗。この文は音声なしで続行します。")
                         continue
@@ -496,9 +542,30 @@ class VoiceLoop:
             if timing is not None:
                 timing.search_ms = self._dialogue.last_search_ms
                 print(f"[計測] 発話終了→ {timing.summary()}")
-            elif self._dialogue.last_search_ms is not None:
+            elif self._dialogue.last_search_ms is not None and source is None:
                 print(f"[検索] {self._dialogue.last_search_ms:.0f}ms、"
                       f"参考資料 {len(self._dialogue.last_references)} 件")
+        self._arm_phone_timer()
+
+    def _arm_phone_timer(self) -> None:
+        """電話番号の断片を預かっていれば、続きを待つタイマーを動かす（1 つだけ）。"""
+        if self._conversation.phone_deadline is None:
+            return
+        if self._phone_timer is None or self._phone_timer.done():
+            self._phone_timer = asyncio.create_task(self._watch_phone_deadline(), name="phone-wait")
+            self._bg_tasks.add(self._phone_timer)
+            self._phone_timer.add_done_callback(self._bg_tasks.discard)
+
+    async def _watch_phone_deadline(self) -> None:
+        # 断片が来るたびに期限は延びる。期限を過ぎたら聞き直す（1 回）か、番号なしで進める
+        while (deadline := self._conversation.phone_deadline) is not None:
+            wait = deadline - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue
+            await self._respond_and_speak("", "ja", None, source=self._conversation.on_phone_timeout)
+            if self._conversation.phone_deadline == deadline:
+                return  # 何も進まなかった（念のため。止まらないループにしない）
 
     async def _produce_sentences(
         self,
@@ -506,10 +573,12 @@ class VoiceLoop:
         language: str,
         out: asyncio.Queue[str | None],
         timing: TurnTiming | None,
+        source: Callable[[], AsyncIterator[str]] | None = None,
     ) -> None:
-        """LLM の応答を文に切って out に積む。最後に None を積む。"""
+        """LLM の応答を文に切って out に積む。最後に None を積む。source があればその文を流す。"""
         try:
-            async for sentence in self._conversation.respond(text, language):
+            stream = source() if source is not None else self._conversation.respond(text, language)
+            async for sentence in stream:
                 if timing is not None and not timing.t_first_sentence:
                     timing.t_first_sentence = time.monotonic()
                 await out.put(sentence)
@@ -620,6 +689,25 @@ def current_season(month: int | None = None) -> str:
     """月から季節（エッジの背景の切替に使う）を返す。"""
     m = month if month is not None else time.localtime().tm_mon
     return config.edge.seasons[(m - 3) % 12 // 3]
+
+
+def voiced_ms(frames: list[np.ndarray], sample_rate: int, peak_ratio: float, min_rms: float) -> float:
+    """声のあるフレーム（RMS がピークの peak_ratio 倍以上、かつ min_rms 以上）の合計の長さ（ミリ秒）。"""
+    if not frames:
+        return 0.0
+    rms = np.array([float(np.sqrt(np.mean(np.square(f, dtype=np.float64)))) if len(f) else 0.0 for f in frames])
+    floor = max(min_rms, float(rms.max()) * peak_ratio)
+    return float(sum(len(f) for f, r in zip(frames, rms, strict=True) if r >= floor) * 1000 / sample_rate)
+
+
+def pad_segment(frames: list[np.ndarray], min_sec: float, sample_rate: int) -> list[np.ndarray]:
+    """区間が min_sec より短ければ、前後に半分ずつ無音を足して min_sec にする。"""
+    n = sum(len(f) for f in frames)
+    need = int(min_sec * sample_rate) - n
+    if need <= 0:
+        return frames
+    dtype = frames[0].dtype if frames else np.float32
+    return [np.zeros(need // 2, dtype=dtype), *frames, np.zeros(need - need // 2, dtype=dtype)]
 
 
 async def _with_tail_silence(source: WavFileInput) -> AsyncIterator[np.ndarray]:

@@ -7,7 +7,11 @@
 - PROPOSED: 来訪者の発話は通常の対話に流さず、返事だけを規則で判定する（同意 / 辞退 / 不明）。
   不明なら 1 回だけ聞き直し、それでも不明なら辞退扱い
 - 同意 → 「少々お待ちくださいね」→ 実行（エッジは thinking）→ 結果を 1〜3 文で報告 → LISTEN
-- 紹介状で電話番号を言っていたら、復唱して確かめる（CONFIRM_PHONE）
+- 紹介状で電話番号を言っていたら、復唱して確かめる（CONFIRM_PHONE）。「090の1234の5678」と区切って
+  言われ ASR が断片で返したときは、数字が 10〜11 桁にそろうまで続く発話を連結してから復唱する
+  （待つのは断片ごとに referral.phone_wait_sec。そろわなければ 1 回だけ聞き直し、だめなら番号なしで進める）
+- 紹介状を保存したら会話を仕切り直す: 聞き取りの質問と答えを対話履歴から外して「受付番号 ○ で○○課に
+  伝達済み」の 1 行だけを残し、保存直後の数字だけ・1〜2 語だけの断片は無視する（ignores）
 
 会話の区切り（待機タイムアウト）で、匿名の来訪記録を 1 行書く（end_session）。
 """
@@ -18,6 +22,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,12 +40,16 @@ from .procedures import IntakeSet, Procedures
 from .referrals import (
     CATEGORIES,
     CONTACT_PREFS,
+    PHONE_DIGITS_MAX,
     UNSPECIFIED_DEPARTMENT,
     URGENCIES,
     ReferralStore,
     TidbitStore,
     VisitLog,
     find_phone,
+    format_phone,
+    normalize_digits,
+    phone_digits,
     phone_for_speech,
     pick_tags,
 )
@@ -111,6 +120,12 @@ class Pending:
     address_area: str | None = None
     contact_pref: str = "未定"
     phone: str | None = None
+    # 区切って言われた電話番号の断片を連結している途中の数字と、続きを待つ期限（monotonic 秒）
+    phone_buf: str = ""
+    phone_deadline: float | None = None
+    phone_reasked: bool = False
+    # 提案した時点の対話履歴の写し（保存後、聞き取りを外してここに戻す）
+    history_before: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -150,6 +165,7 @@ class Conversation:
         tidbit_cfg: TidbitConfig | None = None,
         procedures: Procedures | None = None,
         now: Callable[[], datetime] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.dialogue = dialogue
         self._llm = llm
@@ -173,6 +189,12 @@ class Conversation:
         self._topic_start = 0
         self._turn_new_topic = False
         self._now = now or (lambda: datetime.now(JST))
+        self._clock = clock
+        # 紹介状を保存した時刻（monotonic。直後の断片を無視する）と、履歴に残す 1 行（保存の直後だけ）
+        self._saved_at: float | None = None
+        self._history_note: tuple[str, str] | None = None
+        # このターンの発話を、電話番号の続きを待つために返事をせずに預かったか
+        self._held = False
         self._words, self._templates = load_templates(cfg.templates_path)
         self._pending: Pending | None = None
         self._session: Session | None = None
@@ -188,6 +210,11 @@ class Conversation:
     @property
     def phase(self) -> str:
         return "listen" if self._pending is None else self._pending.phase
+
+    @property
+    def session_language(self) -> str | None:
+        """会話が始まっていればその言語（最初の発話の言語）。始まっていなければ None。"""
+        return self._session.language if self._session is not None and self._session.turns else None
 
     @property
     def language(self) -> str:
@@ -217,6 +244,7 @@ class Conversation:
                 pass
         session, history = self._session, self.dialogue.history
         self._session, self._pending = None, None
+        self._saved_at, self._history_note = None, None
         self._turns, self._topic_start = [], 0
         self._private_values = set()
         self.dialogue.reset()
@@ -241,13 +269,18 @@ class Conversation:
 
     async def respond(self, text: str, language: str = "ja") -> AsyncIterator[str]:
         """1 発話に応答する。ターンを記録し、行為が終わったら話題の区切りとする。"""
+        if self.ignores(text):
+            logger.info("紹介状の保存直後の短い断片（数字だけ・1〜2 語）なので応答しません")
+            return
         index, had_pending = len(self._turns), self._pending is not None
         label = self.private_label
-        self._turn_new_topic = False
+        self._turn_new_topic, self._held = False, False
         lines: list[str] = []
         async for s in self._respond_turn(text, language, index):
             lines.append(s)
             yield s
+        if self._held and not lines:
+            return  # 電話番号の断片: 続きを待つ（返事も記録もしない）
         # 氏名・地区・電話番号はプロセス内の記録にも残さない
         self._turns.append((f"（{label}を伺いました）" if label else text, self.redact("".join(lines))))
         if had_pending and self._pending is None and not self._turn_new_topic:
@@ -282,18 +315,36 @@ class Conversation:
         reply: list[str] = []
         offered = self._tidbit_to_offer(text)
         hint = self._tidbit_cfg.offer_template.format(text=offered["text"]) if offered else ""
+        # 問いの文から後は、提案が付くか分かるまで（応答の終わりまで）読み上げずに預かる。
+        # 提案が付けば LLM の問いは落とし、提案文だけを問いとして残す（問いは 1 回の応答で 1 つ）
+        held: list[str] = []
         async for s in self.dialogue.respond(text, language, hint=hint):
             reply.append(s)
+            if held or self.dialogue.is_question(s):
+                held.append(s)
+                continue
             yield s
         if offered and self._session and self._tidbit_used(offered["text"], "".join(reply)):
             self._session.tidbit_used = True
             logger.info("さっきの方の小ネタを紹介しました")
         kind = self._adjust_proposal(self.dialogue.last_proposal, text, "".join(reply))
-        if kind and self._available(kind):
+        proposing = kind is not None and self._available(kind)
+        spoken = reply[: len(reply) - len(held)]  # 預からずに読み上げた文（応答の頭）
+        for s in held:
+            if proposing and self.dialogue.is_question(s):
+                logger.info("提案文を付けるので、LLM の応答の問いの文を読み上げずに落としました")
+                continue
+            spoken.append(s)
+            yield s
+        if len(spoken) < len(reply):
+            # 読み上げなかった問いは履歴にも残さない
+            self.dialogue.replace_last_reply(text.strip(), "".join(reply), "".join(spoken))
+        if kind is not None and proposing:
             line = self._t(kind, "propose")
-            self._pending = Pending(kind, text, language, turn_index=index, topic_floor=self._topic_start)
-            self._session.proposals.append({"action": kind, "outcome": None})
             self.dialogue.extend_last_reply(line)
+            self._pending = Pending(kind, text, language, turn_index=index, topic_floor=self._topic_start,
+                                    history_before=self.dialogue.history)
+            self._session.proposals.append({"action": kind, "outcome": None})
             logger.info("行為を提案しました: %s", kind)
             yield line
 
@@ -339,12 +390,17 @@ class Conversation:
         return None
 
     def _share_fits(self, text: str) -> bool:
-        """覚えておくの提案に合う雑談か（尋ねていない・手続きでない・個人の事情の語が無い・1 会話 1 回）。"""
+        """覚えておくの提案に合う雑談か（尋ねていない・手続きでない・個人の事情の語が無い・1 会話 1 回）。
+
+        地域の季節の話題か、案内役が「教えていただけますか」と聞き返したのに来訪者が答えたとき（WP05）。
+        """
         if not self._available("share") or self._session is None:
             return False
         if any(p.get("action") == "share" for p in self._session.proposals):
             return False
-        return (re.search(self._cfg.share_fallback_topic, text) is not None
+        taught = bool(self._turns) and re.search(self._cfg.teach_request_pattern, self._turns[-1][1]) is not None
+        long_enough = len(re.sub(r"[\s、。！？!?]", "", text)) > self._cfg.reply_max_chars
+        return ((re.search(self._cfg.share_fallback_topic, text) is not None or (taught and long_enough))
                 and not self._known_tidbit(text)
                 and not re.search(self._cfg.question_pattern, text.strip())
                 and not re.search(self._ref_cfg.procedure_pattern, text)
@@ -379,7 +435,9 @@ class Conversation:
                 lines.append(s)
                 yield s
             user = self._private_text(p, text, label)
-            self.dialogue.add_turn(user, self.redact("".join(lines)))
+            if self._held and not lines:
+                return  # 電話番号の断片は、そろってから 1 ターンとして積む
+            self._add_turn(p, user, self.redact("".join(lines)))
             return
         verdict = classify_reply(text, self._words)
         if verdict == "unclear":
@@ -420,7 +478,16 @@ class Conversation:
                 lines.append(s)
                 yield s
         user = self._private_text(p, text, label)
-        self.dialogue.add_turn(user, self.redact("".join(lines)))
+        self._add_turn(p, user, self.redact("".join(lines)))
+
+    def _add_turn(self, p: Pending, user: str, assistant: str) -> None:
+        """返事待ちのターンを履歴に積む。紹介状を保存した直後なら、聞き取りを外して 1 行にまとめる。"""
+        if self._history_note is not None:
+            self.dialogue.restore(p.history_before, *self._history_note)
+            self._history_note = None
+            logger.info("紹介状の聞き取りを対話履歴から外し、受付の 1 行だけを残しました")
+            return
+        self.dialogue.add_turn(user, assistant)
 
     def _reask_line(self, p: Pending) -> str:
         if p.phase == "confirm_phone":
@@ -552,6 +619,13 @@ class Conversation:
             if p.phone:
                 p.phase, p.reasks = "confirm_phone", 0
                 yield self._t("refer", "confirm_phone", phone=phone_for_speech(p.phone))
+            elif phone_digits(text):
+                # 番号を区切って言い始めた（「090の」）: 続きを待って連結する
+                if p.contact_pref == "未定":
+                    p.contact_pref = "電話"
+                p.phase = "ask_phone"
+                async for s in self._collect_phone(p, text, skipped=False):
+                    yield s
             elif p.contact_pref == "電話":
                 p.phase = "ask_phone"
                 yield self._t("refer", "ask_phone")
@@ -559,13 +633,75 @@ class Conversation:
                 async for s in self._finish_referral(p):
                     yield s
         elif p.phase == "ask_phone":
-            phone = None if skipped else find_phone(text)
-            if phone:
-                p.phone, p.phase, p.reasks = phone, "confirm_phone", 0
-                yield self._t("refer", "confirm_phone", phone=phone_for_speech(phone))
-                return
-            async for s in self._finish_referral(p, prefix=ack):
+            async for s in self._collect_phone(p, text, skipped):
                 yield s
+
+    async def _collect_phone(self, p: Pending, text: str, skipped: bool) -> AsyncIterator[str]:
+        """電話番号の断片を連結する。10〜11 桁にそろったら復唱、まだなら続きを待つ（何も言わない）。"""
+        if skipped:
+            p.phone_buf, p.phone_deadline = "", None
+            async for s in self._finish_referral(p, prefix=self._t("refer", "skipped")):
+                yield s
+            return
+        p.phone_buf += phone_digits(text)
+        phone = format_phone(p.phone_buf)
+        if phone:
+            p.phone, p.phase, p.reasks = phone, "confirm_phone", 0
+            p.phone_buf, p.phone_deadline = "", None
+            logger.info("電話番号の数字がそろったので復唱します")
+            yield self._t("refer", "confirm_phone", phone=phone_for_speech(phone))
+            return
+        if len(p.phone_buf) > PHONE_DIGITS_MAX:
+            logger.info("電話番号の数字が多すぎます（%d 桁）", len(p.phone_buf))
+            async for s in self._phone_incomplete(p):
+                yield s
+            return
+        p.phone_deadline = self._clock() + self._ref_cfg.phone_wait_sec
+        self._held = True
+        logger.info("電話番号の続きを待ちます（いま %d 桁、%.0f 秒）", len(p.phone_buf), self._ref_cfg.phone_wait_sec)
+
+    async def _phone_incomplete(self, p: Pending) -> AsyncIterator[str]:
+        """番号がそろわなかった: 1 回だけ聞き直し、それでもだめなら番号なしで紹介状を作る。"""
+        p.phone_buf, p.phone_deadline = "", None
+        if not p.phone_reasked:
+            p.phone_reasked = True
+            yield self._t("refer", "phone_reask")
+            return
+        logger.info("電話番号がそろわないので、番号なしで紹介状を作ります")
+        p.phone = None
+        async for s in self._finish_referral(p, prefix=self._t("refer", "phone_wrong")):
+            yield s
+
+    @property
+    def phone_deadline(self) -> float | None:
+        """電話番号の続きを待っていれば、その期限（monotonic 秒）。"""
+        p = self._pending
+        return p.phone_deadline if p is not None and p.phase == "ask_phone" else None
+
+    async def on_phone_timeout(self) -> AsyncIterator[str]:
+        """続きを待つ期限を過ぎたら、聞き直すか番号なしで進める（期限前なら何もしない）。"""
+        p = self._pending
+        deadline = self.phone_deadline
+        if p is None or deadline is None or self._clock() < deadline:
+            return
+        logger.info("電話番号の続きが %.0f 秒来ませんでした（%d 桁）", self._ref_cfg.phone_wait_sec, len(p.phone_buf))
+        lines: list[str] = []
+        async for s in self._phone_incomplete(p):
+            lines.append(s)
+            yield s
+        self._add_turn(p, f"（{_PRIVATE_LABELS['ask_phone']}を伺いました）", self.redact("".join(lines)))
+
+    def ignores(self, text: str) -> bool:
+        """紹介状の保存直後に来た、数字だけ・1〜2 語だけの発話か（読み上げに重なった断片とみなして無視する）。"""
+        cfg = self._ref_cfg
+        if self._saved_at is None or self._pending is not None:
+            return False
+        if self._clock() - self._saved_at > cfg.post_save_ignore_sec:
+            return False
+        digits_only = re.fullmatch(r"[0-9\s、。，．,.！？!?の\-ー－‐]+", normalize_digits(text)) is not None
+        words = [w for w in re.split(r"[\s、。，．,.！？!?…]+", text) if w]
+        short = 0 < len(words) <= cfg.post_save_fragment_max_words and len("".join(words)) <= cfg.post_save_fragment_max_chars
+        return (digits_only and bool(phone_digits(text))) or short
 
     async def _on_confirm_name(self, p: Pending, ok: bool) -> AsyncIterator[str]:
         if ok:
@@ -600,6 +736,12 @@ class Conversation:
             yield prefix + self._t("refer", "failed")
             return
         self.last_receipt = ref.receipt
+        # 会話を仕切り直す: 聞き取りの質問と答えは履歴から外し、受付の 1 行だけを残す（_add_turn）
+        self._saved_at = self._clock()
+        unknown_dept = ref.department in ("", UNSPECIFIED_DEPARTMENT)
+        self._history_note = (self._ref_cfg.history_note_user,
+                              self._t("refer", "history_note", number=ref.receipt,
+                                      department="担当の方" if unknown_dept else ref.department))
         if self._session is not None:
             self._session.referral_id = ref.id
         logger.info("紹介状を保存しました: 受付 %s・%s・聞き取り %d 問", ref.receipt, ref.department,
@@ -806,7 +948,7 @@ class Conversation:
 # 自由な答えを待つ段（はい・いいえで判定しない）と、個人の情報を答える段
 _FREE_ANSWER_PHASES = frozenset({"intake", "ask_name", "ask_area", "ask_contact", "ask_phone"})
 _PRIVATE_LABELS = {"ask_name": "お名前", "confirm_name": "お名前", "ask_area": "お住まい",
-                   "ask_phone": "お電話番号", "confirm_phone": "お電話番号"}
+                   "ask_contact": "ご連絡方法", "ask_phone": "お電話番号", "confirm_phone": "お電話番号"}
 _PAREN_RE = re.compile(r"（(.*?)）")
 
 

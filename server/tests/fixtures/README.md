@@ -16,6 +16,7 @@
 | `visitor_intake_reason_ja.wav` / `visitor_intake_when_ja.wav` / `visitor_intake_self_ja.wav` | 聞き取りの答え「会社を退職したので。」「来月からです。」「本人です。」（WP04） | VOICEVOX:玄野武宏 |
 | `visitor_name_ja.wav` / `visitor_hai_ja.wav` / `visitor_area_ja.wav` | 「山田です。」（架空の名前）「はい。」「能美町です。」 | VOICEVOX:玄野武宏 |
 | `visitor_contact_ja.wav` / `visitor_phone_ja.wav` | 「電話でお願いします。」「090の1234の5678です。」（架空の番号。かなで読ませる） | VOICEVOX:玄野武宏 |
+| `visitor_phone_part1_ja.wav` / `_part2_` / `_part3_` | 区切って言った番号の断片「ゼロキューゼロの。」「イチニーサンヨンの。」「ゴーロクナナハチ。」（WP05 実機の指摘。part3 は保存後に重なる断片の確認にも使う） | VOICEVOX:玄野武宏 |
 | `visitor_trouble_ja.wav` | 課の決まらない相談「ちょっと困ったことがあって。」（WP04 未特定） | VOICEVOX:青山龍星 |
 
 形式: 24kHz / mono / PCM16、前 0.5 秒・後 0.8 秒の無音つき。

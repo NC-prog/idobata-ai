@@ -122,6 +122,9 @@ class ASRConfig:
     # 言語判定に任せると「うん」→「嗯」、「はい」→「Hi.」になる。ASR サーバ側に
     # deploy/standalone/asr/chat_template.jinja（force_language 対応）が要る
     force_language_on_reply: bool = True
+    # 日本語で始まった会話で、短い区間がほかの言語と判定されたら（「うん」→「嗯」、「はい」→「Hi.」）
+    # 日本語に固定して 1 回だけ聞き直す。声の長さがこれ以下の区間だけ
+    retry_short_foreign_ms: float = 700.0
 
 
 @dataclass(frozen=True)
@@ -156,7 +159,21 @@ class VADConfig:
 
     backend: str = "silero"
     threshold: float = 0.5
-    min_speech_ms: int = 250
+    # これより短い発話区間は雑音として捨てる（WP05: これまで設定だけで使っていなかった）。
+    # 返事待ち（提案・聞き取りの確認）の間は短い返事（うん・はい・そう）を拾うために下げる
+    # 250 ms は WP00 から設定だけで使っていなかった値。合成の「はい」「うん」の声は 160〜320 ms なので、
+    # 250 にすると雑談中の「はい」が半分落ちる。通常は 150 ms（咳・クリックは落ちる）にした
+    min_speech_ms: int = 150
+    reply_min_speech_ms: int = 120
+    # 返事待ちの間の発話判定のしきい値。柔らかい「うん」「はい」は Silero の確率が 0.3〜0.5 にしか
+    # ならず、0.5 では区間にならなかった（WP05 の計測）。返事待ちの短い間だけ下げる
+    reply_threshold: float = 0.25
+    # 声のあるフレームの判定（最小発話長を数えるとき）: RMS がピークのこの割合以上、かつこの値以上
+    voiced_peak_ratio: float = 0.1
+    voiced_min_rms: float = 0.005
+    # ASR に渡す区間がこれより短ければ、前後に無音を足してこの長さにする（短い音声は聞き取りを誤りやすい）
+    reply_pad_to_sec: float = 1.0
+    pad_to_sec: float = 0.8
     min_silence_ms: int = 400
     pre_roll_ms: int = 30
     # 発話開始を検出する前の音声もセグメントに含める長さ（ミリ秒）。Silero は立ち上がりの
@@ -279,6 +296,8 @@ class DialogueConfig:
         "- 観光地・店・行事・団体の名前は、【参考資料】か【ここで分かっていること】にあるものだけを言う。"
         "無いときは名前を挙げず、担当の課を案内する。【参考資料】の名前は書いてあるとおりに言い、"
         "{city}の外の場所を{city}のものとして挙げない。\n"
+        "- 地区・町・島の様子（「〇〇ってどんなところ？」など）は【参考資料】に書いてあることだけを言う。"
+        "無いときは様子を作らず「まだ詳しくなくて。どんなところか教えていただけますか？」と聞き返す。\n"
         "- 天気・気温は【今日】に書いてあることだけを言う。来訪者の言うことを否定しない。\n"
         "- おすすめを聞かれても、【参考資料】に無い観光地・名所・店の名前は一つも言わない。"
         "そのときは「{city}の観光は商工観光課や観光協会のホームページでご案内しています」のように案内する。\n"
@@ -290,6 +309,7 @@ class DialogueConfig:
         "- 分からないことは分からないと言う。\n"
         "- 日本語以外で話しかけられたら、日本語で「{foreign_reply}」と短く伝える。\n"
         "- 【参考資料】は来訪者の発話の前に毎回付けて渡す。無いときは「なし」と書いてある。\n"
+        "{persona}"
         "{propose_rules}"
         "【今日】\n"
         "{today}"
@@ -309,6 +329,18 @@ class DialogueConfig:
     # 応答の冒頭で来訪者の言葉をそのまま繰り返す文は読み上げない（8B の癖。一度出ると
     # 履歴に倣って続く）。ただし挨拶を返すのは自然なので残す
     echo_keep: tuple[str, ...] = ("こんにちは", "こんばんは", "おはようございます", "ありがとう")
+    # 聞かれていないのに名乗る文（「いどちゃんです。」）と、応答の頭の話者名（「いどちゃん:」）は読み上げない。
+    # 名前を聞かれたとき（このパターンが来訪者の発話にあるとき）は残す
+    # 傘をすすめてよい降水確率（天気の文のどれかがこれ以上のときだけ。【話し方の決まり】と同じ値）
+    umbrella_min_pop: int = 30
+    # 館内の道順の言い方（この言い方を含む文は読み上げない。道順は作らない決まり）
+    direction_pattern: str = r"入り?口(の|に)|入口付近|すぐそば|右手|左手|突き当たり|奥にあり|隣にあり|向かいにあり|曲がって|進んで"
+    # 地区・町の様子を聞かれて資料が無いときは、LLM を通さず教えてもらう（WP05。様子を作らない）
+    place_question_pattern: str = (
+        r"(?P<place>[^、。？?\s]{1,12}?)(って|は|とは|というのは)(どんな|どういう)(ところ|所|町|まち|場所|地域|島)"
+    )
+    unknown_place_reply: str = "{place}のことは、まだ詳しくなくて。どんなところか、教えていただけますか？"
+    name_question_pattern: str = r"名前|なまえ|お名前|誰|だれ|何て(いう|言う|呼べ)|何と(いう|言う|呼べ)"
     # これまでの応答と同じ文（これ以上の長さ）は読み上げない
     repeat_min_chars: int = 6
     leak_replacements: tuple[tuple[str, str], ...] = (
@@ -340,8 +372,8 @@ class DialogueConfig:
         ("refer", ("手続き（保険・税・住民票・子育て・介護など）の相談で、担当の課が【ここで分かっていること】から"
                    "分かるとき。または困りごとの打ち明けで相談先があるとき（子育て・介護・生活の困りごとなど）。"
                    "雑談では付けない")),
-        ("share", ("行事・季節・畑・魚・天気などの雑談で、来訪者が話したことに個人の事情が含まれず、"
-                   "ほかの来訪者に教えても差し支えないとき")),
+        ("share", ("行事・季節・畑・魚・天気などの雑談、または来訪者が地元のこと（地区・行事・名物・景色）を"
+                   "教えてくれたときで、個人の事情が含まれず、ほかの来訪者に教えても差し支えないとき")),
     )
     # 日本語以外の発話への返事（多言語は site プロファイルで後日）。LLM を通さずこの文を返す
     foreign_reply: str = "申し訳ありません、外国語でのご案内は準備中です。"
@@ -357,6 +389,9 @@ class DialogueConfig:
     # LLM が自分で書いた出典の一言（こちらで足すので捨てる）
     llm_source_sentence_pattern: str = r"^(?:詳しくは|くわしくは).{0,40}(?:ホームページ|サイト|お知らせ).{0,12}載っています"
     no_references_text: str = "なし"
+    # 出典の一言を足すのは、応答の文字 n-gram のうちこの割合以上が資料にあるときだけ（WP05）
+    source_overlap_ngram: int = 3
+    source_min_overlap: float = 0.2
     # 時間帯の挨拶（開始の時、挨拶）。最後の帯は日付をまたいで最初の帯の前まで続く（src/timeofday.py）
     greeting_bands: tuple[tuple[int, str], ...] = (
         (5, "おはようございます"), (10, "こんにちは"), (17, "こんばんは"),
@@ -368,6 +403,15 @@ class DialogueConfig:
     # 「最近、お変わりありませんか」の類（8B が毎回そのまま使い回すので、雑談のターンだけ・1 会話 1 回）
     checkin_pattern: str = r"お変わり(あり|ない|は)"
     visitor_question_pattern: str = r"[か？?][。]?$|ますか|ですか|どこ|いつ|何|なに|どう|教えて"
+    # 1 回の応答で読み上げる問い（「〜ですか？」で終わる文）の数。2 つ目以降は捨てる（行為の提案文は別）
+    max_questions_per_reply: int = 1
+    question_sentence_pattern: str = r"[？?][」』）)]?$|(でしょうか|ませんか|ますか)。$"
+    # 氏名・電話番号・住所を尋ねる文。紹介状の聞き取り（定型文）でしか言わないので、LLM の応答からは捨てる
+    personal_question_pattern: str = (
+        r"(お名前|ご氏名|氏名|お電話番号|電話番号|ご連絡先|連絡先|ご住所|住所|お住まい)"
+        r"(を|は|も|と|って)?(教えて(いただけ|ください|くださ|もらえ|頂け)|伺(って|え|わせ)|うかが(って|え|わせ)|"
+        r"お聞かせ|聞かせて|いただけ|頂け|お願いし|おっしゃって|どちら|どこ|[？?])"
+    )
     # 応答の最後が締めの定型（「お気をつけて」「いつでもどうぞ」）で終わっているかの判定（評価セットで数える）
     closing_pattern: str = (
         r"(お気軽に|いつでも|遠慮なく)(どうぞ|お声がけ|お尋ね|ご相談|お話|おっしゃ)|気を(つけ|付け)|"
@@ -406,6 +450,15 @@ class KnowledgeConfig:
 
 
 @dataclass(frozen=True)
+class PersonaConfig:
+    """案内役の人物像（server/context/persona.yaml、WP05）。"""
+
+    path: Path = SERVER_ROOT / "context" / "persona.yaml"
+    # 肩書（persona.yaml の role_title より優先）。環境変数 IDOBATA_ROLE_TITLE
+    role_title: str = ""
+
+
+@dataclass(frozen=True)
 class ActionsConfig:
     """相槌と、同意付きの行為（調べる・つなぐ・覚えておく）の設定（WP04）。"""
 
@@ -440,6 +493,8 @@ class ActionsConfig:
         r"水揚げ|獲れ|とれ(た|て|る)|釣れ|収穫|採れ|咲い|花が|紅葉|祭り|まつり|港|畑|田んぼ|みかん|牡蠣|"
         r"カキ|魚|夕日|朝日|初雪|桜|渡り鳥|潮|実っ|柿"
     )
+    # 案内役が地元のことを教わろうとした言い方（直後の来訪者の話を小ネタの候補にする。WP05）
+    teach_request_pattern: str = r"教えていただけ|教えてください|教えてくださ|教えてもらえ|教えていただきたい"
     # つなぐ: 発話が手続き（ReferralConfig.procedure_pattern）の相談を求めているとき
     refer_fallback_cue: str = r"相談|聞きたいこと|困って|困った|分からなくて|わからなくて|どうしたら"
 
@@ -524,6 +579,14 @@ class ReferralConfig:
         r"国保|国民健康保険|保険証|年金|介護|児童手当|住民票|戸籍|転入|転出|引っ越し|税金|納付|"
         r"生活保護|障害"
     )
+    # 電話番号を区切って言われたとき、数字が 10〜11 桁にそろうまで続く発話を待つ秒数（断片ごとに延びる）
+    phone_wait_sec: float = 6.0
+    # 紹介状の保存直後この秒数の間に来た、数字だけ・1〜2 語だけの発話は無視する（読み上げに重なった断片）
+    post_save_ignore_sec: float = 10.0
+    post_save_fragment_max_words: int = 2
+    post_save_fragment_max_chars: int = 4
+    # 保存後に対話履歴に残す 1 行の来訪者側（聞き取りの質問と答えは履歴から外す）
+    history_note_user: str = "（担当の課への伝達に同意し、聞き取りを終えました）"
     structure_prompt: str = (
         "以下の【来訪者の言葉】と【案内役が言ったこと】から、担当の課へ伝える紹介状を JSON で作ってください。"
         "category は 手続き / 相談 / 意見 / その他 のどれか。"
@@ -617,6 +680,7 @@ class AppConfig:
     dialogue: DialogueConfig = field(default_factory=DialogueConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     actions: ActionsConfig = field(default_factory=ActionsConfig)
+    persona: PersonaConfig = field(default_factory=PersonaConfig)
     lookup: LookupConfig = field(default_factory=LookupConfig)
     referral: ReferralConfig = field(default_factory=ReferralConfig)
     staff: StaffConfig = field(default_factory=StaffConfig)
@@ -691,6 +755,7 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         lookup=lookup,
         referral=referral,
         staff=staff,
+        persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
     )
 
 

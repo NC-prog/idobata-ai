@@ -92,6 +92,12 @@ UTTERANCES: tuple[Utterance, ...] = (
               text="電話でお願いします。"),
     Utterance(filename="visitor_phone_ja.wav", speaker_id=11, speaker_name="玄野武宏",
               text="ゼロキューゼロの、イチニーサンヨンの、ゴーロクナナハチです。"),
+    # 区切って言った番号を ASR が断片で返す場合（WP05 実機）。1 断片 1 ファイル。最後のものは保存後に重なる断片
+    Utterance(filename="visitor_phone_part1_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="ゼロキューゼロの。"),
+    Utterance(filename="visitor_phone_part2_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="イチニーサンヨンの。"),
+    Utterance(filename="visitor_phone_part3_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="ゴーロクナナハチ。"),
     Utterance(
         filename="visitor_trouble_ja.wav",
         speaker_id=13,

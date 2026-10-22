@@ -21,6 +21,8 @@ from src.config import config
 from src.dialogue import Dialogue, ends_with_closing
 from src.knowledge import KnowledgeBase, Weather
 from src.llm_client import LLMClient
+from src.persona import load_persona
+from src.procedures import load_procedures
 from src.site_context import load_facility
 
 _ASCII_RUN = re.compile(r"[A-Za-zＡ-Ｚａ-ｚ]{3,}")
@@ -43,8 +45,12 @@ def _auto_check(reply: str, auto: dict[str, Any], allow: set[str]) -> list[str]:
 async def run(site: str, case_set: str = "") -> str:
     facility = load_facility(site, config.asr.site_context_dir)
     kb = KnowledgeBase.load(config.data_dir, site, config.knowledge)
+    # 実機と同じ条件（呼び名・行為のタグの決まり・人物像）で聞く
     dialogue = Dialogue(LLMClient(), facility=facility, knowledge=kb,
-                        weather=Weather.for_site(config.data_dir, site))
+                        weather=Weather.for_site(config.data_dir, site),
+                        avatar_name=config.actions.avatar_name, enabled_actions=config.actions.enabled,
+                        persona=load_persona(config.persona),
+                        procedures=load_procedures(config.asr.site_context_dir))
     allow = {a.lower() for a in (facility.allow_ascii if facility else ())}
     cases = yaml.safe_load(
         (Path(__file__).parent / f"cases_{site}{'_' + case_set if case_set else ''}.yaml").read_text(encoding="utf-8")

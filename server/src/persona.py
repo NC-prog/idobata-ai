@@ -7,13 +7,61 @@
 
 from __future__ import annotations
 
+import logging
+import re
+from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
 
-from .config import DialogueConfig
+import yaml
+
+from .config import DialogueConfig, PersonaConfig
 from .knowledge import Reference
 from .site_context import Department, Facility
 
 _WEEKDAYS = "月火水木金土日"
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Persona:
+    """案内役の人物像（persona.yaml）。"""
+
+    role_title: str
+    profile: tuple[str, ...] = ()
+    speaking: tuple[str, ...] = ()
+    guardrails: tuple[str, ...] = ()
+    # 人物像と食い違う言い方（この語を含む文は読み上げない）
+    contradictions: tuple[str, ...] = ()
+
+    def block(self, facility_name: str) -> str:
+        """システムプロンプトの【あなたの人物像】の節。"""
+        def lines(items: tuple[str, ...]) -> str:
+            return "".join(f"- {x.format(role_title=self.role_title, facility_name=facility_name)}\n"
+                           for x in items)
+        return ("【あなたの人物像】（【話し方の決まり】と【ここで分かっていること】のほうが優先）\n"
+                + lines(self.profile) + lines(self.speaking)
+                + ("【人物像についての決まり】\n" + lines(self.guardrails) if self.guardrails else ""))
+
+
+def load_persona(cfg: PersonaConfig) -> Persona | None:
+    """persona.yaml を読む。無い・壊れているときは None（人物像なしで動く）。"""
+    try:
+        data: Any = yaml.safe_load(Path(cfg.path).read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        logger.warning("人物像の設定を読めません: %s（人物像なしで続けます）", cfg.path, exc_info=True)
+        return None
+
+    def strs(key: str) -> tuple[str, ...]:
+        # YAML の折り返しで入る空白は、日本語の文字どうしの間では詰める
+        return tuple(re.sub(r"(?<=[^\x00-\x7f])\s+(?=[^\x00-\x7f])", "", " ".join(str(x).split()))
+                     for x in data.get(key) or [])
+
+    return Persona(cfg.role_title or str(data.get("role_title") or "職員"),
+                   strs("profile"), strs("speaking"), strs("guardrails"), strs("contradictions"))
 
 
 def format_department(d: Department) -> str:
@@ -109,6 +157,7 @@ def build_system_prompt(
     avatar_name: str = "",
     enabled_actions: tuple[str, ...] = (),
     greeting: str = "こんにちは",
+    persona: Persona | None = None,
 ) -> str:
     """システムプロンプト（固定事実 + 決まり + 今日）。参考資料は入れない（build_turn_message）。
 
@@ -124,6 +173,7 @@ def build_system_prompt(
         avatar_name=avatar_name or "（未定）",
         propose_rules=format_propose_rules(cfg, enabled_actions),
         greeting=greeting,
+        persona=persona.block(facility.name if facility else "市役所") if persona else "",
     )
 
 
