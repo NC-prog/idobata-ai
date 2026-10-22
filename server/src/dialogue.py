@@ -272,6 +272,7 @@ class Dialogue:
         self._medical_judgment_re = re.compile(
             rf"(?:{self._cfg.medical_subject_pattern})[^。！？!?]{{0,20}}(?:{self._cfg.judgment_pattern})")
         self._legal_judgment_re = re.compile(self._cfg.legal_judgment_pattern)
+        self._meta_leak_re = re.compile(self._cfg.meta_leak_pattern)
         self._residence_question_re = re.compile(self._cfg.residence_question_pattern)
         self._residence_allow_re = re.compile(self._cfg.residence_question_allow_pattern)
         # (user, assistant) の組を直近 history_turns 件だけ保持する
@@ -521,6 +522,13 @@ class Dialogue:
         if not said:
             return sentence, False
         if expected in said:
+            # 「社会福祉課（2階）か保健医療課（2階）」のように、担当でない課を選択肢に並べたら外す
+            others = "|".join(re.escape(n) for n in said if n != expected)
+            if others:
+                fixed = re.sub(rf"(?:{others})(?:（[^）]*）)?(?:か|または)、?(?={re.escape(expected)})", "", sentence)
+                if fixed != sentence:
+                    logger.info("担当でない課を選択肢に並べた部分を外しました（%s）", expected)
+                    return fixed, True
             return sentence, True
         wrong = said[0]
         logger.info("担当課の取り違えを直しました（%s → %s）", wrong, expected)
@@ -779,6 +787,12 @@ class Dialogue:
                               rf"|^{name}(?=[一-龥ァ-ヶ])", "", sentence)
         for old, new in self._cfg.leak_replacements:
             sentence = sentence.replace(old, new)
+        for old, new in (self._facility.name_fixes if self._facility else ()):
+            sentence = sentence.replace(old, new)  # 団体の正式名（「江田島観光協会」→「江田島市観光協会」）
+        if self._meta_leak_re.search(sentence):
+            logger.warning("指示文のような文（来訪者・以下は など）を LLM が出したので読み上げずに捨てました")
+            self.note_drop("指示文の漏れ", sentence)
+            return ""
         if self._llm_source_re.search(sentence):
             return ""  # 出典の一言はこちらで足す
         sentence = self._fix_department_floor(sentence)

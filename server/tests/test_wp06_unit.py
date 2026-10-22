@@ -364,3 +364,22 @@ async def test_speaker_label_with_response_word_is_removed() -> None:
     d = Dialogue(StubLLM(["いどちゃんの応答：専門の窓口にも相談できます。"]), DialogueConfig(), avatar_name="いどちゃん")
     assert await _collect(d, "最近物忘れがひどくて") == ["専門の窓口にも相談できます。"]
 
+
+async def test_alternative_wrong_department_meta_leak_and_name_fix() -> None:
+    from src.procedures import load_procedures
+
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー",
+                   departments=(Department("社会福祉課", "2階", handles=("生活保護",)),
+                                Department("保健医療課", "2階", handles=("国民健康保険",))),
+                   name_fixes=(("江田島観光協会", "江田島市観光協会"),))
+    d = Dialogue(StubLLM(["まずは社会福祉課（2階）か保健医療課（2階）でご案内します。"]), DialogueConfig(),
+                 facility=fac, procedures=load_procedures(SERVER_ROOT / "context"))
+    assert await _collect(d, "国民健康保険に入りたいんですが") == ["まずは保健医療課（2階）でご案内します。"]
+    d = Dialogue(StubLLM(["以下は、来訪者の発話に基づく応答です。", "---最近、物忘れがひどくて心配なんです。",
+                          "江田島観光協会のホームページに載っています。"]), DialogueConfig(), facility=fac)
+    assert await _collect(d, "観光地は") == ["江田島市観光協会のホームページに載っています。"]
+    assert {x["reason"] for x in d.last_dropped} == {"指示文の漏れ"}  # 1 文目は読点で先に切れるので 3 つ
+    from src.site_context import load_facility
+    real = load_facility("etajima", SERVER_ROOT / "context")
+    assert real is not None and ("江田島観光協会", "江田島市観光協会") in real.name_fixes
+

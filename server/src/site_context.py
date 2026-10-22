@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 # 語彙ではない節（拠点の固定事実など）
-_NON_VOCAB_KEYS = frozenset({"facility", "allow_ascii", "outside_places", "referral_csv"})
+_NON_VOCAB_KEYS = frozenset({"facility", "allow_ascii", "outside_places", "referral_csv", "name_fixes"})
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,8 @@ class Facility:
     allow_ascii: tuple[str, ...] = ()
     # 拠点の外なのに LLM が拠点のものとして挙げやすい場所（含む文は読み上げない）
     outside_places: tuple[str, ...] = ()
+    # 団体などの正式名の言い間違いの直し（誤 → 正。読み上げ前に置き換える）
+    name_fixes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,6 +166,8 @@ def load_facility(site: str, context_dir: Path) -> Facility | None:
         ),
         allow_ascii=tuple(str(a) for a in data.get("allow_ascii") or []),
         outside_places=tuple(str(a) for a in data.get("outside_places") or []),
+        name_fixes=tuple((str(f["wrong"]), str(f["correct"])) for f in data.get("name_fixes") or []
+                         if isinstance(f, dict) and f.get("wrong") and f.get("correct")),
     )
 
 
