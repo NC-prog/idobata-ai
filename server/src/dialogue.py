@@ -54,6 +54,9 @@ _LEADING_PARTICLE_RE = re.compile(r"^(と聞かれると|とおっしゃると)[
 # 来訪者の言葉の繰り返しを比べるときに無視する文字
 _ECHO_IGNORE_RE = re.compile(r"[\s、。，．,.！？!?「」『』…ー〜~]")
 
+# 逆接で前置きを切る読点（「〜ですが、」「〜けど、」）
+_CONCESSIVE_RE = re.compile(r"(が|けど|けれど|けれども|ものの)、")
+
 # 話者の記号（WP02 B）。LLM には「A：〜」で渡す。応答の頭に付けてきたら外す
 _SPEAKER_LABEL_RE = re.compile(r"^[A-Z]{1,2}[：:]\s*")
 
@@ -481,6 +484,7 @@ class Dialogue:
                         logger.info("捨てた期限・金額を指す文を読み上げずに捨てました")
                         self.note_drop("捨てた期限・金額を指す文", sentence)
                         continue
+                    sentence = self._strip_judgment_clause(sentence)
                     if self._must_drop(sentence) or self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
                         continue
@@ -508,6 +512,7 @@ class Dialogue:
             if tail and dropped_echo and not sentences:
                 tail = _LEADING_PARTICLE_RE.sub("", tail)
             # 何も言っていないときの最後の文は捨てない（応答が空になる）
+            tail = self._strip_judgment_clause(tail)
             if tail and not self._must_drop(tail) and (
                     not sentences or not self._drop(tail, text, sentences, previous)):
                 sentences.append(tail)
@@ -715,6 +720,19 @@ class Dialogue:
     def _must_drop(self, sentence: str) -> bool:
         """応答が 1 文だけでも読み上げない文（聞き取りの外の個人情報の質問・医療や法律の判断）。"""
         return self._asks_personal(sentence) or self._judges_medical_or_legal(sentence)
+
+    def _strip_judgment_clause(self, sentence: str) -> str:
+        """「〜の症状にもなり得ますが、まずは医師に相談を」の、判断する前置きの節だけを外す（後ろの案内は残す）。"""
+        m = _CONCESSIVE_RE.search(sentence)
+        if m is None:
+            return sentence
+        head, rest = sentence[:m.end()], sentence[m.end():]
+        if rest and (self._medical_judgment_re.search(head) or self._legal_judgment_re.search(head)) \
+                and not (self._medical_judgment_re.search(rest) or self._legal_judgment_re.search(rest)):
+            logger.info("病気・法律の判断をする前置きの節を外しました")
+            self.note_drop("医療・法律の判断", head)
+            return rest
+        return sentence
 
     def _judges_medical_or_legal(self, sentence: str) -> bool:
         """病名・症状・障害・認知症などの見立てや、法的な可否を言う文か（「〜かもしれません」「違法です」）。"""

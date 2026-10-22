@@ -248,3 +248,10 @@ async def test_comma_fragment_about_deadline_is_judged_with_its_rest() -> None:
     ok = Reference("住民票などの郵便請求", "https://x", "| 種類 | 手数料 |\n| 住民票の写し | 200円 |", 0.9, 3.0)
     d = Dialogue(StreamLLM(["住民票の写しの手数料は、", "1通200円です。"]), DialogueConfig(), knowledge=_KB([ok]))
     assert await _collect(d, "住民票はいくら") == ["住民票の写しの手数料は、1通200円です。"]  # 資料にある金額は言う
+
+
+async def test_medical_judgment_with_naried_form_is_dropped() -> None:
+    d = Dialogue(StreamLLM(["それは心配ですね。", "認知症の初期症状の一つにもなり得ますが、", "まずは医師に相談してみてください。"]),
+                 DialogueConfig())
+    out = await _collect(d, "最近、物忘れがひどくて心配なんです")
+    assert "".join(out) == "それは心配ですね。まずは医師に相談してみてください。"
