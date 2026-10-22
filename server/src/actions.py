@@ -242,6 +242,11 @@ class Conversation:
             return self._pending.language
         return self._session.language if self._session is not None else "ja"
 
+    def note_opener(self, text: str) -> None:
+        """案内役から話しかけた切り出しを履歴に積む（LLM が挨拶を重ねない・同じ問いを繰り返さないように。WP02 C）。"""
+        self._ensure_session("ja")
+        self.dialogue.add_turn(self._cfg.opener_user_placeholder, text)
+
     def note_backchannel(self) -> None:
         # 相槌は応答より先に出るので、会話の最初の相槌のときはまだ会話が始まっていない
         self._ensure_session("ja")

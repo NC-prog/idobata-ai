@@ -279,6 +279,21 @@ class Weather:
             return []
         return format_weather(self._data, now)
 
+    def today(self, now: datetime, max_obs_age_sec: float = 3 * 3600) -> tuple[str | None, float | None]:
+        """今日の予報の天気（気象庁の文言のまま）と、今の気温（古ければ None）。切り出しの一言に使う（WP02 C）。"""
+        self.lines(now)  # 更新されていれば読み直す
+        weather = next((str(f.get("weather") or "") for f in self._data.get("forecasts", [])
+                        if f.get("date") == now.date().isoformat()), None)
+        temp = None
+        obs = self._data.get("observation") or {}
+        try:
+            age = (now.astimezone(JST) - datetime.fromisoformat(obs["observed_at"]).astimezone(JST)).total_seconds()
+            if 0 <= age <= max_obs_age_sec:
+                temp = float(obs["temp"])
+        except (KeyError, ValueError, TypeError):
+            pass
+        return weather or None, temp
+
     @classmethod
     def for_site(cls, data_dir: Path, site: str) -> Weather:
         return cls(data_dir / "kb" / site / "weather.json")

@@ -42,3 +42,33 @@ def load_openers(path: Path) -> Openers:
         silence=tuple(str(x) for x in data.get("silence") or []),
         farewell=tuple(str(x) for x in data.get("farewell") or []),
     )
+
+
+def opener_lines(op: Openers, greeting: str, weather: str | None, temp: float | None, n: int) -> list[str]:
+    """切り出しの文: 時間帯の挨拶 ＋ 季節・天気の一言（あれば）＋ 開いた問い 1 つ（n 回目の会話で回す）。
+
+    天気の一言は、寒暖が際立っていれば気温の一言、そうでなければ今日の予報の最初の天気（「晴れ　後　くもり」なら晴れ）。
+    """
+    lines = [op.greeting.format(greeting=greeting)]
+    line = None
+    if temp is not None and op.cold is not None and temp < op.cold[0]:
+        line = op.cold[1]
+    elif temp is not None and op.hot is not None and temp > op.hot[0]:
+        line = op.hot[1]
+    elif weather:
+        head = weather.replace("\u3000", " ").split()[0]
+        line = next((text for word, text in op.weather if word in head), None)
+    if line:
+        lines.append(line)
+    if op.questions:
+        lines.append(op.questions[n % len(op.questions)])
+    return lines
+
+
+def all_lines(op: Openers, greetings: list[str]) -> list[str]:
+    """事前に合成しておく文（切り出し・沈黙・別れの全部。決まった文だけなので起動時に合成できる）。"""
+    out = [op.greeting.format(greeting=g) for g in greetings]
+    out += [t for _, t in op.weather] + [x[1] for x in (op.cold, op.hot) if x is not None]
+    out += [*op.questions, *op.silence, *op.farewell]
+    return list(dict.fromkeys(out))
+

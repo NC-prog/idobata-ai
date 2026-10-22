@@ -22,6 +22,8 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass, replace
+from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -37,10 +39,10 @@ from .config import SERVER_ROOT, ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue, speech_text
 from .edge_bridge import EdgeBridge
 from .edge_server import AdminPanel, EdgeServer, StaffPanel
-from .knowledge import KnowledgeStore, Weather
+from .knowledge import JST, KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
-from .openers import load_openers
+from .openers import all_lines, load_openers, opener_lines
 from .persona import load_persona
 from .procedures import AsrFixes, load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
@@ -54,7 +56,7 @@ from .speech_output import (
     SpokenSentence,
     WavDirWriter,
 )
-from .timeofday import greeting_for
+from .timeofday import all_greetings, greeting_for
 from .transcripts import TranscriptStore
 from .tts_client import TTSClient
 from .vad import SpeechEventType, VADBackend, create_vad
@@ -69,6 +71,8 @@ _GATE_POLL_SEC = 0.05
 _IDLE_POLL_SEC = 1.0
 # 電話番号の聞き直しの前に、来訪者が話し終えるのを待つときの確認間隔
 _HEARING_POLL_SEC = 0.1
+# 沈黙の一言を言うかを確かめる間隔
+_SILENCE_POLL_SEC = 0.25
 
 
 @dataclass
@@ -136,11 +140,12 @@ class VoiceLoop:
         )
         # 拠点の固定事実（facility）はプロンプトに直書き。知識パックは run() で読む（数秒かかる）
         llm = LLMClient()
+        self._weather = Weather.for_site(config.data_dir, config.site)
         facility = load_facility(config.site, config.asr.site_context_dir)
         self._dialogue = Dialogue(
             llm,
             facility=facility,
-            weather=Weather.for_site(config.data_dir, config.site),
+            weather=self._weather,
             avatar_name=config.actions.avatar_name,
             enabled_actions=config.actions.enabled,
             persona=load_persona(config.persona),
@@ -198,6 +203,14 @@ class VoiceLoop:
         self._farewell_said = False
         # 発話区間の始まりの時点で輪があったか（始まりか終わりのどちらかで輪があれば聞く）
         self._party_at_start = True
+        # 切り出し・沈黙（WP02 C）: 決まった文の事前合成、この会話で切り出したか、沈黙の一言の回数、
+        # 最後に誰かが話した（来訪者の発話区間・案内役の読み上げの終わり）時刻、輪ができた時刻
+        self._tts_cache: dict[str, tuple[bytes, dict[str, Any]]] = {}
+        self._opener_said = False
+        self._opener_count = 0
+        self._silence_count = 0
+        self._last_activity = time.monotonic()
+        self._party_formed_at: float | None = None
         # エッジのページと職員パネル（/staff/）・管理者ページ（/admin/）は同じ HTTP サーバ。パネルだけでも立てる
         if edge or config.staff.password or config.admin.password:
             self._edge_server = EdgeServer(
@@ -233,6 +246,9 @@ class VoiceLoop:
             await self._backchannels.prepare(self._tts, config.actions.backchannel_prepare_budget_sec)
         if "lookup" in config.actions.enabled:
             await self._lookup.prepare()
+        if self._camera is not None:
+            await self._prepare_fixed_lines()
+            self._spawn(self._watch_silence(), "silence-watch")
         removed = self._referrals.cleanup() + self._visits.cleanup() + self._tidbits.cleanup()
         if removed:
             logger.info("保存期間を過ぎた紹介状・来訪記録・小ネタを %d 件消しました", removed)
@@ -407,6 +423,7 @@ class VoiceLoop:
                     preroll.clear()
                     t_speech_start = event.timestamp_sec
                     self._hearing = True
+                    self._last_activity = time.monotonic()
                     self._party_at_start = self._camera_listening()
                     await self._send_state("listening")
                 elif event.event_type == SpeechEventType.SPEECH_END:
@@ -415,6 +432,7 @@ class VoiceLoop:
                             await self._on_segment(segment_frames, t_speech_start)
                     finally:
                         self._hearing = False
+                        self._last_activity = time.monotonic()
                     segment_frames = []
             elif vad.in_speech:
                 segment_frames.append(frame)
@@ -536,7 +554,8 @@ class VoiceLoop:
     async def _end_conversation(self) -> None:
         """会話を区切る: 来訪記録を 1 行書いて、履歴・話者の区別を消し、待機の見た目に戻る。"""
         self._last_utterance_at = None
-        self._farewell_said = False
+        self._farewell_said = self._opener_said = False
+        self._silence_count = 0
         await self._conversation.end_session()
         self._speakers.reset()  # 話者の埋め込みも捨てる（メモリのみ）
         if self._asr is not None:
@@ -563,16 +582,67 @@ class VoiceLoop:
             await self._edge.send_json({"type": "party", "state": after.state.value, "count": after.count,
                                         "facing": after.facing})
         if after.state is PartyState.NONE:
-            if before.state is PartyState.PARTY or self._conversation.session_language is not None:
-                self._say_farewell()
+            self._say_farewell()
             if self._bye_task is None or self._bye_task.done():
                 self._bye_task = asyncio.create_task(self._bye_after_leave(), name="party-bye")
         elif self._bye_task is not None and not self._bye_task.done():
             self._bye_task.cancel()  # 戻ってきた: 会話は続ける
+        if after.state is PartyState.PARTY and before.state is not PartyState.PARTY:
+            self._party_formed_at = time.monotonic()
+            self._say_opener()
+
+    @property
+    def _talking(self) -> bool:
+        """この会話が始まっているか（切り出した、または来訪者が話した）。"""
+        return self._opener_said or self._conversation.session_language is not None
+
+    def _say_opener(self) -> None:
+        """輪ができた瞬間に、挨拶＋天気の一言＋開いた問いを定型で（LLM を通さず事前合成。1 会話 1 回）。"""
+        if self._opener_said or self._conversation.session_language is not None:
+            return  # 同じ会話の中で輪ができ直したときは言わない
+        weather, temp = self._weather.today(datetime.now(JST))
+        lines = opener_lines(self._openers, greeting_for(), weather, temp, self._opener_count)
+        self._opener_said = True
+        self._opener_count += 1
+        self._last_utterance_at = time.monotonic()  # 黙ったまま立ち去らなければ、待機タイムアウトでも区切る
+        self._conversation.note_opener("".join(lines))
+        logger.info("輪ができたので切り出します")
+        self._spawn(self._respond_and_speak("", "ja", None, source=lambda: _lines(*lines), trigger="opener"),
+                    "opener")
+
+    async def _watch_silence(self) -> None:
+        """輪のまま相手が party.silence_sec 黙ったら、沈黙の一言（1 会話 silence_max 回まで）。"""
+        cfg = config.party
+        while True:
+            await asyncio.sleep(_SILENCE_POLL_SEC)
+            if (self._camera is None or not self._camera.active
+                    or self._camera.snapshot.state is not PartyState.PARTY or not self._talking
+                    or self._silence_count >= cfg.silence_max or not self._openers.silence
+                    or self._turn_lock.locked() or self._turn_tasks or self._hearing or self._gate.is_muted
+                    or self._conversation.phone_deadline is not None
+                    or time.monotonic() - self._last_activity < cfg.silence_sec):
+                continue
+            line = self._openers.silence[self._silence_count % len(self._openers.silence)]
+            self._silence_count += 1
+            logger.info("輪のまま %.0f 秒黙っているので、沈黙の一言を言います（%d 回目）", cfg.silence_sec,
+                        self._silence_count)
+            await self._respond_and_speak("", "ja", None, source=partial(_lines, line), trigger="silence")
+
+    async def _prepare_fixed_lines(self) -> None:
+        """切り出し・沈黙・別れの決まった文を先に合成しておく（輪ができてから 0.5 秒以内に言い始めるため）。"""
+        t0 = time.monotonic()
+        for text in all_lines(self._openers, all_greetings()):
+            spoken = speech_text(text)
+            try:
+                self._tts_cache[spoken] = await self._tts.synthesize_with_query(spoken)
+            except httpx.HTTPError:
+                logger.warning("切り出しの文を事前に合成できませんでした（使うときに合成します）")
+        logger.info("切り出し・沈黙・別れの文を %d 件事前に合成しました（%.1f 秒）", len(self._tts_cache),
+                    time.monotonic() - t0)
 
     def _say_farewell(self) -> None:
         """輪が解けた直後に、別れの一言を 1 会話 1 回（会話が始まっていたときだけ）。"""
-        if self._farewell_said or self._conversation.session_language is None or not self._openers.farewell:
+        if self._farewell_said or not self._talking or not self._openers.farewell:
             return
         self._farewell_said = True
         line = self._openers.farewell[0]
@@ -586,7 +656,7 @@ class VoiceLoop:
             return
         while self._turn_lock.locked():  # 別れの一言を言い終えてから区切る
             await asyncio.sleep(_GATE_POLL_SEC)
-        if self._last_utterance_at is None and self._conversation.session_language is None:
+        if not self._talking:
             return  # 会話は始まっていない
         await self._end_conversation()
         logger.info("輪が無くなって %.0f 秒経ったため会話を区切りました", config.party.bye_sec)
@@ -663,7 +733,8 @@ class VoiceLoop:
                     if not spoken:
                         continue
                     try:
-                        wav, query = await self._tts.synthesize_with_query(spoken)
+                        cached = self._tts_cache.get(spoken)
+                        wav, query = cached if cached is not None else await self._tts.synthesize_with_query(spoken)
                     except httpx.HTTPError:
                         logger.warning("VOICEVOX 合成に失敗。この文は音声なしで続行します。")
                         continue
@@ -672,6 +743,9 @@ class VoiceLoop:
                         muted = True
                         if timing is not None:
                             timing.t_audio_start = time.monotonic()
+                        if trigger == "opener" and self._party_formed_at is not None:
+                            logger.info("切り出しの音声開始: 輪ができてから %.2f 秒",
+                                        time.monotonic() - self._party_formed_at)
                     try:
                         remaining = await sink.push(
                             SpokenSentence(utterance_id, seq, shown, wav, query)
@@ -700,6 +774,7 @@ class VoiceLoop:
                 print(f"[検索] {self._dialogue.last_search_ms:.0f}ms、"
                       f"参考資料 {len(self._dialogue.last_references)} 件")
             self._record_assistant(spoken_lines, timing, trigger)
+            self._last_activity = time.monotonic()  # 沈黙は、案内役が言い終えてから数える
         self._arm_phone_timer()
 
     def _arm_phone_timer(self) -> None:
