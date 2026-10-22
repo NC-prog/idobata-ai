@@ -15,5 +15,5 @@ server/static/edge/
 # 知識パック（実体は ~/idobata-data/kb/<site>/ へのシンボリックリンク）
 kb/pack/
 
-# 本番アバター（再配布不可。~/idobata-data/avatars/ に置き、フロントが配信する。WP08）
+# 本番アバター（再配布可だがサイズの都合で git に入れない。~/idobata-data/avatars/ に置き、フロントが配信する。WP08）
 idochan_*.vrm

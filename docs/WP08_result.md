@@ -11,31 +11,36 @@
 
 ### VRM 内のメタ情報（`VRMC_vrm.meta` をそのまま転記）
 
-2 体とも同じ値（サムネイル画像は除く）。
+2026-10-22 に 2 体とも書き出し直したものを読み直した。2 体とも同じ値（サムネイル画像は除く）。
 
 | 項目 | 値 |
 |---|---|
-| ファイル | `idochan_office.vrm`（16,229,680 バイト、sha256 `318dd4c4ed60658d5720d9456ac7302a996e09a055184a3c151cf01c6e733ddc`）<br>`idochan_festival.vrm`（19,469,116 バイト、sha256 `7117d062006fe77b4615a598e5fb10cac6ce9a64c77669065de31e333e4fe0a3`） |
+| ファイル | `idochan_office.vrm`（15,993,452 バイト、sha256 `b8cc5a6e9e1e4553585f97b85de195d22fd95af85411433fc4722d18bd8f5edf`）<br>`idochan_festival.vrm`（17,562,364 バイト、sha256 `dbb4c21139e254bfcf85c04427f2b2d6fd9f0138733d3890ac7bb2060bebd2ef`） |
 | 生成 | VRoid Studio-2.14.0（glTF 2.0、`VRMC_vrm` specVersion 1.0） |
 | name（タイトル） | いどちゃん |
-| authors（作者） | 富士製作所 |
-| copyrightInformation | @2026 Fuji Enginerring LLC |
+| authors（作者） | Fuji Engineering LLC / 富士製作所合同会社 |
+| copyrightInformation | ©Fuji Engineering LLC @2026 |
 | licenseUrl | https://vrm.dev/licenses/1.0/ |
-| avatarPermission | onlySeparatelyLicensedPerson（別途許諾を受けた人だけがアバターとして使える） |
+| avatarPermission | everyone（誰でもアバターとして使える） |
 | commercialUsage | corporation（法人の商用利用まで可） |
-| creditNotation | required（クレジット表記が必要） |
-| allowRedistribution | false（再配布不可） |
-| modification | prohibited（改変不可） |
+| creditNotation | unnecessary（クレジット表記不要） |
+| allowRedistribution | true（再配布可） |
+| modification | allowModification（改変可） |
 | allowExcessivelyViolentUsage | false |
 | allowExcessivelySexualUsage | false |
 | allowPoliticalOrReligiousUsage | false |
 | allowAntisocialOrHateUsage | false |
 
+前の書き出し（16,229,680 / 19,469,116 バイト）からの変更: authors「富士製作所」→ 上記、copyrightInformation
+「@2026 Fuji Enginerring LLC」→ 上記（綴りを直した）、avatarPermission onlySeparatelyLicensedPerson → everyone、
+creditNotation required → unnecessary、allowRedistribution false → true、modification prohibited → allowModification。
+表情のプリセット・視線（bone）・ヒューマノイドの骨 54 本は前と同じ（3 章の確認はそのまま当てはまる）。
+
 - 元は AvatarSample_W を当社が改変（作業指示より。VRM のメタには元モデルの記載は無い）
-- copyrightInformation の綴りは VRM に入っているまま（「Enginerring」）。直すなら VRoid Studio で書き出し直す
-- **再配布不可**なので、配信はエッジの許可（`IDOBATA_EDGE_ALLOW`、既定はこの機体だけ）の中に限る。`/edge/avatars/` は
+- **再配布可**になったが、モデルはサイズ（約 16〜18MB）の都合で git にもエッジのビルドにも入れない（`.gitignore` の `idochan_*.vrm` は残す）。
+  配信はこれまでどおりエッジの許可（`IDOBATA_EDGE_ALLOW`、既定はこの機体だけ）の中で、`/edge/avatars/` は
   `/edge/` と同じ許可の検査を通る（許可の無い機体からは 403、テストあり）
-- **クレジット表記が必要**: 画面のどこに出すか（エッジの隅・掲示物など）は未決（残っていること 1）
+- **クレジット表記は不要**になった（前の残っていること 1 は解消）
 
 ## 2. テーマの切り替え（`server/context/themes.yaml`、`src/themes.py`）
 
@@ -170,9 +175,9 @@ WP01 の `current_season` のテストは、暦のテストに置き換えて消
 
 ## 残っていること
 
-1. **クレジット表記**（`creditNotation: required`）をどこに出すか。エッジの画面の隅に小さく出すか、ロビーの掲示に書くか
+1. ~~クレジット表記をどこに出すか~~ → 書き出し直しで `creditNotation: unnecessary` になり不要（2026-10-22）
 2. お祭りの**期間**（市の行事の日付）を確かめて、themes.yaml の `calendar` に入れる
 3. 実機の Chrome（GPU）と縦置きのディスプレイで、構図と背景の明るさを見る（今回の画像はヘッドレスの SwiftShader）
 4. 実写の背景を市から受け取ったら `~/idobata-data/backgrounds/` に置く。実写は明るさが合わない可能性があるので、そのときに
    白いシャツとの境目を見る
-5. copyrightInformation の綴り（「Enginerring」）を直すか
+5. ~~copyrightInformation の綴り（「Enginerring」）~~ → 書き出し直しで「©Fuji Engineering LLC @2026」に直った（2026-10-22）

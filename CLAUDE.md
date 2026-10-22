@@ -20,7 +20,7 @@
   セッション限りの話者の区別（ECAPA、A・B…）、能動的な切り出し・沈黙・別れ、別機エッジの設計。結果は `docs/WP02_result.md`
 - WP07（現在）: 紹介状の連絡方法と電話番号（電話なら番号がそろうまで保存しない）、保存の後に来訪者が触れた項目だけ伺い直す、
   根拠の無い期限・金額・支払方法を言わない、定型の一言を履歴に。結果は `docs/WP07_result.md`
-- WP08（現在）: 本番アバター（`~/idobata-data/avatars/` の idochan_office / idochan_festival、**再配布不可・git に入れない**。
+- WP08（現在）: 本番アバター（`~/idobata-data/avatars/` の idochan_office / idochan_festival。作者 Fuji Engineering LLC / 富士製作所合同会社、改変可・再配布可・クレジット不要。**サイズの都合で git に入れない**。
   フロントが `/edge/avatars/` で配信）とテーマ（`server/context/themes.yaml`。拠点×季節のアバター・背景・季節の一言、暦で自動、
   職員パネルから手動。**会話中は切り替えない**）。背景は `~/idobata-data/backgrounds/`（実写）が優先、無ければ仮置き。結果は `docs/WP08_result.md`
 - 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
