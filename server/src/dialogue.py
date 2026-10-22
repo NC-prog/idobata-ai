@@ -774,7 +774,9 @@ class Dialogue:
         if self._avatar_name:  # 「いどちゃん: こんばんは」のような話者名は外す
             # 「いどちゃん: …」「いどちゃんは、…」「いどちゃん物忘れが…」の頭の名前を外す（「いどちゃんです」は残す）
             name = re.escape(self._avatar_name)
-            sentence = re.sub(rf"^{name}\s*(?:[:：、]|[はも]、)\s*|^{name}(?=[一-龥ァ-ヶ])", "", sentence)
+            # 「いどちゃんの応答：…」の形も外す（WP06 の評価で出た）
+            sentence = re.sub(rf"^{name}(?:の(?:応答|返答|返事|答え|発言))?\s*(?:[:：、]|[はも]、)\s*"
+                              rf"|^{name}(?=[一-龥ァ-ヶ])", "", sentence)
         for old, new in self._cfg.leak_replacements:
             sentence = sentence.replace(old, new)
         if self._llm_source_re.search(sentence):

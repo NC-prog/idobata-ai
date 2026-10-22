@@ -359,3 +359,8 @@ async def test_refer_tag_on_plain_smalltalk_is_dropped(tmp_path: Path) -> None:
     out = await _say(c, "あなたは市役所の職員さんですか")
     assert "".join(out) == "はい、臨時職員です。" and c.phase == "listen"  # 提案文を付けない
 
+
+async def test_speaker_label_with_response_word_is_removed() -> None:
+    d = Dialogue(StubLLM(["いどちゃんの応答：専門の窓口にも相談できます。"]), DialogueConfig(), avatar_name="いどちゃん")
+    assert await _collect(d, "最近物忘れがひどくて") == ["専門の窓口にも相談できます。"]
+
