@@ -658,7 +658,7 @@ async def test_refer_phone_said_earlier_is_read_back_and_can_be_dropped(tmp_path
         out = await _say(c, answer)
     assert out == [R["confirm_phone"].format(phone="0 9 0、1 2 3 4、5 6 7 8")]
     out = await _say(c, "違います")
-    assert out[0] == R["phone_wrong"]
+    assert out[0].startswith(R["phone_wrong"])  # 連絡方法が電話でなければ、番号は控えずに保存
     assert _saved(tmp_path).phone is None and _saved(tmp_path).department == "高齢介護課"
 
 
@@ -878,7 +878,7 @@ async def test_phone_timeout_reasks_once_then_saves_without_number(tmp_path: Pat
     assert await _say(c, "090の") == []
     clock.t += 6.1
     out = [s async for s in c.on_phone_timeout()]
-    assert out[0].startswith(R["phone_wrong"]) and c.last_receipt in out[0]
+    assert out[0].startswith(R["phone_at_counter"]) and c.last_receipt in out[0]  # 窓口で伺うと伝える
     assert _saved(tmp_path).phone is None
 
 

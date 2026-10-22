@@ -568,8 +568,14 @@ class VoiceLoop:
     # ------------------------------------------------------------------
 
     def _camera_listening(self) -> bool:
-        """対話に流してよいか（輪がある。カメラが無い・止まっているときは従来どおり聞く）。"""
-        return self._camera is None or self._camera.listening
+        """対話に流してよいか（輪がある。カメラが無い・止まっているときは従来どおり聞く）。
+
+        紹介状の聞き取りの途中は、近くにいれば（PRESENT）正面を向いていなくても聞く。携帯やメモを見ながら
+        電話番号を読み上げると顔が下を向き、輪から外れて番号が聞こえなくなるため（WP07）。
+        """
+        if self._camera is None or self._camera.listening:
+            return True
+        return self._conversation.acting and self._camera.snapshot.state is PartyState.PRESENT
 
     def _camera_state(self) -> dict[str, Any]:
         if self._camera is None:
@@ -635,6 +641,7 @@ class VoiceLoop:
                 continue
             line = self._openers.silence[self._silence_count % len(self._openers.silence)]
             self._silence_count += 1
+            self._conversation.note_assistant_line(line)
             logger.info("輪のまま %.0f 秒黙っているので、沈黙の一言を言います（%d 回目）", cfg.silence_sec,
                         self._silence_count)
             await self._respond_and_speak("", "ja", None, source=partial(_lines, line), trigger="silence")
@@ -657,6 +664,7 @@ class VoiceLoop:
             return
         self._farewell_said = True
         line = self._openers.farewell[0]
+        self._conversation.note_assistant_line(line)
         logger.info("輪が解けたので別れの一言を言います")
         self._spawn(self._respond_and_speak("", "ja", None, source=lambda: _lines(line), trigger="farewell"),
                     "farewell")

@@ -26,7 +26,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +131,8 @@ class Pending:
     consent_speaker: str | None = None
     # 提案の返事待ちに黙られて、提案をもう一度言ったか（1 回だけ。WP02 C）
     silence_reasked: bool = False
+    # 保存の後に、来訪者が触れた項目だけ聞き取りを再開したとき: 書き直す紹介状の (ID, 日付)（WP07）
+    reopen: tuple[str, str] | None = None
 
 
 @dataclass
@@ -205,6 +207,8 @@ class Conversation:
         self._saved_at: float | None = None
         self._history_note: tuple[str, str] | None = None
         self._saving = False
+        # この会話で保存した紹介状 (ID, 日付, 受付番号)。保存の後に来訪者が触れた項目を書き足すのに使う（WP07）
+        self._saved_referral: tuple[str, str, str] | None = None
         # このターンの発話を、電話番号の続きを待つために返事をせずに預かったか
         self._held = False
         # このターンの行為（文字記録用）: 提案した行為、返事をした相手の行為と段、その結果
@@ -255,6 +259,16 @@ class Conversation:
         logger.info("提案の返事待ちに黙っているので、提案をもう一度言います（%s）", p.action)
         return line
 
+    def note_assistant_line(self, text: str) -> None:
+        """案内役から言った定型の一言（沈黙・別れ）を履歴に積む（LLM が同じ問いを繰り返さないように。WP07）。
+
+        直前の応答の後ろに足す（来訪者はその間に何も言っていない）。履歴が空なら切り出しと同じ形で 1 ターンにする。
+        """
+        if self.dialogue.history:
+            self.dialogue.extend_last_reply(text)
+        else:
+            self.note_opener(text)
+
     def note_opener(self, text: str) -> None:
         """案内役から話しかけた切り出しを履歴に積む（LLM が挨拶を重ねない・同じ問いを繰り返さないように。WP02 C）。"""
         self._ensure_session("ja")
@@ -282,6 +296,7 @@ class Conversation:
         session, history = self._session, self.dialogue.history
         self._session, self._pending = None, None
         self._saved_at, self._history_note = None, None
+        self._saved_referral = None
         self._turns = []
         self._private_values = set()
         self.dialogue.reset()
@@ -350,6 +365,20 @@ class Conversation:
             async for s in self._on_reply(text):
                 yield s
             self._after_action = self._pending is None
+            return
+        item = self._reopen_item(text)
+        if item is not None and self._saved_referral is not None:
+            # 保存の後に来訪者の側から触れた: その項目だけ聞き取りを再開する（LLM には聞かせない。
+            # 「保存の後は氏名・電話を尋ねる文を捨てる」規則の、来訪者から触れたときだけの例外）
+            ref_id, day, _receipt = self._saved_referral
+            phase = {"phone": "ask_phone", "name": "ask_name", "area": "ask_area"}[item]
+            self._pending = Pending("refer", text, language, turn_index=index, speaker=self._speaker,
+                                    phase=phase, reopen=(ref_id, day), contact_pref="電話" if item == "phone" else "未定")
+            logger.info("保存の後に来訪者が %s に触れたので、その項目だけ伺い直します", item)
+            ask = {"phone": "ask_phone", "name": "ask_name", "area": "ask_area"}[item]
+            line = self._t("refer", "reopen") + self._t("refer", ask)
+            self.dialogue.add_turn(text, line)
+            yield line
             return
 
         reply: list[str] = []
@@ -534,12 +563,28 @@ class Conversation:
                 lines.append(s)
                 yield s
         elif p.phase == "confirm_phone":
-            if verdict == "no":
-                p.phone = None
-                line = self._t("refer", "phone_wrong")
+            if verdict == "no" and p.contact_pref == "電話" and not p.phone_reasked:
+                # 連絡方法が電話: 番号がそろうまで保存しない（1 回だけ言い直してもらう）
+                p.phone, p.phone_reasked, p.phase = None, True, "ask_phone"
+                line = self._t("refer", "phone_reask")
                 lines.append(line)
                 yield line
-            async for s in self._finish_referral(p):
+            else:
+                prefix = ""
+                if verdict == "no":
+                    p.phone = None
+                    prefix = self._t("refer", "phone_at_counter" if p.contact_pref == "電話" else "phone_wrong")
+                async for s in self._finish_referral(p, prefix=prefix):
+                    lines.append(s)
+                    yield s
+        elif p.phase == "confirm_contact":
+            if verdict == "yes":
+                p.contact_pref = "電話"
+            else:
+                # 「いいえ、待ちます」のように別の方法を言っていればそれ、無ければ未定
+                others = [c for c in self._contact_choices(text) if c != "電話"]
+                p.contact_pref = others[0] if len(others) == 1 else "未定"
+            async for s in self._after_contact(p, text if verdict == "yes" else ""):
                 lines.append(s)
                 yield s
         elif p.phase == "confirm_share":
@@ -559,6 +604,8 @@ class Conversation:
         self.dialogue.add_turn(user, assistant)
 
     def _reask_line(self, p: Pending) -> str:
+        if p.phase == "confirm_contact":
+            return self._t("refer", "confirm_contact")
         if p.phase == "confirm_phone":
             return self._t("refer", "confirm_phone", phone=phone_for_speech(p.phone or ""))
         if p.phase == "confirm_name":
@@ -686,39 +733,58 @@ class Conversation:
                 if not self._full_address(p):
                     area = re.sub(cfg.address_number_pattern, "", area).strip("。、 ")
                 p.address_area = area[:40] or None
+            if p.reopen is not None:
+                async for s in self._finish_referral(p, prefix=ack):  # 保存の後にお住まいだけ伺い直した
+                    yield s
+                return
             p.phase = "ask_contact"
             yield ack + self._t("refer", "ask_contact")
         elif p.phase == "ask_contact":
-            contact = next((v for pat, v in cfg.contact_rules if re.search(pat, text)), None)
-            p.contact_pref = contact or "未定"
+            matched = self._contact_choices(text)
             phone = find_phone(text)
             if phone:
                 p.phone = phone
-            if p.phone:
-                p.phase, p.reasks = "confirm_phone", 0
-                yield self._t("refer", "confirm_phone", phone=phone_for_speech(p.phone))
-            elif phone_digits(text):
-                # 番号を区切って言い始めた（「090の」）: 続きを待って連結する
-                if p.contact_pref == "未定":
-                    p.contact_pref = "電話"
-                p.phase = "ask_phone"
-                async for s in self._collect_phone(p, text, skipped=False):
-                    yield s
-            elif p.contact_pref == "電話":
-                p.phase = "ask_phone"
-                yield self._t("refer", "ask_phone")
-            else:
-                async for s in self._finish_referral(p):
-                    yield s
+            if phone or phone_digits(text):
+                matched = ["電話"]  # 番号を言い始めた（「090の」）なら電話
+            if len(matched) != 1:
+                # 判定できない（どれにも当たらない・2 つ以上に当たる）: 電話か確かめる
+                logger.info("連絡方法を判定できないので、お電話かを確かめます（候補 %d）", len(matched))
+                p.phase, p.reasks = "confirm_contact", 0
+                yield self._t("refer", "confirm_contact")
+                return
+            p.contact_pref = matched[0]
+            async for s in self._after_contact(p, text):
+                yield s
         elif p.phase == "ask_phone":
             async for s in self._collect_phone(p, text, skipped):
+                yield s
+
+    def _contact_choices(self, text: str) -> list[str]:
+        return list(dict.fromkeys(v for pat, v in self._ref_cfg.contact_rules if re.search(pat, text)))
+
+    async def _after_contact(self, p: Pending, text: str = "") -> AsyncIterator[str]:
+        """連絡方法が決まった後: 電話なら番号がそろうまで保存しない。それ以外は保存する。"""
+        if p.phone:
+            p.phase, p.reasks = "confirm_phone", 0
+            yield self._t("refer", "confirm_phone", phone=phone_for_speech(p.phone))
+        elif p.contact_pref == "電話" and phone_digits(text):
+            p.phase = "ask_phone"  # 番号を区切って言い始めた: 続きを待って連結する
+            async for s in self._collect_phone(p, text, skipped=False):
+                yield s
+        elif p.contact_pref == "電話":
+            p.phase = "ask_phone"
+            yield self._t("refer", "ask_phone")
+        else:
+            async for s in self._finish_referral(p):
                 yield s
 
     async def _collect_phone(self, p: Pending, text: str, skipped: bool) -> AsyncIterator[str]:
         """電話番号の断片を連結する。10〜11 桁にそろったら復唱、まだなら続きを待つ（何も言わない）。"""
         if skipped:
-            p.phone_buf, p.phone_deadline = "", None
-            async for s in self._finish_referral(p, prefix=self._t("refer", "skipped")):
+            # 言わない・分からない: 番号なしで保存して、窓口で伺うと伝える
+            p.phone_buf, p.phone_deadline, p.phone = "", None, None
+            logger.info("電話番号を言わないとのことなので、番号なしで紹介状を作ります")
+            async for s in self._finish_referral(p, prefix=self._t("refer", "phone_at_counter")):
                 yield s
             return
         p.phone_buf += phone_digits(text)
@@ -747,7 +813,7 @@ class Conversation:
             return
         logger.info("電話番号がそろわないので、番号なしで紹介状を作ります")
         p.phone = None
-        async for s in self._finish_referral(p, prefix=self._t("refer", "phone_wrong")):
+        async for s in self._finish_referral(p, prefix=self._t("refer", "phone_at_counter")):
             yield s
 
     @property
@@ -791,7 +857,10 @@ class Conversation:
         return (digits_only and bool(phone_digits(text))) or short
 
     async def _on_confirm_name(self, p: Pending, ok: bool) -> AsyncIterator[str]:
-        if ok:
+        if ok and p.reopen is not None:
+            async for s in self._finish_referral(p):  # 保存の後にお名前だけ伺い直した
+                yield s
+        elif ok:
             async for s in self._ask_area(p, ""):
                 yield s
         elif not p.name_retry:
@@ -822,6 +891,10 @@ class Conversation:
 
     async def _save_referral(self, p: Pending, prefix: str) -> AsyncIterator[str]:
         assert self._referrals is not None
+        if p.reopen is not None:
+            async for s in self._update_referral(p, prefix):
+                yield s
+            return
         if self._on_state is not None:
             await self._on_state("thinking")
         fields = await self._structure_referral(self._refer_window(p), p)
@@ -832,6 +905,7 @@ class Conversation:
             yield prefix + self._t("refer", "failed")
             return
         self.last_receipt = ref.receipt
+        self._saved_referral = (ref.id, ref.created_at[:10], ref.receipt)
         # 会話を仕切り直す: 聞き取りの質問と答えは履歴から外し、受付の 1 行だけを残す（_add_turn）
         self._saved_at = self._clock()
         unknown_dept = ref.department in ("", UNSPECIFIED_DEPARTMENT)
@@ -850,6 +924,35 @@ class Conversation:
         if item:
             line += self._t("refer", "bring", item=item)
         yield line
+
+    async def _update_referral(self, p: Pending, prefix: str) -> AsyncIterator[str]:
+        """保存の後に伺い直した項目だけを、同じ紹介状に書き足す。"""
+        assert self._referrals is not None and p.reopen is not None
+        ref_id, day = p.reopen
+        fields: dict[str, str | None] = {"name": p.name, "phone": p.phone, "address_area": p.address_area}
+        if p.phone:
+            fields["contact_pref"] = "電話"
+        if not any(fields.values()):
+            yield prefix + self._t("refer", "update_skipped")
+            return
+        try:
+            ref = await asyncio.to_thread(self._referrals.update_contact, ref_id, date.fromisoformat(day), **fields)
+        except Exception:
+            logger.exception("紹介状を書き直せません")
+            ref = None
+        if ref is None:
+            yield prefix + self._t("refer", "failed")
+            return
+        logger.info("保存の後に伺った項目を紹介状に書き足しました: 受付 %s（%s）", ref.receipt,
+                    "・".join(k for k, v in fields.items() if v))
+        self._saved_at = self._clock()
+        yield prefix + self._t("refer", "updated", number=ref.receipt)
+
+    def _reopen_item(self, text: str) -> str | None:
+        """保存の後に、来訪者がお名前・お電話番号・お住まいに触れたらその項目（無ければ None）。"""
+        if self._saved_referral is None or self._referrals is None:
+            return None
+        return next((item for item, pat in self._ref_cfg.reopen_patterns if re.search(pat, text)), None)
 
     def _transcript(self, history: list[tuple[str, str]]) -> str:
         return "\n".join(f"来訪者: {u}\n案内役: {a}" for u, a in history)
@@ -929,6 +1032,12 @@ class Conversation:
         """いまの返事が個人の情報か（字幕・コンソールでは「お名前：伺いました」のように伏せる）。"""
         p = self._pending
         return _PRIVATE_LABELS.get(p.phase) if p is not None else None
+
+    @property
+    def acting(self) -> bool:
+        """紹介状の聞き取りの途中か（同意の後。提案の返事待ちは含まない）。"""
+        p = self._pending
+        return p is not None and p.action == "refer" and p.phase != "proposed"
 
     @property
     def expects_short_reply(self) -> bool:
@@ -1052,7 +1161,8 @@ class Conversation:
 # 自由な答えを待つ段（はい・いいえで判定しない）と、個人の情報を答える段
 _FREE_ANSWER_PHASES = frozenset({"intake", "ask_name", "ask_area", "ask_contact", "ask_phone"})
 _PRIVATE_LABELS = {"ask_name": "お名前", "confirm_name": "お名前", "ask_area": "お住まい",
-                   "ask_contact": "ご連絡方法", "ask_phone": "お電話番号", "confirm_phone": "お電話番号"}
+                   "ask_contact": "ご連絡方法", "confirm_contact": "ご連絡方法",
+                   "ask_phone": "お電話番号", "confirm_phone": "お電話番号"}
 _PAREN_RE = re.compile(r"（(.*?)）")
 
 

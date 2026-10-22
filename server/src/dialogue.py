@@ -58,6 +58,16 @@ _ECHO_IGNORE_RE = re.compile(r"[\s、。，．,.！？!?「」『』…ー〜~]"
 _SPEAKER_LABEL_RE = re.compile(r"^[A-Z]{1,2}[：:]\s*")
 
 
+def grounding_overlap(sentence: str, source: str) -> float:
+    """文の文字 2-gram のうち、資料にもあるものの割合（句読点・空白は除く）。"""
+    def grams(t: str) -> set[str]:
+        t = _ECHO_IGNORE_RE.sub("", t)
+        return {t[i:i + 2] for i in range(len(t) - 1)}
+
+    g = grams(sentence)
+    return len(g & grams(source)) / len(g) if g else 0.0
+
+
 def labeled(text: str, speaker: str | None) -> str:
     """LLM と履歴に渡す来訪者の発話（話者の記号があれば「A：〜」）。"""
     return f"{speaker}：{text}" if speaker else text
@@ -282,6 +292,10 @@ class Dialogue:
             rf"(?:{self._cfg.medical_subject_pattern})[^。！？!?]{{0,20}}(?:{self._cfg.judgment_pattern})")
         self._legal_judgment_re = re.compile(self._cfg.legal_judgment_pattern)
         self._meta_leak_re = re.compile(self._cfg.meta_leak_pattern)
+        self._money_deadline_re = re.compile(self._cfg.money_deadline_pattern)
+        # 期限・金額の根拠にしてよい固定事実（開庁時間・補足・緊急連絡先）
+        self._fact_texts = ([facility.hours, *facility.notes, *(f"{e.name}{e.number}" for e in facility.emergency_lines)]
+                            if facility else [])
         self._residence_question_re = re.compile(self._cfg.residence_question_pattern)
         self._residence_allow_re = re.compile(self._cfg.residence_question_allow_pattern)
         # (user, assistant) の組を直近 history_turns 件だけ保持する
@@ -442,12 +456,18 @@ class Dialogue:
         expected_dept = self._expected_department(text)
         dept_state = expected_dept is None
         cited: set[int] = set()
+        cautioned = False
         try:
             async for delta in self._stream(messages):
                 for raw in splitter.feed(think.feed(delta)):
                     sentence = await self._finish_sentence(raw, cited)
                     sentence, dept_state = self._fix_department(sentence, expected_dept, dept_state)
                     sentence = self._fix_floor_of_last_department(sentence, sentences)
+                    if self._ungrounded_claim(sentence, refs):
+                        # 根拠の無い期限・金額・支払方法: 捨てて、確認をすすめる一言を 1 回だけ
+                        if cautioned:
+                            continue
+                        sentence, cautioned = self._cfg.grounding_caution, True
                     if self._must_drop(sentence) or self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
                         continue
@@ -467,6 +487,8 @@ class Dialogue:
             tail = await self._finish_sentence(splitter.flush(), cited)
             tail, dept_state = self._fix_department(tail, expected_dept, dept_state)
             tail = self._fix_floor_of_last_department(tail, sentences)
+            if self._ungrounded_claim(tail, refs):
+                tail = "" if cautioned else self._cfg.grounding_caution
             if tail and dropped_echo and not sentences:
                 tail = _LEADING_PARTICLE_RE.sub("", tail)
             # 何も言っていないときの最後の文は捨てない（応答が空になる）
@@ -652,6 +674,18 @@ class Dialogue:
         logger.warning("紹介状の聞き取りの外で、氏名・電話番号・住所を尋ねる文を LLM が出したので読み上げずに捨てました")
         logger.debug("捨てた文: %s", sentence)
         self.note_drop("聞き取りの外の個人情報の質問", sentence)
+        return True
+
+    def _ungrounded_claim(self, sentence: str, refs: list[Reference]) -> bool:
+        """期限・金額・支払方法を言う文で、参考資料（と固定事実）のどれとも文字 2-gram の重なりが足りないか（WP07）。"""
+        if not sentence or not self._money_deadline_re.search(sentence):
+            return False
+        sources = [f"{r.title}{r.text}" for r in refs] + [t for t in self._fact_texts if t]
+        best = max((grounding_overlap(sentence, src) for src in sources), default=0.0)
+        if best >= self._cfg.grounding_min_overlap:
+            return False
+        logger.info("参考資料に根拠の無い期限・金額・支払方法の文を読み上げずに捨てました（重なり %.2f）", best)
+        self.note_drop("根拠の無い期限・金額・支払方法", sentence)
         return True
 
     def _must_drop(self, sentence: str) -> bool:

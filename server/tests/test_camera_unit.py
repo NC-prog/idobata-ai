@@ -146,6 +146,7 @@ async def test_farewell_once_and_bye_ends_conversation(monkeypatch: Any) -> None
     app._conversation._ensure_session("ja")
     assert app._conversation._session is not None
     app._conversation._session.turns = 2  # 会話の途中
+    app._conversation._visits = None  # 来訪記録（会話のタグ付けに LLM を呼ぶ）はこのテストでは書かない
     app._last_utterance_at = time.monotonic()
     party, none = PartySnapshot(PartyState.PARTY, 1, True), PartySnapshot(PartyState.NONE, 0, False)
     app._camera.tracker.snapshot = none

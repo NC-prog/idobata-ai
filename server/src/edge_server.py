@@ -212,14 +212,45 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
 
 _DEBUG_HTML = """<!doctype html><meta charset="utf-8"><title>井戸端AI カメラ（デバッグ）</title>
 <body style="margin:0;background:#111;color:#ccc;font:14px sans-serif">
-<p style="margin:8px">検出の矩形とキーポイント（メモリ上の最新の 1 枚だけ。保存しない）。<span id="s"></span></p>
-<img id="f" style="width:640px;image-rendering:pixelated">
+<p style="margin:8px">検出の矩形とキーポイント（メモリ上の最新の 1 枚だけ。保存しない）。<span id="s">状態を待っています</span></p>
+<p id="e" style="margin:8px;color:#f99">画像を待っています</p>
+<img id="f" alt="検出の重ね描き" style="display:block;width:640px;min-height:360px;background:#222;image-rendering:pixelated">
 <script>
-const f = document.getElementById("f"), s = document.getElementById("s");
-setInterval(async () => {
-  const r = await fetch("/edge/debug/party"); if (r.ok) s.textContent = JSON.stringify(await r.json());
-  f.src = "/edge/debug.jpg?t=" + Date.now();
-}, 300);
+// 画像は 1 枚ずつ順に取る（前の読み込みが終わる前に src を差し替えると、応答の遅いときにいつまでも表示されない）。
+// fetch（キャッシュしない）→ Blob の URL で表示。まだフレームが無い（404）・失敗したときは文で知らせて少し待つ
+const f = document.getElementById("f"), s = document.getElementById("s"), e = document.getElementById("e");
+let shown = null;
+async function loadFrame() {
+  let wait = 200;
+  try {
+    const r = await fetch("/edge/debug.jpg?t=" + Date.now(), {cache: "no-store"});
+    if (r.ok) {
+      const url = URL.createObjectURL(await r.blob());
+      f.src = url;
+      if (shown) URL.revokeObjectURL(shown);
+      shown = url;
+      e.textContent = "";
+    } else {
+      e.textContent = r.status === 404 ? "まだ画像がありません（カメラのフレーム待ち）" : "画像を読めません（" + r.status + "）";
+      wait = 1000;
+    }
+  } catch (err) {
+    e.textContent = "画像を読めません（" + err + "）";
+    wait = 1000;
+  }
+  setTimeout(loadFrame, wait);
+}
+async function loadState() {
+  try {
+    const r = await fetch("/edge/debug/party", {cache: "no-store"});
+    if (r.ok) s.textContent = JSON.stringify(await r.json());
+  } catch (err) {
+    s.textContent = "状態を読めません";
+  }
+  setTimeout(loadState, 500);
+}
+loadFrame();
+loadState();
 </script>"""
 
 DebugFrame = Callable[[], bytes | None]

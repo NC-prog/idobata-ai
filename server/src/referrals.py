@@ -215,6 +215,17 @@ class ReferralStore:
         self.save(ref)
         return ref
 
+    def update_contact(self, ref_id: str, d: date, **fields: str | None) -> Referral | None:
+        """来訪者が保存の後に言い足した氏名・電話番号・地区・連絡方法を書き足す（WP07）。"""
+        ref = self.find(ref_id, d)
+        if ref is None:
+            return None
+        for key in ("name", "phone", "address_area", "contact_pref"):
+            if key in fields and fields[key] is not None:
+                setattr(ref, key, fields[key])
+        self.save(ref)
+        return ref
+
     def _write_csv(self, d: date) -> None:
         path = self.root / f"{d.isoformat()}.csv"
         tmp = path.with_suffix(".tmp")
