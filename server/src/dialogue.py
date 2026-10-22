@@ -293,6 +293,8 @@ class Dialogue:
         self._legal_judgment_re = re.compile(self._cfg.legal_judgment_pattern)
         self._meta_leak_re = re.compile(self._cfg.meta_leak_pattern)
         self._money_deadline_re = re.compile(self._cfg.money_deadline_pattern)
+        self._claim_re = re.compile(self._cfg.grounding_claim_pattern)
+        self._dangling_re = re.compile(self._cfg.grounding_dangling_pattern)
         # 期限・金額の根拠にしてよい固定事実（開庁時間・補足・緊急連絡先）
         self._fact_texts = ([facility.hours, *facility.notes, *(f"{e.name}{e.number}" for e in facility.emergency_lines)]
                             if facility else [])
@@ -457,10 +459,17 @@ class Dialogue:
         dept_state = expected_dept is None
         cited: set[int] = set()
         cautioned = False
+        # 読点で早めに切った 1 文目の頭（「納期限は、」）が期限・金額に触れていたら、続きと合わせてから根拠を見る
+        # （先に読み上げると、続きを捨てたときに「納期限は、詳しい期限や金額は…」とつながってしまう）
+        held = ""
         try:
             async for delta in self._stream(messages):
                 for raw in splitter.feed(think.feed(delta)):
-                    sentence = await self._finish_sentence(raw, cited)
+                    sentence = held + await self._finish_sentence(raw, cited)
+                    held = ""
+                    if sentence.endswith(("、", ",")) and self._money_deadline_re.search(sentence):
+                        held = sentence
+                        continue
                     sentence, dept_state = self._fix_department(sentence, expected_dept, dept_state)
                     sentence = self._fix_floor_of_last_department(sentence, sentences)
                     if self._ungrounded_claim(sentence, refs):
@@ -468,6 +477,10 @@ class Dialogue:
                         if cautioned:
                             continue
                         sentence, cautioned = self._cfg.grounding_caution, True
+                    elif cautioned and self._dangling_re.search(sentence):
+                        logger.info("捨てた期限・金額を指す文を読み上げずに捨てました")
+                        self.note_drop("捨てた期限・金額を指す文", sentence)
+                        continue
                     if self._must_drop(sentence) or self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
                         continue
@@ -484,11 +497,14 @@ class Dialogue:
                 return
             # 言いかけの残りは捨て、言えた文だけを履歴に積む
         else:
-            tail = await self._finish_sentence(splitter.flush(), cited)
+            tail = held + await self._finish_sentence(splitter.flush(), cited)
             tail, dept_state = self._fix_department(tail, expected_dept, dept_state)
             tail = self._fix_floor_of_last_department(tail, sentences)
             if self._ungrounded_claim(tail, refs):
                 tail = "" if cautioned else self._cfg.grounding_caution
+            elif cautioned and self._dangling_re.search(tail):
+                self.note_drop("捨てた期限・金額を指す文", tail)
+                tail = ""
             if tail and dropped_echo and not sentences:
                 tail = _LEADING_PARTICLE_RE.sub("", tail)
             # 何も言っていないときの最後の文は捨てない（応答が空になる）
@@ -684,11 +700,15 @@ class Dialogue:
         """期限・金額・支払方法を言う文で、参考資料（と固定事実）のどれとも文字 2-gram の重なりが足りないか（WP07）。"""
         if not sentence or not self._money_deadline_re.search(sentence):
             return False
-        sources = [f"{r.title}{r.text}" for r in refs] + [t for t in self._fact_texts if t]
+        sources = [f"{r.title}{r.text}".translate(_ZEN_DIGITS) for r in refs] + [t for t in self._fact_texts if t]
         best = max((grounding_overlap(sentence, src) for src in sources), default=0.0)
-        if best >= self._cfg.grounding_min_overlap:
+        # 数（単位つき）と支払方法の語は、資料のどれかにそのまま無ければ根拠なし（主語の語だけで重なりが足りてしまうため）
+        claims = self._claim_re.findall(sentence.translate(_ZEN_DIGITS))
+        missing = [c for c in claims if not any(c in src for src in sources)]
+        if best >= self._cfg.grounding_min_overlap and not missing:
             return False
-        logger.info("参考資料に根拠の無い期限・金額・支払方法の文を読み上げずに捨てました（重なり %.2f）", best)
+        logger.info("参考資料に根拠の無い期限・金額・支払方法の文を読み上げずに捨てました（重なり %.2f、資料に無い語 %d）",
+                    best, len(missing))
         self.note_drop("根拠の無い期限・金額・支払方法", sentence)
         return True
 

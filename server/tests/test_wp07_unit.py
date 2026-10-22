@@ -236,3 +236,15 @@ async def test_umbrella_follows_the_day_and_tag_leak_is_dropped() -> None:
     assert await _collect(d, "明日は雨が降りますか") == ["明日は夜遅く雨の予報です。", "傘をお持ちください。"]
     d = Dialogue(StreamLLM(["オレンジドクターに相談してみてください。", "提案する：参照する"]), DialogueConfig())
     assert await _collect(d, "物忘れが") == ["オレンジドクターに相談してみてください。"]
+
+
+async def test_comma_fragment_about_deadline_is_judged_with_its_rest() -> None:
+    ref = Reference("国民健康保険税の納付について", "https://x", "国民健康保険税は年10回に分けて納めます。", 0.9, 3.0)
+    d = Dialogue(StreamLLM(["国民健康保険税の納期限は、", "毎年1月31日までです。", "この期限までに必ず納めてくださいね。",
+                            "税務課でご案内します。"]),
+                 DialogueConfig(), knowledge=_KB([ref]))
+    out = await _collect(d, "国保税はいつまでに払えば")
+    assert out == [DialogueConfig().grounding_caution, "税務課でご案内します。"]  # 頭の断片も、それを指す文も残らない
+    ok = Reference("住民票などの郵便請求", "https://x", "| 種類 | 手数料 |\n| 住民票の写し | 200円 |", 0.9, 3.0)
+    d = Dialogue(StreamLLM(["住民票の写しの手数料は、", "1通200円です。"]), DialogueConfig(), knowledge=_KB([ok]))
+    assert await _collect(d, "住民票はいくら") == ["住民票の写しの手数料は、1通200円です。"]  # 資料にある金額は言う
