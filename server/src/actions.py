@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -36,7 +37,7 @@ from .config import ActionsConfig, ReferralConfig, TidbitConfig
 from .dialogue import ChatBackend, Dialogue
 from .knowledge import JST
 from .lookup import Lookup
-from .procedures import IntakeSet, Procedures
+from .procedures import AsrFixes, IntakeSet, Procedures
 from .referrals import (
     CATEGORIES,
     CONTACT_PREFS,
@@ -105,9 +106,8 @@ class Pending:
     phase: str = "proposed"
     reasks: int = 0
     share_text: str | None = None
-    # 提案したターンの番号と、そのときの話題の始まり（紹介状の要約に使う範囲）
+    # 提案したターンの番号（紹介状の要約は、このきっかけの発話から後だけを使う）
     turn_index: int = 0
-    topic_floor: int = 0
     # 提案の後の来訪者の返事のうち、話題のもの（同意と手続きの聞き取りの答え。要約に使う）
     replies: list[str] = field(default_factory=list)
     # 紹介状の聞き取り（同意の後）
@@ -131,6 +131,8 @@ class Pending:
 @dataclass
 class Session:
     started_at: str
+    # 文字記録で会話をまとめる ID（来訪記録には書かない）
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     language: str = "ja"
     turns: int = 0
     backchannel_count: int = 0
@@ -166,6 +168,7 @@ class Conversation:
         procedures: Procedures | None = None,
         now: Callable[[], datetime] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        asr_fixes: AsrFixes | None = None,
     ) -> None:
         self.dialogue = dialogue
         self._llm = llm
@@ -182,12 +185,11 @@ class Conversation:
         self._tidbits = tidbits
         self._tidbit_cfg = tidbit_cfg or TidbitConfig()
         self._procedures = procedures or Procedures()
-        # この会話のターン（来訪者, 応答）と、いまの話題が始まったターンの番号（プロセス内のみ）
+        self._asr_fixes = asr_fixes
+        # この会話のターン（来訪者, 応答）（プロセス内のみ）
         self._turns: list[tuple[str, str]] = []
         # 聞き取った氏名・地区・電話番号（画面・コンソールで伏せるため。会話の区切りで消す）
         self._private_values: set[str] = set()
-        self._topic_start = 0
-        self._turn_new_topic = False
         self._now = now or (lambda: datetime.now(JST))
         self._clock = clock
         # 紹介状を保存した時刻（monotonic。直後の断片を無視する）と、履歴に残す 1 行（保存の直後だけ）
@@ -195,6 +197,8 @@ class Conversation:
         self._history_note: tuple[str, str] | None = None
         # このターンの発話を、電話番号の続きを待つために返事をせずに預かったか
         self._held = False
+        # このターンの行為（文字記録用）: 提案した行為、返事をした相手の行為と段、その結果
+        self.turn_info: dict[str, str | None] = {}
         self._words, self._templates = load_templates(cfg.templates_path)
         self._pending: Pending | None = None
         self._session: Session | None = None
@@ -210,6 +214,13 @@ class Conversation:
     @property
     def phase(self) -> str:
         return "listen" if self._pending is None else self._pending.phase
+
+    @property
+    def session_id(self) -> str:
+        """いまの会話の ID（まだ始まっていなければ始める。文字記録用）。"""
+        self._ensure_session("ja")
+        assert self._session is not None
+        return self._session.id
 
     @property
     def session_language(self) -> str | None:
@@ -245,7 +256,7 @@ class Conversation:
         session, history = self._session, self.dialogue.history
         self._session, self._pending = None, None
         self._saved_at, self._history_note = None, None
-        self._turns, self._topic_start = [], 0
+        self._turns = []
         self._private_values = set()
         self.dialogue.reset()
         if session is None or self._visits is None or not session.turns:
@@ -268,13 +279,16 @@ class Conversation:
     # ------------------------------------------------------------------
 
     async def respond(self, text: str, language: str = "ja") -> AsyncIterator[str]:
-        """1 発話に応答する。ターンを記録し、行為が終わったら話題の区切りとする。"""
+        """1 発話に応答する。ターンを記録する。"""
         if self.ignores(text):
             logger.info("紹介状の保存直後の短い断片（数字だけ・1〜2 語）なので応答しません")
             return
-        index, had_pending = len(self._turns), self._pending is not None
+        index = len(self._turns)
         label = self.private_label
-        self._turn_new_topic, self._held = False, False
+        self._held = False
+        p = self._pending
+        self.turn_info = {"proposed": None, "reply_to": p.action if p else None,
+                          "reply_phase": p.phase if p else None, "outcome": None}
         lines: list[str] = []
         async for s in self._respond_turn(text, language, index):
             lines.append(s)
@@ -283,8 +297,6 @@ class Conversation:
             return  # 電話番号の断片: 続きを待つ（返事も記録もしない）
         # 氏名・地区・電話番号はプロセス内の記録にも残さない
         self._turns.append((f"（{label}を伺いました）" if label else text, self.redact("".join(lines))))
-        if had_pending and self._pending is None and not self._turn_new_topic:
-            self._topic_start = len(self._turns)  # 行為が終わった・断られた: 次のターンから別の話題
 
     async def _respond_turn(self, text: str, language: str, index: int) -> AsyncIterator[str]:
         self._ensure_session(language)
@@ -305,7 +317,6 @@ class Conversation:
             logger.info("返事待ちに別の話が来たので、提案を辞退扱いにします")
             self._outcome("declined")
             self._pending = None
-            self._topic_start, self._turn_new_topic = index, True
         if self._pending is not None:
             async for s in self._on_reply(text):
                 yield s
@@ -333,6 +344,7 @@ class Conversation:
         for s in held:
             if proposing and self.dialogue.is_question(s):
                 logger.info("提案文を付けるので、LLM の応答の問いの文を読み上げずに落としました")
+                self.dialogue.note_drop("提案文の前の問い", s)
                 continue
             spoken.append(s)
             yield s
@@ -342,9 +354,10 @@ class Conversation:
         if kind is not None and proposing:
             line = self._t(kind, "propose")
             self.dialogue.extend_last_reply(line)
-            self._pending = Pending(kind, text, language, turn_index=index, topic_floor=self._topic_start,
+            self._pending = Pending(kind, text, language, turn_index=index,
                                     history_before=self.dialogue.history)
             self._session.proposals.append({"action": kind, "outcome": None})
+            self.turn_info["proposed"] = kind
             logger.info("行為を提案しました: %s", kind)
             yield line
 
@@ -420,6 +433,7 @@ class Conversation:
         return self._templates.get(action, {}).get(key, "").format(greeting=greeting_for(self._now()), **kw)
 
     def _outcome(self, outcome: str) -> None:
+        self.turn_info["outcome"] = outcome
         if self._session and self._session.proposals:
             self._session.proposals[-1]["outcome"] = outcome
 
@@ -759,11 +773,11 @@ class Conversation:
         return "\n".join(f"来訪者: {u}\n案内役: {a}" for u, a in history)
 
     def _refer_window(self, p: Pending) -> list[tuple[str, str]]:
-        """紹介状を作る範囲: 提案のきっかけの発話と、その前後 2 往復（いまの話題の中だけ）。"""
-        start = max(p.turn_index - self._ref_cfg.window_turns, p.topic_floor)
-        before = self._turns[start:p.turn_index + 1]
-        after = [(r, "") for r in p.replies[: self._ref_cfg.window_turns]]
-        return before + after
+        """紹介状を作る範囲: 提案（refer）のきっかけの発話から後と、同意・聞き取りの答え。
+
+        きっかけより前の往復は使わない（前の話題が要約に混ざったため。WP06）。
+        """
+        return self._turns[p.turn_index:p.turn_index + 1] + [(r, "") for r in p.replies]
 
     async def _structure_referral(self, history: list[tuple[str, str]], p: Pending) -> dict[str, Any]:
         """紹介状の項目を作る。要約・区分などは LLM、課・氏名・地区・連絡方法・電話番号は規則と聞き取りから。
@@ -776,13 +790,19 @@ class Conversation:
                   + '\n出力に "needs_action": true, "tags": [], "topic_free": "" も含める。'
                   + "\n【タグの一覧】" + "、".join(self._tags))
         # 来訪者の言葉と案内役の言ったことを分けて渡す（同意の「お願いします」だけの返事は来訪者の話に入れない）
-        visitor = [u for u, _ in history if u and not self._is_bare_reply(u)]
-        assistant = [a for _, a in history if a]
+        # 案内役のメモ・要約は、聞き取り間違いの対応表を当てた文から作る（「国宝」のまま職員に渡さない）
+        visitor = [self._fix(u) for u, _ in history if u and not self._is_bare_reply(u)]
+        assistant = [self._fix(a) for _, a in history if a]
         body = ("【来訪者の言葉】\n" + "\n".join(visitor or [p.user_text])
                 + "\n【案内役が言ったこと】\n" + ("\n".join(assistant) or "なし"))
         data = await self._chat_json(prompt, body, self._ref_cfg.summary_max_tokens) or {}
-        summary = self._visitor_only(str(data.get("summary") or ""), "\n".join(visitor)) or p.user_text
-        note = str(data.get("assistant_note") or "").strip().replace("\n", " ")
+        summary = self._fix(self._visitor_only(str(data.get("summary") or ""), "\n".join(visitor))
+                            or p.user_text)
+        note = self._fix(str(data.get("assistant_note") or "").strip().replace("\n", " "))
+        # タグは、手続きが規則で分かれば procedures.yaml の手続き→タグを先に、LLM の選んだタグは補助（後ろに足す）
+        llm_tags = data.get("tags")
+        tags = pick_tags([*self._procedures.tags_for("\n".join(visitor) or p.user_text, self._facility),
+                          *(llm_tags if isinstance(llm_tags, list) else [])], self._tags)
         return {
             "department": p.department or UNSPECIFIED_DEPARTMENT,
             "category": _pick(data.get("category"), CATEGORIES, "その他"),
@@ -792,12 +812,15 @@ class Conversation:
             "name": p.name,
             "phone": p.phone,
             "needs_action": bool(data.get("needs_action", True)),
-            "tags": pick_tags(data.get("tags"), self._tags),
+            "tags": tags,
             "topic_free": str(data.get("topic_free") or "")[:60],
             "intake": [{"question": q["question"], "answer": q["answer"] or "（答えなし）"} for q in p.intake],
             "address_area": p.address_area,
             "assistant_note": note[: self._ref_cfg.assistant_note_max_chars],
         }
+
+    def _fix(self, text: str) -> str:
+        return self._asr_fixes.apply(text) if self._asr_fixes is not None and text else text
 
     def _is_bare_reply(self, text: str) -> bool:
         """「お願いします」「はい」だけの返事か（来訪者の話としては要約に入れない）。"""

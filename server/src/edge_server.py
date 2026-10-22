@@ -5,6 +5,9 @@
 
 職員パネル ``/staff/``: 紹介状の一覧と状態の変更、今日の状況。LAN 内（プライベートアドレス）からだけ、
 Basic 認証（ユーザー staff、パスワードは .env の IDOBATA_STAFF_PASSWORD。未設定なら使えない）。
+
+管理者ページ ``/admin/transcripts/``（WP06）: 会話の文字記録を日付・セッションごとに読み、保全を付け外しする。
+職員パネルとは別のロール（ユーザー admin、IDOBATA_ADMIN_PASSWORD。未設定なら使えない）。LAN 内からだけ。
 """
 
 from __future__ import annotations
@@ -25,10 +28,11 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config import StaffConfig
+from .config import AdminConfig, StaffConfig
 from .knowledge import JST
 from .procedures import AsrFixes
 from .referrals import ReferralStore, TidbitStore, VisitLog, today_stats
+from .transcripts import TranscriptStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,7 @@ _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>井戸端AI エ
 
 
 _STAFF_HTML = Path(__file__).resolve().parent.parent / "static" / "staff.html"
+_ADMIN_HTML = Path(__file__).resolve().parent.parent / "static" / "admin_transcripts.html"
 
 
 class StatusUpdate(BaseModel):
@@ -46,6 +51,11 @@ class StatusUpdate(BaseModel):
     handled_by_role: str | None = None
     resolution: str | None = None
     department: str | None = None
+
+
+class HoldIn(BaseModel):
+    held: bool
+    note: str = ""
 
 
 class AsrFixIn(BaseModel):
@@ -68,6 +78,14 @@ class StaffPanel:
         self.asr_fixes = asr_fixes
 
 
+class AdminPanel:
+    """管理者ページの中身（会話の文字記録）。"""
+
+    def __init__(self, transcripts: TranscriptStore, cfg: AdminConfig) -> None:
+        self.transcripts = transcripts
+        self.cfg = cfg
+
+
 def _is_lan(host: str | None) -> bool:
     try:
         ip = ipaddress.ip_address(host or "")
@@ -85,21 +103,59 @@ def _parse_day(value: str | None) -> date:
         raise HTTPException(400, "日付は YYYY-MM-DD") from exc
 
 
-def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
-    basic = HTTPBasic(realm="idobata-staff")
+def _basic_guard(realm: str, user: str, password: str, what: str, env_name: str) -> Any:
+    """LAN 内からだけ・Basic 認証の依存関係（職員パネルと管理者ページで別のユーザー・パスワード）。"""
+    basic = HTTPBasic(realm=realm)
 
     # Depends は既定値の形で書く（関数の中の basic を Annotated で参照すると、注釈の遅延評価で解決できない）
     def guard(request: Request, cred: HTTPBasicCredentials = Depends(basic)) -> None:  # noqa: B008
         if not _is_lan(request.client.host if request.client else None):
-            raise HTTPException(403, "職員パネルは LAN 内からだけ使えます")
-        if not panel.cfg.password:
-            raise HTTPException(503, "IDOBATA_STAFF_PASSWORD が設定されていません")
-        ok_user = secrets.compare_digest(cred.username.encode(), panel.cfg.user.encode())
-        ok_pass = secrets.compare_digest(cred.password.encode(), panel.cfg.password.encode())
+            raise HTTPException(403, f"{what}は LAN 内からだけ使えます")
+        if not password:
+            raise HTTPException(503, f"{env_name} が設定されていません")
+        ok_user = secrets.compare_digest(cred.username.encode(), user.encode())
+        ok_pass = secrets.compare_digest(cred.password.encode(), password.encode())
         if not (ok_user and ok_pass):
             raise HTTPException(401, "認証に失敗しました", headers={"WWW-Authenticate": "Basic"})
 
-    auth = [Depends(guard)]
+    return Depends(guard)
+
+
+def _add_admin_routes(app: FastAPI, panel: AdminPanel) -> None:
+    auth = [_basic_guard("idobata-admin", panel.cfg.user, panel.cfg.password, "管理者ページ",
+                         "IDOBATA_ADMIN_PASSWORD")]
+
+    @app.get("/admin/transcripts/", include_in_schema=False, dependencies=auth)
+    async def transcripts_page() -> HTMLResponse:
+        html = _ADMIN_HTML.read_text(encoding="utf-8").replace(
+            "__RETENTION_DAYS__", str(panel.transcripts.retention_days))
+        return HTMLResponse(html)
+
+    @app.get("/admin/api/transcripts/days", dependencies=auth)
+    async def transcript_days() -> list[str]:
+        return panel.transcripts.days()
+
+    @app.get("/admin/api/transcripts", dependencies=auth)
+    async def transcript_sessions(day: str | None = None) -> list[dict[str, Any]]:
+        return panel.transcripts.sessions(_parse_day(day))
+
+    @app.get("/admin/api/transcripts/{day}/{session_id}", dependencies=auth)
+    async def transcript_session(day: str, session_id: str) -> list[dict[str, Any]]:
+        rows = panel.transcripts.session(_parse_day(day), session_id)
+        if not rows:
+            raise HTTPException(404, "記録がありません")
+        return rows
+
+    @app.post("/admin/api/transcripts/{session_id}/hold", dependencies=auth)
+    async def transcript_hold(session_id: str, body: HoldIn) -> dict[str, bool]:
+        if not panel.transcripts.set_hold(session_id, body.held, body.note):
+            raise HTTPException(404, "記録がありません")
+        return {"held": body.held}
+
+
+def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
+    auth = [_basic_guard("idobata-staff", panel.cfg.user, panel.cfg.password, "職員パネル",
+                         "IDOBATA_STAFF_PASSWORD")]
 
     @app.get("/staff/", include_in_schema=False, dependencies=auth)
     async def staff_page() -> HTMLResponse:
@@ -152,11 +208,13 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
         return today_stats(panel.referrals, panel.visits, _parse_day(day))
 
 
-def create_app(static_dir: Path, staff: StaffPanel | None = None) -> FastAPI:
-    """エッジページ（と職員パネル）を配信する FastAPI アプリ。"""
+def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPanel | None = None) -> FastAPI:
+    """エッジページ（と職員パネル・管理者ページ）を配信する FastAPI アプリ。"""
     app = FastAPI(title="idobata-edge", docs_url=None, redoc_url=None, openapi_url=None)
     if staff is not None:
         _add_staff_routes(app, staff)
+    if admin is not None:
+        _add_admin_routes(app, admin)
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
@@ -177,9 +235,10 @@ def create_app(static_dir: Path, staff: StaffPanel | None = None) -> FastAPI:
 class EdgeServer:
     """uvicorn を同じイベントループで動かす。"""
 
-    def __init__(self, host: str, port: int, static_dir: Path, staff: StaffPanel | None = None) -> None:
+    def __init__(self, host: str, port: int, static_dir: Path, staff: StaffPanel | None = None,
+                 admin: AdminPanel | None = None) -> None:
         cfg = uvicorn.Config(
-            create_app(static_dir, staff), host=host, port=port, log_level="warning", lifespan="off",
+            create_app(static_dir, staff, admin), host=host, port=port, log_level="warning", lifespan="off",
         )
         self._server = uvicorn.Server(cfg)
         self._task: asyncio.Task[None] | None = None

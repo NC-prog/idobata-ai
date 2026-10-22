@@ -263,6 +263,12 @@ class Dialogue:
         self.last_search_ms: float | None = None
         self.last_references: list[Reference] = []
         self.last_cited: list[Reference] = []
+        # 直近のターンの検索語（日付を足したもの）と、安全装置で読み上げなかった文（文字記録・誤り探し用）
+        self.last_search_query: str | None = None
+        self.last_dropped: list[dict[str, str]] = []
+        self._building_claim_res = [re.compile(p) for p in self._cfg.building_claim_patterns]
+        self._building_context_re = re.compile(self._cfg.building_context_pattern)
+        self._smalltalk_re = re.compile(self._cfg.smalltalk_pattern)
         # (user, assistant) の組を直近 history_turns 件だけ保持する
         self._history: deque[tuple[str, str]] = deque(maxlen=self._cfg.history_turns)
         self._question_re = re.compile(self._cfg.question_sentence_pattern)
@@ -361,6 +367,8 @@ class Dialogue:
             履歴には、言い終えた全文を 1 ターンとして積む。
         """
         self.last_proposal = None
+        self.last_dropped = []
+        self.last_search_query = None
         text = text.strip()
         if not text:
             return
@@ -567,27 +575,35 @@ class Dialogue:
             return False
         if self._history and re.fullmatch(r"(おはようございます|こんにちは|こんばんは)[。！!、]?", sentence.strip()):
             logger.info("会話の途中の挨拶だけの文を読み上げずに捨てました")
+            self.note_drop("会話の途中の挨拶", sentence)
             return True
         if "傘" in sentence and not self._rain_likely():
             logger.info("降水確率が低いのに傘をすすめる文を読み上げずに捨てました")
+            self.note_drop("傘（降水確率が低い）", sentence)
             return True
         if self._contradicts_persona(sentence):
             logger.info("人物像と食い違う文（生まれ・育ちなど）を読み上げずに捨てました")
+            self.note_drop("人物像と食い違う", sentence)
             return True
         if self._unasked_self_intro(sentence, text):
             logger.info("聞かれていないのに名乗る文を読み上げずに捨てました")
+            self.note_drop("聞かれていない名乗り", sentence)
             return True
         if not said and self._is_echo(sentence, text):
             logger.info("来訪者の言葉を繰り返す文を読み上げずに捨てました")
+            self.note_drop("おうむ返し", sentence)
             return True
         if self._is_repeat(sentence, previous):
             logger.info("これまでの応答と同じ文を読み上げずに捨てました")
+            self.note_drop("同じ文の繰り返し", sentence)
             return True
         if self._too_many_questions(sentence, said):
             logger.info("1 回の応答で 2 つ目以降の問いを読み上げずに捨てました")
+            self.note_drop("2 つ目以降の問い", sentence)
             return True
         if self._extra_help_offer(sentence, text):
             logger.info("「お困りのことは」「お変わりありませんか」の類を重ねない（1 会話 1 回・尋ねられた直後は言わない）")
+            self.note_drop("お困りのことは・お変わりの重ね", sentence)
             return True
         return False
 
@@ -600,7 +616,31 @@ class Dialogue:
             return False
         logger.warning("紹介状の聞き取りの外で、氏名・電話番号・住所を尋ねる文を LLM が出したので読み上げずに捨てました")
         logger.debug("捨てた文: %s", sentence)
+        self.note_drop("聞き取りの外の個人情報の質問", sentence)
         return True
+
+    def note_drop(self, reason: str, sentence: str) -> None:
+        """安全装置で読み上げなかった文を、このターンの記録に残す（文字記録と誤り探しの素材に使う）。"""
+        self.last_dropped.append({"reason": reason, "text": sentence})
+
+    def _invented_building_place(self, sentence: str) -> str | None:
+        """館内の設備・場所が「〜があります」「〜にあります」と言う文で、登録に無い名前ならその名前。
+
+        登録は facility.facilities_in_building・departments・施設名。トイレの場所を言う文は先に
+        _unknown_facility_location が決まった文に差し替えるので、ここに来るのはそれ以外の言い方。
+        """
+        if self._facility is None or not self._building_context_re.search(sentence):
+            return None
+        known = [self._facility.name, *self._known_facilities, *(d.name for d in self._facility.departments)]
+        for pat in self._building_claim_res:
+            for m in pat.finditer(sentence):
+                noun = m.group("noun").strip("、 ")
+                if not noun:
+                    continue
+                if any(k in noun or noun in k for k in known if k):
+                    continue
+                return noun
+        return None
 
     def _too_many_questions(self, sentence: str, said: list[str]) -> bool:
         """1 回の応答の問い（「〜ですか？」で終わる文）が上限を超えるか。"""
@@ -644,7 +684,15 @@ class Dialogue:
             logger.exception("知識パックの検索に失敗しました（参考資料なしで続けます）")
             return []
         self.last_search_ms = result.elapsed_ms
+        self.last_search_query = query
         refs = result.references
+        if self._smalltalk_re.search(text):
+            # 雑談寄り（挨拶・天気・人物像への質問）は関係の薄い資料が付きやすいので、しきい値を上げる
+            # （「日本語うまいですね」に防災ガイドブックが付いた）
+            weak = [r for r in refs if r.vector_score < self._cfg.smalltalk_min_vector_score]
+            if weak:
+                logger.info("雑談寄りの発話なので、類似度の低い資料を %d 件外しました", len(weak))
+                refs = [r for r in refs if r not in weak]
         if query != text:
             # 日付を聞かれたときは、書かれた日付（年付き）がすべて過ぎている資料を外す
             # （1月の「とんど祭り」を今週末の行事として案内したため）
@@ -709,13 +757,21 @@ class Dialogue:
         if unknown is not None:
             logger.info("館内の設備（%s）の場所を作った文を差し替えます", unknown)
             logger.debug("差し替え前: %s", sentence)
+            self.note_drop("登録の無い設備の場所", sentence)
             return self._cfg.unknown_facility_sentence.format(name=unknown)
+        invented = self._invented_building_place(sentence)
+        if invented is not None:
+            logger.info("館内に登録の無い設備・場所（%s）があると言う文を読み上げずに捨てました", invented)
+            self.note_drop("館内の設備・場所の作り話", sentence)
+            return ""
         if self._department_directions(sentence):
             logger.info("館内の道順を作った文を読み上げずに捨てました")
+            self.note_drop("館内の道順", sentence)
             return ""
         if any(p in sentence for p in self._banned):
             logger.warning("言わないことにしている言い回しを含む文を読み上げずに捨てました")
             logger.debug("捨てた文: %s", sentence)
+            self.note_drop("言わない言い回し", sentence)
             return ""
         if not sentence or not self._has_foreign_word(sentence):
             return sentence
@@ -735,10 +791,12 @@ class Dialogue:
             )
         except Exception:
             logger.warning("言い直しに失敗しました。この文は読み上げません。", exc_info=True)
+            self.note_drop("英字の言い直しに失敗", sentence)
             return ""
         fixed = _SOURCE_MARK_RE.sub("", fixed).strip()
         if not fixed or self._has_foreign_word(fixed):
             logger.warning("言い直しても英字が残ったため、この文は読み上げません")
+            self.note_drop("英字が残った", sentence)
             return ""
         return fixed
 

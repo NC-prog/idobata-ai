@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>井戸端AI 会話の文字記録</title>
+<style>
+  :root { --bg:#fafafa; --fg:#222; --mut:#666; --line:#ddd; --held:#e8f5e9; --drop:#b00020; }
+  body { margin:16px; font-family:"Noto Sans JP",sans-serif; background:var(--bg); color:var(--fg); }
+  h1 { font-size:20px; margin:0 0 12px; }
+  h2 { font-size:16px; margin-top:24px; }
+  .wrap { display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+  .sessions { min-width:280px; flex:0 0 320px; }
+  .detail { flex:1 1 480px; }
+  table { border-collapse:collapse; width:100%; background:#fff; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
+  tr.held td { background:var(--held); }
+  tr.sel td { outline:2px solid #333; }
+  tr.click { cursor:pointer; }
+  .mut { color:var(--mut); font-size:12px; }
+  .user { color:#0d47a1; }
+  .backchannel { color:var(--mut); }
+  .drop { color:var(--drop); font-size:12px; }
+  pre { white-space:pre-wrap; margin:0; font-size:12px; color:var(--mut); }
+  button { margin:2px; padding:4px 8px; font-size:13px; }
+</style>
+</head>
+<body>
+<h1>井戸端AI 会話の文字記録 <span class="mut">（管理者のみ。__RETENTION_DAYS__ 日で消えます。保全したセッションは残ります。音声は録音していません）</span></h1>
+<label>日付 <select id="day"></select></label>
+<div class="wrap">
+  <div class="sessions">
+    <h2>セッション</h2>
+    <table><thead><tr><th>時刻</th><th>発話</th><th>保全</th></tr></thead><tbody id="sessions"></tbody></table>
+  </div>
+  <div class="detail">
+    <h2 id="title">記録</h2>
+    <div id="hold"></div>
+    <table><thead><tr><th>時刻</th><th>話者</th><th>内容</th></tr></thead><tbody id="rows"></tbody></table>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const time = (ts) => String(ts || "").slice(11, 19);
+let current = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+async function loadDays() {
+  const days = await api("/admin/api/transcripts/days");
+  const today = new Date().toLocaleDateString("sv-SE", {timeZone: "Asia/Tokyo"});
+  if (!days.includes(today)) days.unshift(today);
+  $("day").innerHTML = days.map((d) => `<option>${d}</option>`).join("");
+  await loadSessions();
+}
+
+async function loadSessions() {
+  const day = $("day").value;
+  const rows = await api(`/admin/api/transcripts?day=${day}`);
+  $("sessions").innerHTML = rows.map((s) =>
+    `<tr class="click ${s.held ? "held" : ""} ${current === s.session_id ? "sel" : ""}" data-id="${esc(s.session_id)}">
+       <td>${time(s.started_at)}〜${time(s.ended_at)}<div class="mut">${esc(s.session_id)}</div></td>
+       <td>${s.user_lines}</td><td>${s.held ? "保全中" : ""}</td></tr>`).join("")
+    || `<tr><td colspan="3" class="mut">記録はありません</td></tr>`;
+  document.querySelectorAll("#sessions tr.click").forEach((tr) => tr.onclick = () => loadSession(tr.dataset.id));
+}
+
+function body(r) {
+  if (r.speaker === "user") {
+    let h = esc(r.text);
+    if (r.asr_raw && r.asr_raw !== r.text) h += `<div class="mut">ASR: ${esc(r.asr_raw)}</div>`;
+    if (r.ignored) h += `<div class="mut">（${esc(r.ignored)}）</div>`;
+    return h;
+  }
+  if (r.speaker === "backchannel") return esc(r.text);
+  let h = esc(r.text);
+  for (const d of r.dropped || []) h += `<div class="drop">読み上げず（${esc(d.reason)}）: ${esc(d.text)}</div>`;
+  const extra = {};
+  for (const k of ["proposal", "search_query", "lookup_query", "references", "cited", "timing"]) {
+    if (r[k] !== undefined && r[k] !== null && !(Array.isArray(r[k]) && !r[k].length)) extra[k] = r[k];
+  }
+  if (Object.keys(extra).length) h += `<pre>${esc(JSON.stringify(extra, null, 1))}</pre>`;
+  return h;
+}
+
+async function loadSession(id) {
+  current = id;
+  const day = $("day").value;
+  const rows = await api(`/admin/api/transcripts/${day}/${encodeURIComponent(id)}`);
+  const held = (await api(`/admin/api/transcripts?day=${day}`)).find((s) => s.session_id === id)?.held;
+  $("title").textContent = `記録 ${id}`;
+  $("hold").innerHTML = held
+    ? `<button onclick="hold(false)">保全を外す</button> <span class="mut">外すと、期限を過ぎていれば次の起動で消えます</span>`
+    : `<button onclick="hold(true)">保全する</button> <span class="mut">期限を過ぎても消さずに残します</span>`;
+  $("rows").innerHTML = rows.map((r) =>
+    `<tr><td>${time(r.ts)}</td><td class="${r.speaker}">${{user:"来訪者",assistant:"案内役",backchannel:"相槌"}[r.speaker] || r.speaker}</td>
+     <td>${body(r)}</td></tr>`).join("");
+  await loadSessions();
+}
+
+async function hold(on) {
+  if (!current) return;
+  await api(`/admin/api/transcripts/${encodeURIComponent(current)}/hold`,
+            {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({held: on})});
+  await loadSession(current);
+}
+
+$("day").onchange = () => { current = null; $("rows").innerHTML = ""; $("hold").innerHTML = ""; loadSessions(); };
+loadDays();
+</script>
+</body>
+</html>

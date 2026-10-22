@@ -34,6 +34,7 @@ WP03: ``facility`` 節（拠点の固定事実: 施設名・開庁時間・課�
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,11 +167,13 @@ def load_facility(site: str, context_dir: Path) -> Facility | None:
     )
 
 
-def load_site_words(site: str, context_dir: Path) -> list[SiteWord]:
+def load_site_words(site: str, context_dir: Path, avatar_name: str = "",
+                    avatar_accent: int | None = None) -> list[SiteWord]:
     """拠点の YAML から語を読む（表記の重複は先勝ち）。
 
     ファイルが無い・壊れている場合は空リストを返す（ASR・TTS は語彙なしで動く）。
     facility 節の課名と、手続きの常用語（``procedures.yaml``、全拠点共通。先頭に置く）も語彙に含める。
+    アバターの呼び名（IDOBATA_AVATAR_NAME）はいちばん先頭に置く（かなの名前なら読みも付けて辞書に入れる）。
     """
     from .procedures import load_procedures  # procedures は SiteWord を使うので、ここで読む
 
@@ -193,7 +196,18 @@ def load_site_words(site: str, context_dir: Path) -> list[SiteWord]:
             words.append(word)
     # 手続きの常用語は先頭に置く（後ろに置くと Qwen3-ASR のバイアシングが効かず「国保」→「国宝」になった）
     procedure_words = [w for w in load_procedures(context_dir).words() if w.surface not in seen]
-    return procedure_words + words
+    out = procedure_words + words
+    if avatar_name:
+        out = [avatar_word(avatar_name, avatar_accent)] + [w for w in out if w.surface != avatar_name]
+    return out
+
+
+def avatar_word(name: str, accent: int | None = None) -> SiteWord:
+    """アバターの呼び名の語。ひらがな・カタカナだけの名前なら、カタカナの読みを付ける（漢字なら ASR だけ）。"""
+    if not re.fullmatch(r"[ぁ-ゖァ-ヺー]+", name):
+        return SiteWord(name)
+    reading = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in name)
+    return SiteWord(name, reading, accent)
 
 
 def _parse_item(item: Any) -> SiteWord | None:

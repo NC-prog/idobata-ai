@@ -147,13 +147,14 @@ def ngram_overlap(text: str, reference: str, n: int = 2) -> float:
     return sum(1 for g in grams if g in ref) / len(grams)
 
 
-def load_site_vocabulary(site: str, context_dir: Path) -> list[str]:
+def load_site_vocabulary(site: str, context_dir: Path, avatar_name: str = "") -> list[str]:
     """拠点の YAML（``<context_dir>/<site>.yaml``）から語彙（表記）のリストを読む。
 
     YAML の書式は ``site_context.load_site_words`` を参照（読み付きの語は表記だけを使う）。
     ファイルが無い・壊れている場合は空リストを返す（ASR は語彙なしで動く）。
+    アバターの呼び名を渡すと先頭に置く（「いどちゃん」が「伊豆ちゃん」になったため）。
     """
-    return [w.surface for w in load_site_words(site, context_dir) if w.asr]
+    return [w.surface for w in load_site_words(site, context_dir, avatar_name) if w.asr]
 
 
 class ASRClient:

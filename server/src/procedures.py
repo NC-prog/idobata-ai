@@ -65,6 +65,8 @@ class Procedure:
     term: str
     aliases: tuple[str, ...] = ()
     intake: tuple[IntakeSet, ...] = ()
+    # 紹介状に付けるタグ（tags.yaml の統制語彙。手続きが分かったときは LLM の選んだタグより先に使う）
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,11 @@ class Procedures:
                     return s
         return None
 
+    def tags_for(self, text: str, facility: Facility | None) -> list[str]:
+        """発話で言った手続きのタグ（表の順、重複なし）。"""
+        said = self.mentioned(text, facility)
+        return list(dict.fromkeys(t for p in self.items if p.term in said for t in p.tags))
+
     def departments_for(self, text: str, facility: Facility | None) -> list[str]:
         """発話から決まる担当課の候補（facility の並び順）。"""
         if facility is None:
@@ -138,8 +145,9 @@ def load_procedures(context_dir: Path) -> Procedures:
         logger.warning("手続きの語の表を読めません: %s", path, exc_info=True)
         return Procedures()
     items = tuple(
-        Procedure(str(p["term"]), _strs(p.get("aliases")), tuple(_intake(x) for x in p.get("intake") or []
-                                                                if isinstance(x, dict) and x.get("questions")))
+        Procedure(str(p["term"]), _strs(p.get("aliases")),
+                  tuple(_intake(x) for x in p.get("intake") or [] if isinstance(x, dict) and x.get("questions")),
+                  _strs(p.get("tags")))
         for p in data.get("procedures") or [] if isinstance(p, dict) and p.get("term")
     )
     readings = tuple(

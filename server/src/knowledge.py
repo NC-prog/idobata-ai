@@ -46,6 +46,8 @@ class Reference:
     # 出どころ（official / semi / news）と、応答で出典を言うときの言い方（「観光協会のホームページ」など）
     trust: str = ""
     label: str = ""
+    # 知識パックのチャンクの ID（文字記録に出典として残す。調べるで取ったページは空）
+    chunk_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -176,7 +178,7 @@ class KnowledgeBase:
                 break
             refs.append(Reference(row["title"], row["source_url"], text, vscore,
                                   bm_rank[doc][1] if doc in bm_rank else 0.0,
-                                  str(row.get("trust") or ""), str(row.get("label") or "")))
+                                  str(row.get("trust") or ""), str(row.get("label") or ""), str(row["id"])))
             total += len(text)
             if len(refs) >= cfg.top_k or total >= cfg.max_chars:
                 break

@@ -11,9 +11,11 @@
 # intake: 紹介状の同意の後に伺う項目（担当の方が準備できるように）。when の語が発話にあればその組を使う
 #   （when が無い組は常に合う）。questions は最大 3 問、LLM が自然な言い方に直して順に聞く。
 #   bring は持ち物の案内（when の語が聞き取りの答えか発話にあれば。when 無しは常に）。最初に合った 1 つだけ言う
+# tags: 紹介状のタグ（tags.yaml の統制語彙）。手続きが分かったときは LLM の選んだタグより先に付ける（LLM は補助）
 
 procedures:
   - term: 国民健康保険
+    tags: [保険・年金]
     aliases: [国保]
     intake:
       - questions: [切り替えのきっかけ（退職・転入・扶養の変更など）, いつから切り替えるか, 手続きするのはご本人かご家族か]
@@ -21,27 +23,38 @@ procedures:
           - {when: [退職, 辞め, 扶養, 会社], item: 前の健康保険の資格喪失証明書}
           - {when: [転入, 引っ越], item: 前の市町村の転出証明書}
   - term: 国民健康保険税
+    tags: [税]
     aliases: [国保税, 国民健康保険料, 国保料]
   - term: 後期高齢者医療
+    tags: [保険・年金]
     aliases: [後期高齢]
   - term: 介護保険
+    tags: [介護]
     aliases: [要介護認定, 介護認定, 介護]
     intake:
       - questions: [介護が要るのはご本人かご家族か, 初めての申請か更新か]
         bring:
           - {when: [更新], item: 介護保険の被保険者証}
   - term: 児童手当
+    tags: [子育て]
   - term: 保育施設
+    tags: [子育て]
     aliases: [保育所, 保育園]
   - term: 住民票
+    tags: [住民票・戸籍]
   - term: 住民登録
+    tags: [住民票・戸籍]
     aliases: [転入, 転出, 転居]
   - term: 戸籍
+    tags: [住民票・戸籍]
   - term: 印鑑登録
+    tags: [住民票・戸籍]
     aliases: [印鑑証明]
   - term: 税証明書
+    tags: [税]
     aliases: [課税証明, 納税証明]
   - term: マイナンバーカード
+    tags: [マイナンバー]
     intake:
       - when: [紛失, なくし, 無くし, 失くし, 落とし, 盗]
         questions: [マイナンバー総合フリーダイヤルへの一時停止の連絡は済んだか, 再交付を希望するか]
@@ -49,6 +62,7 @@ procedures:
           - {item: 本人確認の書類（運転免許証など）}
   - term: パスポート
   - term: ごみ
+    tags: [ごみ]
     aliases: [粗大ごみ]
   - term: 水道
 
@@ -61,6 +75,7 @@ asr_fixes:
   - {surface: 国宝, correct: 国保}
   - {surface: 後期好礼, correct: 後期高齢}
   - {surface: 後期高例, correct: 後期高齢}
+  - {surface: 伊豆ちゃん, correct: いどちゃん}   # アバターの呼び名（IDOBATA_AVATAR_NAME の初期値）
 
 readings:
   - {surface: 国保, reading: コクホ, accent: 1}

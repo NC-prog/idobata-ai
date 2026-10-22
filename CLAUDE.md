@@ -98,6 +98,9 @@ uv run python -m src.main --mode voice --edge   # → Chrome で http://localhos
 #   IDOBATA_EDGE_HTTP_HOST=0.0.0.0          職員の PC から /staff/ を開くとき（既定は 127.0.0.1）
 #   IDOBATA_REFERRAL_RETENTION_DAYS=30      紹介状の保存日数（起動時に古いものを消す。0 で前日以前を消す）
 #   IDOBATA_LOOKUP_WEB_SEARCH=0             一般のウェブ検索（既定オフ。評価では使わない）
+#   IDOBATA_ADMIN_PASSWORD=...              /admin/transcripts/ の Basic 認証（ユーザー admin。職員パネルとは別）（WP06）
+#   IDOBATA_TRANSCRIPT_RETENTION_DAYS=7     会話の文字記録の保存日数（起動時に古いものを消す。保全したものは残す）
+uv run python ../scripts/export_review.py --date 2026-10-22   # 誤り探しの素材 → ~/idobata-data/review/<date>.jsonl
 uv run python -m src.main --mode voice --edge   # → 職員は http://<窓口機>:8080/staff/ （10 秒ごとに更新）
 
 # 品質
@@ -188,6 +191,11 @@ edge/                     # エッジページ（Vite + TypeScript、three.js + 
 - 会話ログ・音声・映像をディスクに保存する（会話はプロセス内のみ。録音しない。フレームを保存しない）。
   **例外（WP04）: 本人が同意した紹介状（`~/idobata-data/referrals/`、既定 30 日）と匿名の小ネタ
   （`tidbits/`、7 日）、本文を含まない匿名の来訪記録（`visits/`、1 年）だけは保存してよい**。
+  **例外（WP06）: 会話の文字記録（`transcripts/<site>/<date>.jsonl`、既定 7 日、`IDOBATA_TRANSCRIPT_RETENTION_DAYS`）。
+  音声・映像は含めない。紹介状の聞き取りで伺った氏名・地区・電話番号は書かない。読むのは管理者ロール
+  （`/admin/transcripts/`、ユーザー admin、`IDOBATA_ADMIN_PASSWORD`、LAN のみ）だけ。セッション単位の「保全」で期限を止められる。
+  ロビーに掲示する前提（`docs/市への確認事項.md` の 5）。誤り探しの素材（`review/<date>.jsonl`、`scripts/export_review.py`）は
+  文字記録から氏名・電話・地区を伏せて作る**。
   保持期間は設定で持ち、起動時に期限切れを消す
 - `192.168.11.3`（townhall の社内サーバ）をコード・設定・文書に書く
 - Live2D 関連（モデル・SDK・Unity プロジェクト）を持ち込む。アバターは three.js + three-vrm（WP01）

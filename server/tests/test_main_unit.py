@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 from src.main import VoiceLoop
+from src.transcripts import TranscriptStore
 
 
 class _Recorder:
+    edge_id = "edge-test"
+
     def __init__(self) -> None:
         self.states: list[str] = []
         self.resets = 0
@@ -26,6 +32,8 @@ def _loop() -> tuple[VoiceLoop, _Recorder]:
     rec = _Recorder()
     app._edge = rec  # type: ignore[assignment]
     app._dialogue.reset = rec.reset  # type: ignore[method-assign]
+    # 文字記録は作業用のディレクトリに書く（実データの ~/idobata-data に書かない）
+    app._transcripts = TranscriptStore(Path(tempfile.mkdtemp(prefix="idobata-test-")), "etajima", 7)
     return app, rec
 
 
@@ -148,3 +156,31 @@ async def test_reply_phase_lowers_vad_threshold_and_pads_to_one_second() -> None
 
 async def _noop() -> None:
     return None
+
+
+async def test_phone_reask_waits_until_visitor_stops_speaking() -> None:
+    """電話番号の聞き直しは、来訪者の発話区間（と聞き取り）が終わってから言う（WP06）。"""
+    import asyncio
+    import time
+
+    from src.actions import Pending
+
+    app, _rec = _loop()
+    p = Pending("refer", "国保の相談", "ja", phase="ask_phone")
+    p.phone_deadline = time.monotonic() - 1  # 期限は過ぎている
+    app._conversation._pending = p
+    calls: list[bool] = []
+
+    async def fake_respond(text: str, language: str, timing: object, source: object = None) -> None:
+        calls.append(app._hearing)
+        p.phone_deadline = None  # 聞き直した
+
+    app._respond_and_speak = fake_respond  # type: ignore[method-assign]
+    app._hearing = True  # 来訪者が話している途中
+    task = asyncio.create_task(app._watch_phone_deadline())
+    await asyncio.sleep(0.3)
+    assert calls == []  # 話している間は言わない
+    app._hearing = False
+    await asyncio.wait_for(task, 1.0)
+    assert calls == [False]
+    await app._tts.close()

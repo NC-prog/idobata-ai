@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import sys
 import time
 from collections import deque
@@ -34,7 +35,7 @@ from .backchannel import BackchannelBank, BackchannelClip, strip_leading_backcha
 from .config import SERVER_ROOT, ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue, speech_text
 from .edge_bridge import EdgeBridge
-from .edge_server import EdgeServer, StaffPanel
+from .edge_server import AdminPanel, EdgeServer, StaffPanel
 from .knowledge import KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
@@ -51,6 +52,7 @@ from .speech_output import (
     WavDirWriter,
 )
 from .timeofday import greeting_for
+from .transcripts import TranscriptStore
 from .tts_client import TTSClient
 from .vad import SpeechEventType, VADBackend, create_vad
 
@@ -62,6 +64,8 @@ _WAV_TAIL_SILENCE_SEC = 1.0
 _GATE_POLL_SEC = 0.05
 # 待機タイムアウト（最後の確定発話からの経過）を確認する間隔
 _IDLE_POLL_SEC = 1.0
+# 電話番号の聞き直しの前に、来訪者が話し終えるのを待つときの確認間隔
+_HEARING_POLL_SEC = 0.1
 
 
 @dataclass
@@ -75,6 +79,15 @@ class TurnTiming:
     t_audio_start: float = 0.0
     t_llm_done: float = 0.0
     search_ms: float | None = None  # 知識パックの検索（LLM の前）
+
+    def as_record(self) -> dict[str, float | None]:
+        """文字記録に書く計測値（発話終了からの秒）。"""
+        def at(t: float) -> float | None:
+            return round(t - self.t_speech_end, 3) if t else None
+
+        return {"asr": at(self.t_asr_done), "backchannel": at(self.t_backchannel),
+                "first_sentence": at(self.t_first_sentence), "audio_start": at(self.t_audio_start),
+                "llm_done": at(self.t_llm_done), "search_ms": None if self.search_ms is None else round(self.search_ms)}
 
     def summary(self) -> str:
         """発話終了（VAD 判定）を起点とした各段の経過時間。"""
@@ -135,6 +148,9 @@ class VoiceLoop:
         self._visits = VisitLog(config.data_dir, config.site)
         self._tidbits = TidbitStore(config.data_dir, config.site, config.tidbit.retention_days)
         self._asr_fixes = AsrFixes(config.asr.site_context_dir, config.data_dir)
+        # 会話の文字記録（WP06。音声・映像は残さない。管理者だけが /admin/transcripts/ で読む）
+        self._transcripts = TranscriptStore(config.data_dir, config.site, config.transcript.retention_days)
+        self._last_lookup_query: str | None = None
         self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query)
         self._conversation = Conversation(
             self._dialogue, llm, config.llm.chat_model, config.actions, config.referral, facility,
@@ -144,6 +160,7 @@ class VoiceLoop:
             on_state=self._send_state, edge_id=self._edge_id,
             tidbits=self._tidbits, tidbit_cfg=config.tidbit,
             procedures=load_procedures(config.asr.site_context_dir),
+            asr_fixes=self._asr_fixes,
         )
         self._llm = llm
         self._backchannels = (BackchannelBank(config.actions.backchannel_path)
@@ -161,13 +178,14 @@ class VoiceLoop:
         self._edge_server: EdgeServer | None = None
         if edge:
             self._edge = EdgeBridge(config.edge.ws_host, config.edge.ws_port)
-        # エッジのページと職員パネル（/staff/）は同じ HTTP サーバ。職員パネルだけでも立てる
-        if edge or config.staff.password:
+        # エッジのページと職員パネル（/staff/）・管理者ページ（/admin/）は同じ HTTP サーバ。パネルだけでも立てる
+        if edge or config.staff.password or config.admin.password:
             self._edge_server = EdgeServer(
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir,
                 staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits,
                                  tuple(d.name for d in (facility.departments if facility else ())),
                                  self._asr_fixes),
+                admin=AdminPanel(self._transcripts, config.admin),
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）
@@ -176,6 +194,8 @@ class VoiceLoop:
         self._last_utterance_at: float | None = None
         # 電話番号の断片の続きを待つタイマー（期限を過ぎたら聞き直す）
         self._phone_timer: asyncio.Task[None] | None = None
+        # 来訪者の発話区間の途中か、区間を聞き取っている途中か（聞き直しを相手の発話に重ねない）
+        self._hearing = False
 
     # ------------------------------------------------------------------
     # 起動
@@ -184,7 +204,8 @@ class VoiceLoop:
     async def run(self) -> None:
         """モードに応じたループを実行する。"""
         # 固有名詞の読みを先に登録する（プリウォームの合成より前に）
-        await self._tts.sync_user_dict(load_site_words(config.site, config.asr.site_context_dir))
+        await self._tts.sync_user_dict(load_site_words(config.site, config.asr.site_context_dir,
+                                                       config.actions.avatar_name, config.actions.avatar_accent))
         await self._tts.prewarm()
         if self._backchannels is not None:
             await self._backchannels.prepare(self._tts, config.actions.backchannel_prepare_budget_sec)
@@ -193,6 +214,10 @@ class VoiceLoop:
         removed = self._referrals.cleanup() + self._visits.cleanup() + self._tidbits.cleanup()
         if removed:
             logger.info("保存期間を過ぎた紹介状・来訪記録・小ネタを %d 件消しました", removed)
+        removed_lines = self._transcripts.cleanup()
+        if removed_lines:
+            logger.info("保存期間（%d 日）を過ぎた会話の文字記録を %d 行消しました",
+                        self._transcripts.retention_days, removed_lines)
         await asyncio.to_thread(self._knowledge.reload_if_changed)
         self._dialogue.attach_knowledge(self._knowledge)
         self._spawn(self._watch_knowledge(), "kb-watch")
@@ -261,6 +286,8 @@ class VoiceLoop:
             self._last_utterance_at = time.monotonic()
             await self._send_caption(self._shown_user_text(text), role="user")
             await self._send_state("thinking")
+            ignored = self._conversation.ignores(text)
+            self._record_user(text, text, "ja", "保存直後の断片" if ignored else None)
             await self._respond_and_speak(text, "ja", None)
 
     # ------------------------------------------------------------------
@@ -270,7 +297,7 @@ class VoiceLoop:
     async def _voice_loop(self) -> None:
         self._asr = ASRClient()
         self._asr.set_static_context(
-            load_site_vocabulary(config.site, config.asr.site_context_dir)
+            load_site_vocabulary(config.site, config.asr.site_context_dir, config.actions.avatar_name)
         )
 
         # VAD モデルを先にロード（マイク起動前にロードしないとフレームドロップする）
@@ -330,6 +357,7 @@ class VoiceLoop:
                             len(segment_frames),
                         )
                         vad.reset()
+                    self._hearing = False
                     segment_frames = []
                     preroll.clear()  # ミュート前の音（自分の声の直前）を次の発話に混ぜない
                     was_muted = True
@@ -347,10 +375,14 @@ class VoiceLoop:
                     segment_frames = [*preroll, frame]
                     preroll.clear()
                     t_speech_start = event.timestamp_sec
+                    self._hearing = True
                     await self._send_state("listening")
                 elif event.event_type == SpeechEventType.SPEECH_END:
-                    if segment_frames and self._long_enough(segment_frames):
-                        await self._on_segment(segment_frames, t_speech_start)
+                    try:
+                        if segment_frames and self._long_enough(segment_frames):
+                            await self._on_segment(segment_frames, t_speech_start)
+                    finally:
+                        self._hearing = False
                     segment_frames = []
             elif vad.in_speech:
                 segment_frames.append(frame)
@@ -410,12 +442,14 @@ class VoiceLoop:
 
         self._last_utterance_at = time.monotonic()
         self._asr.push_rolling_context(final_text)
-        final_text = self._asr_fixes.apply(final_text)
+        asr_raw, final_text = final_text, self._asr_fixes.apply(final_text)
         if self._conversation.ignores(final_text):
             # 紹介状の保存直後の断片（読み上げに重なった番号の残りなど）: 相槌も字幕も出さない
             logger.info("紹介状の保存直後の短い断片を無視しました")
+            self._record_user(asr_raw, final_text, language, "保存直後の断片")
             await self._send_state("idle")
             return
+        self._record_user(asr_raw, final_text, language, None)
         shown = self._shown_user_text(final_text)
         print(f"[聞き取り:{language}] {shown}")
         await self._send_caption(shown, role="user")
@@ -483,6 +517,8 @@ class VoiceLoop:
             seq = 0
             muted = False
             backchannel_word = ""
+            self._last_lookup_query = None
+            spoken_lines: list[str] = []
             try:
                 # 相槌: 聞き取りの確定直後、LLM の 1 文目を待たずに鳴らす（音声モードだけ）
                 if timing is not None and self._backchannels is not None:
@@ -497,6 +533,8 @@ class VoiceLoop:
                         self._gate.mute(expected_sec=remaining)
                         self._conversation.note_backchannel()
                         backchannel_word = clip.text
+                        self._transcripts.append("backchannel", self._conversation.session_id, self._edge_id(),
+                                                 text=clip.text)
                 while (sentence := await sentences.get()) is not None:
                     if backchannel_word:  # 「はい、…」を相槌と重ねない
                         sentence = strip_leading_backchannel(sentence, backchannel_word)
@@ -505,6 +543,7 @@ class VoiceLoop:
                             continue
                     shown = self._conversation.redact(sentence)  # 読み上げは本物、画面とコンソールは伏せる
                     print(f"[井戸端AI] {shown}")
+                    spoken_lines.append(shown)
                     spoken = speech_text(sentence)  # 括弧書きは字幕だけ
                     if not spoken:
                         continue
@@ -545,6 +584,7 @@ class VoiceLoop:
             elif self._dialogue.last_search_ms is not None and source is None:
                 print(f"[検索] {self._dialogue.last_search_ms:.0f}ms、"
                       f"参考資料 {len(self._dialogue.last_references)} 件")
+            self._record_assistant(spoken_lines, timing, from_timer=source is not None)
         self._arm_phone_timer()
 
     def _arm_phone_timer(self) -> None:
@@ -562,6 +602,10 @@ class VoiceLoop:
             wait = deadline - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
+                continue
+            if self._hearing or self._turn_tasks:
+                # 来訪者が話している・その発話を聞き取っている途中なら、終わるまで待つ（続きの断片かもしれない）
+                await asyncio.sleep(_HEARING_POLL_SEC)
                 continue
             await self._respond_and_speak("", "ja", None, source=self._conversation.on_phone_timeout)
             if self._conversation.phone_deadline == deadline:
@@ -620,7 +664,39 @@ class VoiceLoop:
         except Exception:
             logger.warning("検索語を作れませんでした", exc_info=True)
             return None
-        return self._dialogue.safe_query(raw)
+        self._last_lookup_query = self._dialogue.safe_query(raw)
+        return self._last_lookup_query
+
+    # ------------------------------------------------------------------
+    # 文字記録（WP06）
+    # ------------------------------------------------------------------
+
+    def _record_user(self, asr_raw: str, text: str, language: str, ignored: str | None) -> None:
+        """来訪者の 1 発話を文字記録に書く。氏名・地区・電話番号の答えは書かない。"""
+        label = self._conversation.private_label
+        if label:
+            asr_raw = text = f"（{label}を伺いました）"
+        elif ignored:  # 保存直後の断片は番号の残りのことがあるので、数字を伏せる
+            asr_raw, text = _mask_digits(asr_raw), _mask_digits(text)
+        else:
+            asr_raw, text = self._conversation.redact(asr_raw), self._conversation.redact(text)
+        self._transcripts.append("user", self._conversation.session_id, self._edge_id(),
+                                 asr_raw=asr_raw, text=text, language=language, ignored=ignored)
+
+    def _record_assistant(self, lines: list[str], timing: TurnTiming | None, from_timer: bool) -> None:
+        """案内役の 1 応答を文字記録に書く（読み上げた文・行為・検索語・出典・安全装置で捨てた文・計測値）。"""
+        d = self._dialogue
+        dropped = [{"reason": x["reason"], "text": self._conversation.redact(x["text"])} for x in d.last_dropped]
+        if not lines and not dropped:
+            return  # 電話番号の断片を預かったときなど、何も言っていない
+        self._transcripts.append(
+            "assistant", self._conversation.session_id, self._edge_id(),
+            text="".join(lines), proposal=self._conversation.turn_info or None,
+            search_query=d.last_search_query, lookup_query=self._last_lookup_query,
+            references=[{"id": r.chunk_id, "title": r.title, "url": r.source_url} for r in d.last_references],
+            cited=[r.chunk_id or r.source_url for r in d.last_cited], dropped=dropped,
+            timing=timing.as_record() if timing is not None else None, trigger="phone_timeout" if from_timer else None,
+        )
 
     def _edge_id(self) -> str:
         return self._edge.edge_id if self._edge is not None else ""
@@ -683,6 +759,10 @@ class VoiceLoop:
             await self._edge_server.stop()
         if self._edge is not None:
             await self._edge.stop()
+
+
+def _mask_digits(text: str) -> str:
+    return re.sub(r"[0-9０-９〇零一二三四五六七八九]", "＊", text)
 
 
 def current_season(month: int | None = None) -> str:

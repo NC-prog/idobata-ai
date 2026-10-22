@@ -357,6 +357,20 @@ class DialogueConfig:
     )
     building_location_pattern: str = r"[0-9０-９一二三四]階|ロビー|奥|隣|そば|横|手前|右|左|突き当た|入口|入り口|正面|向かい|近く"
     unknown_facility_sentence: str = "{name}の場所は、近くの職員にお尋ねください。"
+    # 館内の話をしている文か（building_claim_patterns はこれに当たる文だけ見る。行事の「料理教室があります」は見ない）
+    building_context_pattern: str = r"館内|ロビー|庁舎|この建物|ここ(に|には|の)|こちら(に|には|の)|[0-9０-９一二三四五]階|市役所の中"
+    # 館内の設備・場所が「ある」と言う文（名詞が登録に無ければ読み上げない。「お茶コーナーがあります」の類。WP06）
+    building_claim_patterns: tuple[str, ...] = (
+        # 設備らしい語尾の名詞 ＋ あります
+        (r"(?P<noun>[一-龥ァ-ヶー]{0,8}(?:コーナー|ルーム|スペース|売店|カウンター|ブース|ラウンジ|カフェ|喫茶|食堂)"
+         r"|[一-龥ァ-ヶー]{1,8}室)(?:が|も|は)、?[^。]{0,12}(?:あります|ございます|設けて|用意して)"),
+        # 館内の場所 ＋ に（は）○○が あります
+        (r"(?:館内|ロビー|[0-9０-９一二三四五]階|庁舎|建物の中|この建物)(?:に|の中に|の奥に|の横に)は?、?"
+         r"(?P<noun>[^、。がはも]{1,12})(?:が|も)(?:あります|ございます)"),
+        # ○○は 館内の場所 に あります
+        (r"(?P<noun>[^、。はがも]{1,12})は、?(?:この建物の|館内の|庁舎の)?"
+         r"(?:[0-9０-９一二三四五]階|ロビー|館内|庁舎内|入口|入り口)[^。、]{0,8}に(?:あります|ございます)"),
+    )
     # 来訪者が登録の無い設備の場所・有無を聞いたら、LLM を通さず unknown_facility_sentence で答える
     facility_question_pattern: str = r"どこ|ありますか|あります？|ある？|場所|行きたい|使いたい|使えますか|探して"
     # 緊急連絡先の名前だけ言って番号を言わなかったときに足す文
@@ -403,6 +417,14 @@ class DialogueConfig:
     # 「最近、お変わりありませんか」の類（8B が毎回そのまま使い回すので、雑談のターンだけ・1 会話 1 回）
     checkin_pattern: str = r"お変わり(あり|ない|は)"
     visitor_question_pattern: str = r"[か？?][。]?$|ますか|ですか|どこ|いつ|何|なに|どう|教えて"
+    # 雑談寄りの発話（挨拶・天気・人物像への質問）では、参考資料のベクトル類似度のしきい値をこれに上げる（WP06）
+    smalltalk_pattern: str = (
+        r"^(こんにちは|こんばんは|おはよう|どうも|はじめまして)|寒く?なり|寒い(です)?ね|暑い(です)?ね|涼しく|暖かい(です)?ね|"
+        r"冷えます|いい(お)?天気|天気がいい|日本語|うまい(です)?ね|上手(です)?ね|あなたの(お)?名前|お名前は|出身|"
+        r"どこから来|何歳|好きな|趣味|あなた|職員さんですか|ロボット|人間"
+    )
+    # 雑談の誤った資料は 0.80〜0.84（BM25 の語の一致で入る）。手続きの資料は 0.85〜0.89（WP06 実測）
+    smalltalk_min_vector_score: float = 0.88
     # 1 回の応答で読み上げる問い（「〜ですか？」で終わる文）の数。2 つ目以降は捨てる（行為の提案文は別）
     max_questions_per_reply: int = 1
     question_sentence_pattern: str = r"[？?][」』）)]?$|(でしょうか|ませんか|ますか)。$"
@@ -464,6 +486,8 @@ class ActionsConfig:
 
     # アバターの呼び名（仮。市民公募で決める前提）。環境変数 IDOBATA_AVATAR_NAME
     avatar_name: str = "いどちゃん"
+    # 呼び名を VOICEVOX のユーザー辞書に入れるときのアクセント核（イ\ドチャン）
+    avatar_accent: int = 1
     backchannel_enabled: bool = True
     backchannel_path: Path = SERVER_ROOT / "context" / "backchannel.yaml"
     # 相槌の事前合成にかけてよい時間（秒）。超えたら残りは使うときに合成する
@@ -540,8 +564,6 @@ class ReferralConfig:
         r"担当の課(へ|に)|案内役|ことになりました"
     )
     assistant_note_max_chars: int = 80
-    # 紹介状を作る範囲: 提案のきっかけの発話の前後この往復数（いまの話題の中だけ）
-    window_turns: int = 2
     # 同意の後の聞き取り（手続きごとの項目は procedures.yaml の intake）
     intake_max_questions: int = 3
     intake_phrase_max_tokens: int = 200
@@ -640,6 +662,23 @@ class StaffConfig:
 
 
 @dataclass(frozen=True)
+class AdminConfig:
+    """管理者ロール（/admin/、LAN 内のみ、Basic 認証）。職員パネルとは別のユーザー・パスワード（WP06）。"""
+
+    user: str = "admin"
+    # 環境変数 IDOBATA_ADMIN_PASSWORD。空なら /admin/ は使えない
+    password: str = ""
+
+
+@dataclass(frozen=True)
+class TranscriptConfig:
+    """会話の文字記録（$DATA/transcripts/<site>/<date>.jsonl、WP06）。音声・映像は残さない。"""
+
+    # 保持日数（起動時に古い日を消す。保全したセッションは残す）。環境変数 IDOBATA_TRANSCRIPT_RETENTION_DAYS
+    retention_days: int = 7
+
+
+@dataclass(frozen=True)
 class CaptionConfig:
     """字幕表示の設定。"""
 
@@ -684,6 +723,8 @@ class AppConfig:
     lookup: LookupConfig = field(default_factory=LookupConfig)
     referral: ReferralConfig = field(default_factory=ReferralConfig)
     staff: StaffConfig = field(default_factory=StaffConfig)
+    admin: AdminConfig = field(default_factory=AdminConfig)
+    transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
     tidbit: TidbitConfig = field(default_factory=TidbitConfig)
     edge: EdgeConfig = field(default_factory=EdgeConfig)
 
@@ -736,6 +777,9 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     referral = ReferralConfig(retention_days=int(_parse_float(
         env, "IDOBATA_REFERRAL_RETENTION_DAYS", ReferralConfig.retention_days)))
     staff = StaffConfig(password=env.get("IDOBATA_STAFF_PASSWORD", "").strip())
+    admin = AdminConfig(password=env.get("IDOBATA_ADMIN_PASSWORD", "").strip())
+    transcript = TranscriptConfig(retention_days=int(_parse_float(
+        env, "IDOBATA_TRANSCRIPT_RETENTION_DAYS", TranscriptConfig.retention_days)))
     dialogue = DialogueConfig(
         idle_timeout_sec=_parse_float(
             env, "IDOBATA_IDLE_TIMEOUT_SEC", DialogueConfig.idle_timeout_sec
@@ -755,6 +799,8 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         lookup=lookup,
         referral=referral,
         staff=staff,
+        admin=admin,
+        transcript=transcript,
         persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
     )
 
