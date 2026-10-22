@@ -19,7 +19,7 @@ import logging
 import sys
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -174,6 +174,8 @@ class VoiceLoop:
         self._knowledge = KnowledgeStore(config.data_dir, config.site, config.knowledge)
         # 最後に確定した来訪者の発話の時刻（monotonic）。待機に戻ったら None
         self._last_utterance_at: float | None = None
+        # 電話番号の断片の続きを待つタイマー（期限を過ぎたら聞き直す）
+        self._phone_timer: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # 起動
@@ -409,6 +411,11 @@ class VoiceLoop:
         self._last_utterance_at = time.monotonic()
         self._asr.push_rolling_context(final_text)
         final_text = self._asr_fixes.apply(final_text)
+        if self._conversation.ignores(final_text):
+            # 紹介状の保存直後の断片（読み上げに重なった番号の残りなど）: 相槌も字幕も出さない
+            logger.info("紹介状の保存直後の短い断片を無視しました")
+            await self._send_state("idle")
+            return
         shown = self._shown_user_text(final_text)
         print(f"[聞き取り:{language}] {shown}")
         await self._send_caption(shown, role="user")
@@ -456,7 +463,8 @@ class VoiceLoop:
     # ------------------------------------------------------------------
 
     async def _respond_and_speak(
-        self, text: str, language: str, timing: TurnTiming | None
+        self, text: str, language: str, timing: TurnTiming | None,
+        source: Callable[[], AsyncIterator[str]] | None = None,
     ) -> None:
         """LLM の応答を 1 文ずつ受け、1 文できるごとに合成して流す。
 
@@ -467,7 +475,7 @@ class VoiceLoop:
         async with self._turn_lock:
             sentences: asyncio.Queue[str | None] = asyncio.Queue()
             producer = asyncio.create_task(
-                self._produce_sentences(text, language, sentences, timing), name="llm-stream"
+                self._produce_sentences(text, language, sentences, timing, source), name="llm-stream"
             )
             self._reply_count += 1
             utterance_id = f"u{self._reply_count:04d}"
@@ -534,9 +542,30 @@ class VoiceLoop:
             if timing is not None:
                 timing.search_ms = self._dialogue.last_search_ms
                 print(f"[計測] 発話終了→ {timing.summary()}")
-            elif self._dialogue.last_search_ms is not None:
+            elif self._dialogue.last_search_ms is not None and source is None:
                 print(f"[検索] {self._dialogue.last_search_ms:.0f}ms、"
                       f"参考資料 {len(self._dialogue.last_references)} 件")
+        self._arm_phone_timer()
+
+    def _arm_phone_timer(self) -> None:
+        """電話番号の断片を預かっていれば、続きを待つタイマーを動かす（1 つだけ）。"""
+        if self._conversation.phone_deadline is None:
+            return
+        if self._phone_timer is None or self._phone_timer.done():
+            self._phone_timer = asyncio.create_task(self._watch_phone_deadline(), name="phone-wait")
+            self._bg_tasks.add(self._phone_timer)
+            self._phone_timer.add_done_callback(self._bg_tasks.discard)
+
+    async def _watch_phone_deadline(self) -> None:
+        # 断片が来るたびに期限は延びる。期限を過ぎたら聞き直す（1 回）か、番号なしで進める
+        while (deadline := self._conversation.phone_deadline) is not None:
+            wait = deadline - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue
+            await self._respond_and_speak("", "ja", None, source=self._conversation.on_phone_timeout)
+            if self._conversation.phone_deadline == deadline:
+                return  # 何も進まなかった（念のため。止まらないループにしない）
 
     async def _produce_sentences(
         self,
@@ -544,10 +573,12 @@ class VoiceLoop:
         language: str,
         out: asyncio.Queue[str | None],
         timing: TurnTiming | None,
+        source: Callable[[], AsyncIterator[str]] | None = None,
     ) -> None:
-        """LLM の応答を文に切って out に積む。最後に None を積む。"""
+        """LLM の応答を文に切って out に積む。最後に None を積む。source があればその文を流す。"""
         try:
-            async for sentence in self._conversation.respond(text, language):
+            stream = source() if source is not None else self._conversation.respond(text, language)
+            async for sentence in stream:
                 if timing is not None and not timing.t_first_sentence:
                     timing.t_first_sentence = time.monotonic()
                 await out.put(sentence)

@@ -265,6 +265,8 @@ class Dialogue:
         self.last_cited: list[Reference] = []
         # (user, assistant) の組を直近 history_turns 件だけ保持する
         self._history: deque[tuple[str, str]] = deque(maxlen=self._cfg.history_turns)
+        self._question_re = re.compile(self._cfg.question_sentence_pattern)
+        self._personal_question_re = re.compile(self._cfg.personal_question_pattern)
         # LLM ストリームを読むスレッド（タスクが GC で消えないよう参照を持つ）
         self._worker: asyncio.Future[None] | None = None
 
@@ -315,7 +317,19 @@ class Dialogue:
 
     def add_turn(self, user: str, assistant: str) -> None:
         """LLM を通さずに答えたターン（行為の定型文など）を履歴に積む。"""
+        self._push(user, assistant)
+
+    def _push(self, user: str, assistant: str) -> None:
         self._history.append((user, assistant))
+
+    def restore(self, snapshot: list[tuple[str, str]], user: str, assistant: str) -> None:
+        """履歴を snapshot（history で取ったもの）に戻し、1 ターンを足す（紹介状の聞き取りを 1 行にまとめる）。
+
+        聞き取りのターンが多いと maxlen で前の話が押し出されるので、位置ではなく写しで戻す。
+        """
+        self._history.clear()
+        self._history.extend(snapshot)
+        self._push(user, assistant)
 
     async def respond(
         self,
@@ -352,7 +366,7 @@ class Dialogue:
             self.last_references, self.last_cited, self.last_search_ms = [], [], None
             reply = self._cfg.unknown_facility_sentence.format(name=asked)
             logger.info("登録の無い館内の設備（%s）を聞かれたので、決まった文で答えます", asked)
-            self._history.append((text, reply))
+            self._push(text, reply)
             yield reply
             return
 
@@ -364,7 +378,7 @@ class Dialogue:
             # 地区・町の様子を聞かれたのに資料が無い: 様子を作らず、教えてもらう（人物像の「土地勘がまだ薄い」）
             reply = self._cfg.unknown_place_reply.format(place=place)
             logger.info("資料の無い地区の様子を聞かれたので、教えてもらう文で返します")
-            self._history.append((text, reply))
+            self._push(text, reply)
             yield reply
             return
         messages = self.build_messages(text, language, refs, hint)
@@ -391,7 +405,7 @@ class Dialogue:
                     sentence = await self._finish_sentence(raw, cited)
                     sentence, dept_state = self._fix_department(sentence, expected_dept, dept_state)
                     sentence = self._fix_floor_of_last_department(sentence, sentences)
-                    if self._drop(sentence, text, sentences, previous):
+                    if self._asks_personal(sentence) or self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
                         continue
                     if dropped_echo and not sentences:
@@ -413,7 +427,8 @@ class Dialogue:
             if tail and dropped_echo and not sentences:
                 tail = _LEADING_PARTICLE_RE.sub("", tail)
             # 何も言っていないときの最後の文は捨てない（応答が空になる）
-            if tail and (not sentences or not self._drop(tail, text, sentences, previous)):
+            if tail and not self._asks_personal(tail) and (
+                    not sentences or not self._drop(tail, text, sentences, previous)):
                 sentences.append(tail)
                 yield tail
         self.last_cited = [refs[i - 1] for i in sorted(cited) if 0 < i <= len(refs)]
@@ -435,7 +450,7 @@ class Dialogue:
             yield _FALLBACK_REPLY.get(language, _FALLBACK_REPLY["ja"])
             return
         reply = "".join(sentences)
-        self._history.append((text, reply))
+        self._push(text, reply)
         logger.debug("応答: %s", reply)
 
     def _rain_likely(self) -> bool:
@@ -556,10 +571,30 @@ class Dialogue:
         if self._is_repeat(sentence, previous):
             logger.info("これまでの応答と同じ文を読み上げずに捨てました")
             return True
+        if self._too_many_questions(sentence, said):
+            logger.info("1 回の応答で 2 つ目以降の問いを読み上げずに捨てました")
+            return True
         if self._extra_help_offer(sentence, text):
             logger.info("「お困りのことは」「お変わりありませんか」の類を重ねない（1 会話 1 回・尋ねられた直後は言わない）")
             return True
         return False
+
+    def _asks_personal(self, sentence: str) -> bool:
+        """氏名・電話番号・住所を尋ねる文か。LLM の応答は紹介状の聞き取りの外なので、言わずに捨てる。
+
+        聞き取り（同意の後）の質問は actions.py の定型文で言い、この対話を通らない。
+        """
+        if not sentence or not self._personal_question_re.search(sentence):
+            return False
+        logger.warning("紹介状の聞き取りの外で、氏名・電話番号・住所を尋ねる文を LLM が出したので読み上げずに捨てました")
+        logger.debug("捨てた文: %s", sentence)
+        return True
+
+    def _too_many_questions(self, sentence: str, said: list[str]) -> bool:
+        """1 回の応答の問い（「〜ですか？」で終わる文）が上限を超えるか。"""
+        if not self._question_re.search(sentence.strip()):
+            return False
+        return sum(1 for x in said if self._question_re.search(x.strip())) >= self._cfg.max_questions_per_reply
 
     def _extra_help_offer(self, sentence: str, user_text: str) -> bool:
         """「お困りのことはありませんか」「お変わりありませんか」の類を言わない場面か（もう言った、または尋ねられた直後）。"""

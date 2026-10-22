@@ -62,13 +62,43 @@ _PHONE_RE = re.compile(r"(0\d{1,4})[-ー－‐\s、,の]{0,2}(\d{1,4})[-ー－�
 _DIGITS = str.maketrans("０１２３４５６７８９〇零一二三四五六七八九", "0123456789" "00" "123456789")
 
 
-def find_phone(text: str) -> str | None:
-    """来訪者の発話の中の電話番号（全角も）。言っていなければ None。"""
+# 電話番号の桁数（固定電話 10 桁・携帯 11 桁）。区切って言われた断片はこの桁数まで連結してから確定する
+PHONE_DIGITS_MIN = 10
+PHONE_DIGITS_MAX = 11
+
+
+def normalize_digits(text: str) -> str:
+    """全角数字・漢数字（一桁ずつ）・「ゼロ」「マル」を半角の数字に。"""
     t = text.translate(_DIGITS)
     # 一桁ずつ読んだ番号は ASR が「ゼロ九ゼロの一二三四…」と書く
-    t = re.sub(r"ゼロ|ぜろ|マル|まる", "0", t)
-    m = _PHONE_RE.search(t)
-    return "-".join(m.groups()) if m else None
+    return re.sub(r"ゼロ|ぜろ|マル|まる", "0", t)
+
+
+def find_phone(text: str) -> str | None:
+    """来訪者の発話の中の電話番号（全角も）。言っていなければ None。
+
+    区切りの途中まで（「090の1234の」）を番号とみなさないよう、桁数が 10〜11 のものだけを返す。
+    """
+    m = _PHONE_RE.search(normalize_digits(text))
+    if m is None or not PHONE_DIGITS_MIN <= len("".join(m.groups())) <= PHONE_DIGITS_MAX:
+        return None
+    return "-".join(m.groups())
+
+
+def phone_digits(text: str) -> str:
+    """発話の中の数字だけを並べたもの（ゼロ・漢数字・全角を半角に。「の」「ー」などの区切りは捨てる）。"""
+    return re.sub(r"\D", "", normalize_digits(text))
+
+
+def format_phone(digits: str) -> str | None:
+    """連結した数字を「090-1234-5678」の形に。桁数が電話番号でなければ None。"""
+    if not PHONE_DIGITS_MIN <= len(digits) <= PHONE_DIGITS_MAX or not digits.startswith("0"):
+        return None
+    if len(digits) == 11:
+        return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
+    if digits[1] in "36":  # 東京・大阪（03・06）は 2-4-4
+        return f"{digits[:2]}-{digits[2:6]}-{digits[6:]}"
+    return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"  # 市外局番 4 桁（江田島 0823・安芸太田 0826）
 
 
 def phone_for_speech(phone: str) -> str:
