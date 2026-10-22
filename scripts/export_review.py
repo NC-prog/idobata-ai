@@ -40,10 +40,12 @@ MASK = "＊＊"
 _PHONE_RE = re.compile(r"[0-9０-９〇零一二三四五六七八九ゼロマル][0-9０-９〇零一二三四五六七八九ゼロマル\-ー－‐の、\s]{5,}"
                        r"[0-9０-９〇零一二三四五六七八九]")
 _NAME_RES = (
-    re.compile(r"((?:私|わたし|わたくし|僕|ぼく|俺|おれ|わし|名前)(?:は|が)?、?)[一-龥ぁ-んァ-ヶ]{1,6}"
+    re.compile(r"((?:私|わたし|わたくし|僕|ぼく|俺|おれ|わし)(?:は|が)?、?|名前(?:は|が)、?)[一-龥ぁ-んァ-ヶ]{1,6}"
                r"(?=です|と申します|といいます|と言います|って言います|でございます)"),
     re.compile(r"[一-龥]{1,4}(?=さん|様|さま|くん|ちゃん)"),
 )
+# 紹介状の聞き取りの答えの置き換え（「（お名前を伺いました）」）。言い直しの判定には使わない
+_PLACEHOLDER_RE = re.compile(r"^（[^）]*を伺いました）$")
 _ADDRESS_RE = re.compile(r"[0-9０-９一二三四五六七八九十〇百千]+\s*(?:丁目|番地|番|号)")
 
 
@@ -116,7 +118,8 @@ def extract(rows: list[dict[str, Any]], places: list[str]) -> list[dict[str, Any
         for row in items:
             speaker = row.get("speaker")
             if speaker == "user":
-                if row.get("ignored"):
+                if row.get("ignored") or _PLACEHOLDER_RE.match(str(row.get("text") or "")):
+                    last_user, last_assistant = None, None
                     continue
                 text = str(row.get("text") or "")
                 if row.get("asr_raw") and row.get("asr_raw") != text:

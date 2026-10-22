@@ -147,10 +147,16 @@ def test_export_review_extracts_four_kinds_and_redacts() -> None:
         row(6, "assistant", text="そうなんですね。"),
         row(7, "user", asr_raw="私は山田です。能美町の中町3丁目に住んでいます", text="私は山田です。能美町の中町3丁目に住んでいます"),
         row(8, "user", asr_raw="090の1234の5678", text="090の1234の5678", ignored="保存直後の断片"),
+        # 紹介状の聞き取りの答えの置き換えは、続いても言い直しにしない
+        row(9, "user", asr_raw="（お電話番号を伺いました）", text="（お電話番号を伺いました）"),
+        row(10, "assistant", text="お住まいの地区を教えていただけますか？町の名前までで大丈夫です。",
+            dropped=[{"reason": "テスト", "text": "町の名前までで大丈夫です。"}]),
+        row(11, "user", asr_raw="（お電話番号を伺いました）", text="（お電話番号を伺いました）"),
     ]
     out = ex.extract(rows, places)
     kinds = [x["kind"] for x in out]
-    assert kinds == ["asr_fixed", "dropped", "declined", "rephrased"]
+    assert kinds == ["asr_fixed", "dropped", "declined", "rephrased", "dropped"]
+    assert out[4]["text"] == "町の名前までで大丈夫です。"  # 「名前」の後ろを氏名として伏せない
     assert out[0]["asr_raw"] == "国宝の切り替えで" and out[0]["text"] == "国保の切り替えで"
     assert out[2]["action"] == "refer" and out[2]["proposed_turn"]["user"] == "国保の切り替えで"
     dump = json.dumps(out, ensure_ascii=False)
