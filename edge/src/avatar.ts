@@ -4,7 +4,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils, type VRM, type VRMHumanBoneName } from "@pixiv/three-vrm";
 
-import type { AvatarState, Viseme } from "./protocol";
+import type { AvatarState, PartyState, Viseme } from "./protocol";
 
 const VISEMES: Viseme[] = ["aa", "ih", "ou", "ee", "oh"];
 
@@ -26,6 +26,14 @@ const POSES: Record<AvatarState, Pose> = {
   speaking: { lean: 0.04, headYaw: 0, headPitch: 0, gazeX: 0, gazeY: 0, happy: 0.25, relaxed: 0 },
 };
 
+// 目の前の輪（WP02）による上乗せ。誰もいないときは少しうつむいて視線を外し、近くに人が来たら顔を上げ、
+// 輪ができたら相手（カメラ）を見る。カメラが無いときは PARTY 扱い（上乗せ無し＝従来どおり）
+const PARTY_OFFSET: Record<PartyState, Partial<Pose>> = {
+  NONE: { headPitch: 0.08, gazeX: 0.25, gazeY: -0.35, happy: -0.05 },
+  PRESENT: { headPitch: -0.03, gazeX: 0.1, gazeY: 0 },
+  PARTY: {},
+};
+
 // 姿勢の切り替わりの速さ（1/秒）と、口形の追従の速さ
 const POSE_RATE = 4;
 const MOUTH_RATE = 28;
@@ -44,6 +52,7 @@ export class Avatar {
   private readonly gazeTarget = new THREE.Object3D();
   private readonly camera: THREE.PerspectiveCamera;
   private state: AvatarState = "idle";
+  private party: PartyState = "PARTY";
   private pose: Pose = { ...POSES.idle };
   private mouth: Record<Viseme, number> = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
   private elapsed = 0;
@@ -75,6 +84,10 @@ export class Avatar {
 
   setState(state: AvatarState): void {
     this.state = state;
+  }
+
+  setParty(party: PartyState): void {
+    this.party = party;
   }
 
   /** 胸から上が入るようにカメラを置く（頭の高さはモデルから取る）。下 3 割は字幕が重なる */
@@ -109,9 +122,11 @@ export class Avatar {
     if (!vrm) return;
     this.elapsed += dt;
     const target = POSES[this.state];
+    // 話している・考えている間は輪の上乗せをしない（相手に向いたまま）
+    const offset = this.state === "idle" || this.state === "listening" ? PARTY_OFFSET[this.party] : {};
     const p = this.pose;
     for (const key of Object.keys(p) as (keyof Pose)[]) {
-      p[key] = approach(p[key], target[key], POSE_RATE, dt);
+      p[key] = approach(p[key], target[key] + (offset[key] ?? 0), POSE_RATE, dt);
     }
 
     // 呼吸（ゆるい上下）と、発話中の軽い頷き

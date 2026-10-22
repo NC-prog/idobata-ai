@@ -4,8 +4,10 @@ import * as THREE from "three";
 
 import { startMic, SpeechPlayer } from "./audio";
 import { Avatar } from "./avatar";
+import { startCamera } from "./camera";
 import { FrontLink } from "./link";
-import type { DownMessage, SpeakMessage } from "./protocol";
+import { KIND_JPEG, KIND_PCM } from "./protocol";
+import type { CameraMessage, DownMessage, SpeakMessage } from "./protocol";
 
 // WebSocket のポート。既定は 8765、ページの URL に ?ws=<番号> を付けると変えられる（試験用に別ポートで動かすとき）
 const WS_PORT = Number(new URLSearchParams(location.search).get("ws")) || 8765;
@@ -85,6 +87,30 @@ let lastSpeakAt = 0;
 // speak が来ていない応答（合成失敗など）だけ caption の本文をそのまま出す
 const CAPTION_FALLBACK_MS = 2000;
 
+/** 上りバイナリに種別の 1 バイトを付ける（PCM と JPEG を同じ接続で送る） */
+function framed(kind: number, data: ArrayBuffer): ArrayBuffer {
+  const out = new Uint8Array(data.byteLength + 1);
+  out[0] = kind;
+  out.set(new Uint8Array(data), 1);
+  return out.buffer;
+}
+
+let cameraStarted = false;
+
+/** フロントから届いたカメラの取り方で、カメラを 1 回だけ開く（開けなければフロントに知らせる） */
+async function onCameraConfig(msg: CameraMessage): Promise<void> {
+  if (cameraStarted || !msg.enabled) return;
+  cameraStarted = true;
+  try {
+    const info = await startCamera(msg, (jpeg) => link.sendBinary(framed(KIND_JPEG, jpeg)));
+    console.info("カメラ開始", info);
+    link.send({ type: "camera_status", ok: true, label: info.label, width: info.width, height: info.height });
+  } catch (err) {
+    console.error("カメラを開けません", err);
+    link.send({ type: "camera_status", ok: false, label: "", width: 0, height: 0 });
+  }
+}
+
 function sendHello(): void {
   if (!micStarted) return; // マイクが動いてから hello する（フロントは hello した接続の音声を聞く）
   link.send({ type: "hello", edge_id: edgeId(), sample_rate: 16000, caps: { aec: micAec } });
@@ -123,6 +149,12 @@ function handleMessage(msg: DownMessage): void {
     case "speak":
       pendingSpeak = msg;
       lastSpeakAt = performance.now();
+      break;
+    case "camera":
+      void onCameraConfig(msg);
+      break;
+    case "party":
+      avatar.setParty(msg.state);
       break;
     case "theme":
       backgroundEl.style.backgroundImage =
@@ -177,7 +209,7 @@ async function start(): Promise<void> {
   startEl.hidden = true;
   await playbackCtx.resume();
   try {
-    const mic = await startMic((pcm) => link.sendBinary(pcm));
+    const mic = await startMic((pcm) => link.sendBinary(framed(KIND_PCM, pcm)));
     micAec = mic.aec;
     micStarted = true;
     console.info("マイク開始", mic);

@@ -32,6 +32,7 @@ from .actions import Conversation
 from .asr_client import ASRClient, language_name, load_site_vocabulary
 from .audio_input import EdgeAudioInput, MicrophoneInput, WavFileInput, list_audio_devices
 from .backchannel import BackchannelBank, BackchannelClip, strip_leading_backchannel
+from .camera import CameraClient, PartySnapshot, PartyState
 from .config import SERVER_ROOT, ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue, speech_text
 from .edge_bridge import EdgeBridge
@@ -39,6 +40,7 @@ from .edge_server import AdminPanel, EdgeServer, StaffPanel
 from .knowledge import KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
+from .openers import load_openers
 from .persona import load_persona
 from .procedures import AsrFixes, load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
@@ -117,6 +119,7 @@ class VoiceLoop:
         output_device: DeviceSpec,
         output_wav_dir: Path | None,
         edge: bool = False,
+        camera_debug: bool = False,
     ) -> None:
         self._mode = mode
         self._input_wavs = input_wavs
@@ -178,6 +181,18 @@ class VoiceLoop:
         self._edge_server: EdgeServer | None = None
         if edge:
             self._edge = EdgeBridge(config.edge.ws_host, config.edge.ws_port)
+        # カメラと輪（WP02 A）。エッジのブラウザが撮って送る。IDOBATA_CAMERA=0 なら作らない（常に輪がある扱い）
+        self._camera: CameraClient | None = None
+        if edge and config.camera.enabled:
+            self._camera = CameraClient(config.camera, config.party,
+                                        config.data_dir / "models" / config.camera.model_file,
+                                        on_change=self._on_party_change, debug=camera_debug)
+        self._openers = load_openers(SERVER_ROOT / "context" / "openers.yaml")
+        # 輪が NONE になってからの、会話を区切るタイマーと、別れの一言を言ったか
+        self._bye_task: asyncio.Task[None] | None = None
+        self._farewell_said = False
+        # 発話区間の始まりの時点で輪があったか（始まりか終わりのどちらかで輪があれば聞く）
+        self._party_at_start = True
         # エッジのページと職員パネル（/staff/）・管理者ページ（/admin/）は同じ HTTP サーバ。パネルだけでも立てる
         if edge or config.staff.password or config.admin.password:
             self._edge_server = EdgeServer(
@@ -186,6 +201,8 @@ class VoiceLoop:
                                  tuple(d.name for d in (facility.departments if facility else ())),
                                  self._asr_fixes),
                 admin=AdminPanel(self._transcripts, config.admin),
+                debug_frame=(lambda: self._camera.debug_jpeg if self._camera else None) if camera_debug else None,
+                debug_state=self._camera_state,
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）
@@ -223,6 +240,9 @@ class VoiceLoop:
         self._spawn(self._watch_knowledge(), "kb-watch")
         if self._edge is not None:
             self._edge.on_hello = self._on_edge_hello
+            if self._camera is not None:
+                self._edge.on_video = self._camera.push_jpeg
+                self._spawn(self._camera.run(), "camera")
             await self._edge.start()
         if self._edge_server is not None:
             await self._edge_server.start()
@@ -376,6 +396,7 @@ class VoiceLoop:
                     preroll.clear()
                     t_speech_start = event.timestamp_sec
                     self._hearing = True
+                    self._party_at_start = self._camera_listening()
                     await self._send_state("listening")
                 elif event.event_type == SpeechEventType.SPEECH_END:
                     try:
@@ -418,6 +439,10 @@ class VoiceLoop:
         """1 セグメントを ASR に掛け、確定テキストが出たら応答タスクを起こす。"""
         assert self._asr is not None
         timing = TurnTiming(t_speech_end=time.monotonic())
+        if not (self._party_at_start or self._camera_listening()):
+            # 目の前に輪が無い: 後ろの会話や職員の声は ASR に渡さない（VAD は回すが、結果を捨てる）
+            logger.info("輪が無いので、この発話区間は聞き取りません（%s）", self._camera_state()["state"])
+            return
         await self._send_state("thinking")
         # 提案の返事待ちは短い発話（うん・はい）が多く、言語判定を誤りやすいので会話の言語に固定する
         short_reply = self._conversation.expects_short_reply
@@ -474,14 +499,67 @@ class VoiceLoop:
         last = self._last_utterance_at
         if last is None or now - last < timeout or self._turn_lock.locked():
             return False  # 応答中は区切らない（終わってから次の確認で区切る）
-        self._last_utterance_at = None
-        await self._conversation.end_session()  # 来訪記録を 1 行書いて、履歴を消す
-        if self._asr is not None:
-            self._asr.clear_rolling_context()
+        await self._end_conversation()
         logger.info("最後の発話から %.0f秒経ったため会話を区切りました（次の発話から新しい会話）",
                     timeout)
-        await self._send_state("idle")
         return True
+
+    async def _end_conversation(self) -> None:
+        """会話を区切る: 来訪記録を 1 行書いて、履歴・話者の区別を消し、待機の見た目に戻る。"""
+        self._last_utterance_at = None
+        self._farewell_said = False
+        await self._conversation.end_session()
+        if self._asr is not None:
+            self._asr.clear_rolling_context()
+        await self._send_state("idle")
+
+    # ------------------------------------------------------------------
+    # 輪（WP02 A）
+    # ------------------------------------------------------------------
+
+    def _camera_listening(self) -> bool:
+        """対話に流してよいか（輪がある。カメラが無い・止まっているときは従来どおり聞く）。"""
+        return self._camera is None or self._camera.listening
+
+    def _camera_state(self) -> dict[str, Any]:
+        if self._camera is None:
+            return {"state": "PARTY", "count": 0, "facing": False, "camera": False}
+        snap = self._camera.snapshot
+        return {"state": snap.state.value, "count": snap.count, "facing": snap.facing, "camera": self._camera.active,
+                "people": self._camera.last_people, "timing": self._camera.timing_summary()}
+
+    async def _on_party_change(self, before: PartySnapshot, after: PartySnapshot) -> None:
+        if self._edge is not None:
+            await self._edge.send_json({"type": "party", "state": after.state.value, "count": after.count,
+                                        "facing": after.facing})
+        if after.state is PartyState.NONE:
+            if before.state is PartyState.PARTY or self._conversation.session_language is not None:
+                self._say_farewell()
+            if self._bye_task is None or self._bye_task.done():
+                self._bye_task = asyncio.create_task(self._bye_after_leave(), name="party-bye")
+        elif self._bye_task is not None and not self._bye_task.done():
+            self._bye_task.cancel()  # 戻ってきた: 会話は続ける
+
+    def _say_farewell(self) -> None:
+        """輪が解けた直後に、別れの一言を 1 会話 1 回（会話が始まっていたときだけ）。"""
+        if self._farewell_said or self._conversation.session_language is None or not self._openers.farewell:
+            return
+        self._farewell_said = True
+        line = self._openers.farewell[0]
+        logger.info("輪が解けたので別れの一言を言います")
+        self._spawn(self._respond_and_speak("", "ja", None, source=lambda: _lines(line), trigger="farewell"),
+                    "farewell")
+
+    async def _bye_after_leave(self) -> None:
+        await asyncio.sleep(config.party.bye_sec)
+        if self._camera is None or self._camera.snapshot.state is not PartyState.NONE:
+            return
+        while self._turn_lock.locked():  # 別れの一言を言い終えてから区切る
+            await asyncio.sleep(_GATE_POLL_SEC)
+        if self._last_utterance_at is None and self._conversation.session_language is None:
+            return  # 会話は始まっていない
+        await self._end_conversation()
+        logger.info("輪が無くなって %.0f 秒経ったため会話を区切りました", config.party.bye_sec)
 
     async def _drain_turns(self) -> None:
         while self._turn_tasks:
@@ -499,6 +577,7 @@ class VoiceLoop:
     async def _respond_and_speak(
         self, text: str, language: str, timing: TurnTiming | None,
         source: Callable[[], AsyncIterator[str]] | None = None,
+        trigger: str | None = None,
     ) -> None:
         """LLM の応答を 1 文ずつ受け、1 文できるごとに合成して流す。
 
@@ -589,7 +668,7 @@ class VoiceLoop:
             elif self._dialogue.last_search_ms is not None and source is None:
                 print(f"[検索] {self._dialogue.last_search_ms:.0f}ms、"
                       f"参考資料 {len(self._dialogue.last_references)} 件")
-            self._record_assistant(spoken_lines, timing, from_timer=source is not None)
+            self._record_assistant(spoken_lines, timing, trigger)
         self._arm_phone_timer()
 
     def _arm_phone_timer(self) -> None:
@@ -612,7 +691,8 @@ class VoiceLoop:
                 # 来訪者が話している・その発話を聞き取っている途中なら、終わるまで待つ（続きの断片かもしれない）
                 await asyncio.sleep(_HEARING_POLL_SEC)
                 continue
-            await self._respond_and_speak("", "ja", None, source=self._conversation.on_phone_timeout)
+            await self._respond_and_speak("", "ja", None, source=self._conversation.on_phone_timeout,
+                                          trigger="phone_timeout")
             if self._conversation.phone_deadline == deadline:
                 return  # 何も進まなかった（念のため。止まらないループにしない）
 
@@ -688,7 +768,7 @@ class VoiceLoop:
         self._transcripts.append("user", self._conversation.session_id, self._edge_id(),
                                  asr_raw=asr_raw, text=text, language=language, ignored=ignored)
 
-    def _record_assistant(self, lines: list[str], timing: TurnTiming | None, from_timer: bool) -> None:
+    def _record_assistant(self, lines: list[str], timing: TurnTiming | None, trigger: str | None) -> None:
         """案内役の 1 応答を文字記録に書く（読み上げた文・行為・検索語・出典・安全装置で捨てた文・計測値）。"""
         d = self._dialogue
         dropped = [{"reason": x["reason"], "text": self._conversation.redact(x["text"])} for x in d.last_dropped]
@@ -700,7 +780,7 @@ class VoiceLoop:
             search_query=d.last_search_query, lookup_query=self._last_lookup_query,
             references=[{"id": r.chunk_id, "title": r.title, "url": r.source_url} for r in d.last_references],
             cited=[r.chunk_id or r.source_url for r in d.last_cited], dropped=dropped,
-            timing=timing.as_record() if timing is not None else None, trigger="phone_timeout" if from_timer else None,
+            timing=timing.as_record() if timing is not None else None, trigger=trigger,
         )
 
     def _edge_id(self) -> str:
@@ -724,6 +804,17 @@ class VoiceLoop:
             assert self._edge is not None
             await self._edge.send_theme(config.site, current_season())
             await self._edge.send_state("idle")
+            cam = config.camera
+            await self._edge.send_json({
+                "type": "camera", "enabled": self._camera is not None, "label": cam.label,
+                "capture": {"width": cam.capture_width, "height": cam.capture_height, "fps": cam.capture_fps},
+                "send": {"width": cam.send_width, "height": cam.send_height, "fps": cam.send_fps,
+                         "quality": cam.jpeg_quality},
+            })
+            if self._camera is not None:
+                snap = self._camera.snapshot
+                await self._edge.send_json({"type": "party", "state": snap.state.value, "count": snap.count,
+                                            "facing": snap.facing})
 
         task = asyncio.create_task(greet(), name="edge-hello")
         self._bg_tasks.add(task)
@@ -764,6 +855,13 @@ class VoiceLoop:
             await self._edge_server.stop()
         if self._edge is not None:
             await self._edge.stop()
+        if self._camera is not None:
+            logger.info("カメラ: %s", self._camera.timing_summary())
+
+
+async def _lines(*lines: str) -> AsyncIterator[str]:
+    for line in lines:
+        yield line
 
 
 def _mask_digits(text: str) -> str:
@@ -831,6 +929,10 @@ def main() -> None:
         "--edge", action="store_true",
         help="マイク・スピーカー・アバターをブラウザ（エッジ）側に置く（http://localhost:8080/edge/）",
     )
+    parser.add_argument(
+        "--camera-debug", action="store_true",
+        help="検出の矩形とキーポイントを重ねた最新の 1 枚を /edge/debug に出す（メモリのみ。保存しない）",
+    )
     parser.add_argument("--list-devices", action="store_true", help="音声デバイス一覧を表示して終了")
     parser.add_argument("--debug", action="store_true", help="DEBUG ログ（発話本文を含む）")
     args = parser.parse_args()
@@ -860,6 +962,7 @@ def main() -> None:
         output_device=args.output_device,
         output_wav_dir=args.output_wav_dir,
         edge=args.edge,
+        camera_debug=args.camera_debug,
     )
     try:
         asyncio.run(app.run())

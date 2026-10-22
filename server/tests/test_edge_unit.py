@@ -44,14 +44,17 @@ class TestEdgeBridge:
         hellos: list[dict[str, Any]] = []
         pcm: list[bytes] = []
         bridge.on_hello = hellos.append
+        frames: list[bytes] = []
         bridge.on_pcm = pcm.append
+        bridge.on_video = frames.append
         async with websockets.connect(url) as ws:
-            await ws.send(b"\x00\x01")  # hello 前の音声は聞かない
+            await ws.send(b"\x01\x00\x01")  # hello 前の音声は聞かない
             await ws.send(json.dumps({"type": "hello", "edge_id": "e1", "sample_rate": 16000,
                                       "caps": {"aec": True}}))
             await _until(lambda: bridge.is_connected)
-            await ws.send(b"\x02\x03")
-            await _until(lambda: pcm == [b"\x02\x03"])
+            await ws.send(b"\x01\x02\x03")  # 先頭 1 バイトが種別（0x01 = PCM、0x02 = JPEG）
+            await ws.send(b"\x02\xff\xd8")
+            await _until(lambda: pcm == [b"\x02\x03"] and frames == [b"\xff\xd8"])
             assert hellos[0]["edge_id"] == "e1"
 
             await bridge.send_state("thinking")
@@ -105,7 +108,7 @@ class TestEdgeBridge:
                     await asyncio.wait_for(first.recv(), 2.0)
             assert exc.value.rcvd is not None and exc.value.rcvd.code == REPLACED_CLOSE_CODE
             assert any("別のエッジ" in r.message for r in caplog.records)
-            await second.send(b"\x01\x02")
+            await second.send(b"\x01\x01\x02")
             await _until(lambda: pcm == [b"\x01\x02"])
         await bridge.stop()
 

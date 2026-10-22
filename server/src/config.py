@@ -694,6 +694,70 @@ class StaffConfig:
 
 
 @dataclass(frozen=True)
+class CameraConfig:
+    """カメラ（エッジのブラウザが撮って送る）と姿勢推定の設定（WP02 A）。映像フレームは保存しない。"""
+
+    # 環境変数 IDOBATA_CAMERA（0 でカメラ無し。常に輪がある扱い＝従来どおり）
+    enabled: bool = True
+    # ブラウザが複数のカメラを見つけたとき、label にこの文字を含むものを使う。環境変数 IDOBATA_CAMERA_LABEL
+    label: str = "Integrated"
+    # エッジでの取り込み（getUserMedia）と、フロントへ送る JPEG
+    capture_width: int = 640
+    capture_height: int = 360
+    capture_fps: int = 10
+    send_width: int = 320
+    send_height: int = 180
+    send_fps: float = 5.0
+    jpeg_quality: float = 0.7
+    # YOLO11-pose（ultralytics。重みは $DATA/models/。GPU の予備枠で動かす）
+    model_file: str = "yolo11n-pose.pt"
+    imgsz: int = 320
+    device: str = "0"
+    det_conf: float = 0.4
+    # キーポイント（鼻・目・耳）が見えているとみなす信頼度
+    kpt_conf: float = 0.5
+    # この秒数フレームが来なければカメラが止まったとみなし、輪の判定をやめて従来どおり聞く（耳を塞がない）
+    stale_sec: float = 5.0
+    # 推論時間をログに出す間隔（フレーム数）
+    timing_log_every: int = 150
+
+
+@dataclass(frozen=True)
+class PartyConfig:
+    """目の前の「輪」（会話の相手）の判定（WP02 A）。画角に依存する値は外付けカメラに替えたら測り直す。"""
+
+    # 矩形の高さが画面の高さのこの割合以上なら近い（内蔵カメラで 2〜2.5m 相当）
+    min_box_ratio: float = 0.35
+    # 鼻と、左右の耳（無ければ目）の中点の横のずれが画面幅のこの割合以内なら正面寄り
+    face_center_tol: float = 0.04
+    # 近くて正面寄りがこの秒数続いたら輪の中、外れてこの秒数で輪の外
+    dwell_sec: float = 2.0
+    leave_sec: float = 3.0
+    max_members: int = 3
+    # 輪が NONE になってこの秒数で会話を区切る（待機タイムアウトより先に効く）
+    bye_sec: float = 8.0
+    # 輪のまま相手がこの秒数黙ったら沈黙の一言（WP02 C）。1 会話に silence_max 回まで
+    silence_sec: float = 7.0
+    silence_max: int = 2
+
+
+@dataclass(frozen=True)
+class SpeakerConfig:
+    """セッション限りの話者の区別（WP02 B）。埋め込みはメモリだけ。会話が区切れたら捨てる。"""
+
+    enabled: bool = True
+    # speechbrain の ECAPA-TDNN（Apache-2.0）。重みは $DATA/models/ に置く（CPU で動かす）
+    model_source: str = "speechbrain/spkrec-ecapa-voxceleb"
+    model_dir: str = "spkrec-ecapa-voxceleb"
+    # 同じ話者とみなすコサイン類似度（VOICEVOX の話者で実測して決める）
+    same_threshold: float = 0.5
+    # これより短い区間（声の長さ）は埋め込みが不安定なので、新しい話者を作らず近い話者に寄せる
+    min_new_speaker_sec: float = 1.0
+    max_clusters: int = 8
+    cpu_threads: int = 4
+
+
+@dataclass(frozen=True)
 class AdminConfig:
     """管理者ロール（/admin/、LAN 内のみ、Basic 認証）。職員パネルとは別のユーザー・パスワード（WP06）。"""
 
@@ -757,6 +821,9 @@ class AppConfig:
     staff: StaffConfig = field(default_factory=StaffConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
     transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    party: PartyConfig = field(default_factory=PartyConfig)
+    speaker: SpeakerConfig = field(default_factory=SpeakerConfig)
     tidbit: TidbitConfig = field(default_factory=TidbitConfig)
     edge: EdgeConfig = field(default_factory=EdgeConfig)
 
@@ -810,6 +877,10 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         env, "IDOBATA_REFERRAL_RETENTION_DAYS", ReferralConfig.retention_days)))
     staff = StaffConfig(password=env.get("IDOBATA_STAFF_PASSWORD", "").strip())
     admin = AdminConfig(password=env.get("IDOBATA_ADMIN_PASSWORD", "").strip())
+    camera = CameraConfig(
+        enabled=env.get("IDOBATA_CAMERA", "1").strip().lower() not in ("0", "false", "no", "off"),
+        label=env.get("IDOBATA_CAMERA_LABEL", "").strip() or CameraConfig.label,
+    )
     transcript = TranscriptConfig(retention_days=int(_parse_float(
         env, "IDOBATA_TRANSCRIPT_RETENTION_DAYS", TranscriptConfig.retention_days)))
     dialogue = DialogueConfig(
@@ -833,6 +904,7 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         staff=staff,
         admin=admin,
         transcript=transcript,
+        camera=camera,
         persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
     )
 

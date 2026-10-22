@@ -16,6 +16,7 @@ import asyncio
 import ipaddress
 import logging
 import secrets
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -208,9 +209,52 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
         return today_stats(panel.referrals, panel.visits, _parse_day(day))
 
 
-def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPanel | None = None) -> FastAPI:
-    """エッジページ（と職員パネル・管理者ページ）を配信する FastAPI アプリ。"""
+_DEBUG_HTML = """<!doctype html><meta charset="utf-8"><title>井戸端AI カメラ（デバッグ）</title>
+<body style="margin:0;background:#111;color:#ccc;font:14px sans-serif">
+<p style="margin:8px">検出の矩形とキーポイント（メモリ上の最新の 1 枚だけ。保存しない）。<span id="s"></span></p>
+<img id="f" style="width:640px;image-rendering:pixelated">
+<script>
+const f = document.getElementById("f"), s = document.getElementById("s");
+setInterval(async () => {
+  const r = await fetch("/edge/debug/party"); if (r.ok) s.textContent = JSON.stringify(await r.json());
+  f.src = "/edge/debug.jpg?t=" + Date.now();
+}, 300);
+</script>"""
+
+DebugFrame = Callable[[], bytes | None]
+DebugState = Callable[[], dict[str, Any]]
+
+
+def _add_debug_routes(app: FastAPI, frame: DebugFrame, state: DebugState) -> None:
+    """--camera-debug のときだけ: 検出結果を重ねた最新の 1 枚（メモリのみ）。LAN 内からだけ。"""
+    def lan_only(request: Request) -> None:
+        if not _is_lan(request.client.host if request.client else None):
+            raise HTTPException(403, "LAN 内からだけ使えます")
+
+    guard = [Depends(lan_only)]
+
+    @app.get("/edge/debug", include_in_schema=False, dependencies=guard)
+    async def debug_page() -> HTMLResponse:
+        return HTMLResponse(_DEBUG_HTML, headers={"Cache-Control": "no-store"})
+
+    @app.get("/edge/debug.jpg", include_in_schema=False, dependencies=guard)
+    async def debug_jpeg() -> Response:
+        data = frame()
+        if data is None:
+            raise HTTPException(404, "まだフレームがありません")
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.get("/edge/debug/party", include_in_schema=False, dependencies=guard)
+    async def debug_party() -> dict[str, Any]:
+        return state()
+
+
+def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPanel | None = None,
+               debug_frame: DebugFrame | None = None, debug_state: DebugState | None = None) -> FastAPI:
+    """エッジページ（と職員パネル・管理者ページ・カメラのデバッグ表示）を配信する FastAPI アプリ。"""
     app = FastAPI(title="idobata-edge", docs_url=None, redoc_url=None, openapi_url=None)
+    if debug_frame is not None:
+        _add_debug_routes(app, debug_frame, debug_state or (dict))  # /edge の静的配信より先に置く
     if staff is not None:
         _add_staff_routes(app, staff)
     if admin is not None:
@@ -236,9 +280,10 @@ class EdgeServer:
     """uvicorn を同じイベントループで動かす。"""
 
     def __init__(self, host: str, port: int, static_dir: Path, staff: StaffPanel | None = None,
-                 admin: AdminPanel | None = None) -> None:
+                 admin: AdminPanel | None = None, debug_frame: DebugFrame | None = None,
+                 debug_state: DebugState | None = None) -> None:
         cfg = uvicorn.Config(
-            create_app(static_dir, staff, admin), host=host, port=port, log_level="warning", lifespan="off",
+            create_app(static_dir, staff, admin, debug_frame, debug_state), host=host, port=port, log_level="warning", lifespan="off",
         )
         self._server = uvicorn.Server(cfg)
         self._task: asyncio.Task[None] | None = None

@@ -21,6 +21,9 @@ dependencies = [
     "transformers>=4.48",
     "trafilatura>=2.3.1",
     "playwright>=1.64.0",
+    "ultralytics>=8.4.183",
+    "speechbrain>=1.1.2",
+    "lap>=0.5.13",
 ]
 
 [dependency-groups]

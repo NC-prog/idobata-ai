@@ -5,16 +5,21 @@
 
 上り（エッジ → フロント）
 - JSON ``hello``: ``{type, edge_id, sample_rate, caps:{aec}}``
-- バイナリ: PCM16 mono 16kHz（20ms ごと）→ ``on_pcm`` に渡す（EdgeAudioInput）
+- バイナリ: 先頭 1 バイトが種別（WP02）。``0x01`` + PCM16 mono 16kHz（20ms ごと）→ ``on_pcm``（EdgeAudioInput）、
+  ``0x02`` + JPEG（カメラ、320×180・5fps）→ ``on_video``（camera.CameraClient。メモリでだけ使い、保存しない）
 - JSON ``playback_ended``: ``{type, utterance_id, last_seq}`` 再生キューが空になった
   （``last_seq`` は最後に鳴らし終えた文の番号。契約への追加。文と文の間で一瞬キューが
   空になった通知と、応答の最後の通知を見分けるのに使う）
 - JSON ``interrupt``: 予約（WP03）
+- JSON ``camera_status``: ``{type, ok, label, width, height}`` カメラを開けたか（WP02。開けなければ輪の判定はしない）
 
 下り（フロント → エッジ）
 - JSON ``state`` / ``caption`` / ``theme``
 - JSON ``speak`` + 直後にバイナリ（その文の WAV）
 - JSON ``sources``: ``{type, titles}`` 応答が使った参考資料の出典タイトル（字幕の下に薄く出す。WP03 で追加）
+- JSON ``camera``: ``{type, enabled, label, capture:{width,height,fps}, send:{width,height,fps,quality}}``
+  hello の後に送る、カメラの取り方（WP02）
+- JSON ``party``: ``{type, state, count, facing}`` 目の前の輪（NONE / PRESENT / PARTY。アバターの視線・姿勢に使う）
 
 エッジは 1 台だけ。2 台目が hello したら WARNING を出し、前のエッジを close code 4001
 （REPLACED_CLOSE_CODE）で閉じる。閉じられたページは自動で再接続しない（取り合いにしない）。
@@ -41,7 +46,13 @@ REPLACED_CLOSE_CODE = 4001
 STATES = ("idle", "listening", "thinking", "speaking")
 
 PcmHandler = Callable[[bytes], None]
+VideoHandler = Callable[[bytes], None]
+
+# 上りバイナリの種別（先頭 1 バイト）
+KIND_PCM = 0x01
+KIND_JPEG = 0x02
 HelloHandler = Callable[[dict[str, Any]], None]
+CameraStatusHandler = Callable[[dict[str, Any]], None]
 
 
 @dataclass
@@ -65,10 +76,12 @@ class EdgeBridge:
         # 受信したうち、各発話で鳴らし終えた最大の文番号（待ちより先に届いた通知用）
         self._played: dict[str, int] = {}
         self.on_pcm: PcmHandler | None = None
+        self.on_video: VideoHandler | None = None
         # 最後に hello したエッジの ID（来訪記録・紹介状に残す）
         self.edge_id = ""
         self._close_task: asyncio.Future[None] | None = None
         self.on_hello: HelloHandler | None = None
+        self.on_camera_status: CameraStatusHandler | None = None
 
     async def start(self) -> None:
         """WebSocket サーバーを開始する。"""
@@ -103,8 +116,8 @@ class EdgeBridge:
         try:
             async for message in websocket:
                 if isinstance(message, bytes):
-                    if websocket is self._audio_client and self.on_pcm is not None:
-                        self.on_pcm(message)
+                    if websocket is self._audio_client and message:
+                        self._on_binary(message)
                     continue
                 self._handle_json(websocket, message)
         except websockets.exceptions.ConnectionClosed:
@@ -114,6 +127,17 @@ class EdgeBridge:
             if websocket is self._audio_client:
                 self._audio_client = None
             logger.info("エッジ切断: %s", peer)
+
+    def _on_binary(self, message: bytes) -> None:
+        kind, payload = message[0], message[1:]
+        if kind == KIND_PCM:
+            if self.on_pcm is not None:
+                self.on_pcm(payload)
+        elif kind == KIND_JPEG:
+            if self.on_video is not None:
+                self.on_video(payload)
+        else:
+            logger.debug("未知のバイナリ種別: %d", kind)
 
     def _handle_json(self, websocket: ServerConnection, message: str) -> None:
         try:
@@ -144,6 +168,11 @@ class EdgeBridge:
                 self.on_hello(data)
         elif kind == "playback_ended":
             self._on_playback_ended(str(data.get("utterance_id", "")), data.get("last_seq"))
+        elif kind == "camera_status":
+            logger.info("エッジのカメラ: ok=%s label=%s %sx%s", data.get("ok"), data.get("label"),
+                        data.get("width"), data.get("height"))
+            if self.on_camera_status is not None:
+                self.on_camera_status(data)
         elif kind == "interrupt":
             logger.info("エッジ interrupt（WP03 まで未対応）")
         else:

@@ -171,7 +171,8 @@ async def test_phone_reask_waits_until_visitor_stops_speaking() -> None:
     app._conversation._pending = p
     calls: list[bool] = []
 
-    async def fake_respond(text: str, language: str, timing: object, source: object = None) -> None:
+    async def fake_respond(text: str, language: str, timing: object, source: object = None,
+                           trigger: str | None = None) -> None:
         calls.append(app._hearing)
         p.phone_deadline = None  # 聞き直した
 
