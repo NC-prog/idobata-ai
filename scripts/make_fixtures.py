@@ -98,6 +98,15 @@ UTTERANCES: tuple[Utterance, ...] = (
               text="イチニーサンヨンの。"),
     Utterance(filename="visitor_phone_part3_ja.wav", speaker_id=11, speaker_name="玄野武宏",
               text="ゴーロクナナハチ。"),
+    # 本人と付き添い（WP02 B の話者の区別。本人＝玄野武宏、付き添い＝冥鳴ひまり）と、後ろの職員の声（青山龍星）
+    Utterance(filename="pair_honin_1_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="自分の介護のことで相談に来ました。"),
+    Utterance(filename="pair_tsuki_1_ja.wav", speaker_id=14, speaker_name="冥鳴ひまり", text="私は娘で、付き添いで来ました。"),
+    Utterance(filename="pair_honin_2_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="最近、足がずいぶん弱ってきましてね。"),
+    Utterance(filename="pair_tsuki_2_ja.wav", speaker_id=14, speaker_name="冥鳴ひまり", text="家の中でも転びそうになるんです。"),
+    Utterance(filename="pair_honin_3_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="介護保険というのは、使えるんですかね。"),
+    Utterance(filename="pair_tsuki_3_ja.wav", speaker_id=14, speaker_name="冥鳴ひまり", text="申請のしかたを知りたいんです。"),
+    Utterance(filename="staff_bg_1_ja.wav", speaker_id=13, speaker_name="青山龍星", text="この書類、あとで課長に回しておいてください。"),
+    Utterance(filename="staff_bg_2_ja.wav", speaker_id=13, speaker_name="青山龍星", text="コピー機の紙が切れてますよ、補充しておきますね。"),
     Utterance(
         filename="visitor_trouble_ja.wav",
         speaker_id=13,

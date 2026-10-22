@@ -54,6 +54,15 @@ _LEADING_PARTICLE_RE = re.compile(r"^(と聞かれると|とおっしゃると)[
 # 来訪者の言葉の繰り返しを比べるときに無視する文字
 _ECHO_IGNORE_RE = re.compile(r"[\s、。，．,.！？!?「」『』…ー〜~]")
 
+# 話者の記号（WP02 B）。LLM には「A：〜」で渡す。応答の頭に付けてきたら外す
+_SPEAKER_LABEL_RE = re.compile(r"^[A-Z]{1,2}[：:]\s*")
+
+
+def labeled(text: str, speaker: str | None) -> str:
+    """LLM と履歴に渡す来訪者の発話（話者の記号があれば「A：〜」）。"""
+    return f"{speaker}：{text}" if speaker else text
+
+
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 
@@ -297,7 +306,8 @@ class Dialogue:
         logger.info("対話履歴をクリアしました")
 
     def build_messages(
-        self, text: str, language: str, refs: list[Reference] | None = None, hint: str = ""
+        self, text: str, language: str, refs: list[Reference] | None = None, hint: str = "",
+        speaker: str | None = None,
     ) -> list[dict[str, Any]]:
         """LLM に渡す messages を組み立てる（システムプロンプトは毎ターン作り直す）。"""
         now = self._now()
@@ -309,7 +319,8 @@ class Dialogue:
         for user, assistant in self._history:
             messages.append({"role": "user", "content": user})
             messages.append({"role": "assistant", "content": assistant})
-        content = text if language == "ja" else f"[language: {language}] {text}"
+        said = labeled(text, speaker)
+        content = said if language == "ja" else f"[language: {language}] {said}"
         # 履歴には発話だけを積む（参考資料は今のターンにだけ付ける）
         # hint は今のターンにだけ添える材料（さっき来た方の小ネタなど）
         messages.append({"role": "user",
@@ -369,12 +380,14 @@ class Dialogue:
         language: str = "ja",
         extra_refs: list[Reference] | None = None,
         hint: str = "",
+        speaker: str | None = None,
     ) -> AsyncIterator[str]:
         """1 発話に対する応答を 1 文ずつ返す。
 
         Args:
             text: 来訪者の発話（ASR の確定テキスト、または text モードの入力）
             language: 検出言語（ISO 639-1）
+            speaker: 話者の記号（WP02 B。「A」「B」…）。LLM には「A：〜」の形で渡し、履歴にもその形で積む
 
         Yields:
             応答の文。LLM が 1 文も返せなかった場合は定型の聞き返し文を 1 つ。
@@ -396,7 +409,7 @@ class Dialogue:
             # 登録の無い館内の設備の場所・有無は、場所を作らせないよう決まった文で答える
             reply = self._cfg.unknown_facility_sentence.format(name=asked)
             logger.info("登録の無い館内の設備（%s）を聞かれたので、決まった文で答えます", asked)
-            self._push(text, reply)
+            self._push(labeled(text, speaker), reply)
             yield reply
             return
 
@@ -408,10 +421,10 @@ class Dialogue:
             # 地区・町の様子を聞かれたのに資料が無い: 様子を作らず、教えてもらう（人物像の「土地勘がまだ薄い」）
             reply = self._cfg.unknown_place_reply.format(place=place)
             logger.info("資料の無い地区の様子を聞かれたので、教えてもらう文で返します")
-            self._push(text, reply)
+            self._push(labeled(text, speaker), reply)
             yield reply
             return
-        messages = self.build_messages(text, language, refs, hint)
+        messages = self.build_messages(text, language, refs, hint, speaker)
         logger.debug("発話 [%s]: %s", language, text)
         splitter = SentenceSplitter(
             self._cfg.sentence_terminators,
@@ -480,7 +493,7 @@ class Dialogue:
             yield _FALLBACK_REPLY.get(language, _FALLBACK_REPLY["ja"])
             return
         reply = "".join(sentences)
-        self._push(text, reply)
+        self._push(labeled(text, speaker), reply)
         logger.debug("応答: %s", reply)
 
     def _rain_likely(self) -> bool:
@@ -779,6 +792,7 @@ class Dialogue:
         raw = _PROPOSE_RE.sub(propose, raw)
         sentence = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", _SOURCE_MARK_RE.sub(take, raw)).strip()
         sentence = fix_greeting(sentence, greeting_for(self._now(), self._cfg), self._cfg)
+        sentence = _SPEAKER_LABEL_RE.sub("", sentence)  # 来訪者の話者の記号（「A：」）をまねた頭は外す
         if self._avatar_name:  # 「いどちゃん: こんばんは」のような話者名は外す
             # 「いどちゃん: …」「いどちゃんは、…」「いどちゃん物忘れが…」の頭の名前を外す（「いどちゃんです」は残す）
             name = re.escape(self._avatar_name)

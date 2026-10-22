@@ -98,7 +98,7 @@ async def test_short_foreign_reply_is_retried_in_session_language() -> None:
     app, _ = _loop()
     heard: list[str] = []
 
-    async def fake(text: str, language: str, timing: object) -> None:
+    async def fake(text: str, language: str, timing: object, speaker: str | None = None) -> None:
         heard.append(text)
 
     app._respond_and_speak = fake  # type: ignore[method-assign,assignment]
@@ -118,7 +118,7 @@ async def test_reply_phase_lowers_vad_threshold_and_pads_to_one_second() -> None
     from src.config import config
 
     app, _ = _loop()
-    app._respond_and_speak = lambda *a: _noop()  # type: ignore[method-assign,assignment,return-value]
+    app._respond_and_speak = lambda *a, **kw: _noop()  # type: ignore[method-assign,assignment,return-value]
     app._asr = _FakeASR([("うん。", "ja")])  # type: ignore[assignment]
     app._conversation._pending = Pending("lookup", "x", "ja")
     await app._on_segment(_voiced_frames(6), 0.0)

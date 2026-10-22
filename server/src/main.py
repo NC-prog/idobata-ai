@@ -45,6 +45,7 @@ from .persona import load_persona
 from .procedures import AsrFixes, load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
 from .site_context import load_facility, load_site_words, referral_csv_enabled
+from .speaker import SpeakerClusters, SpeakerEmbedder
 from .speech_gate import SpeechGate
 from .speech_output import (
     EdgeSpeaker,
@@ -155,6 +156,9 @@ class VoiceLoop:
         self._transcripts = TranscriptStore(config.data_dir, config.site, config.transcript.retention_days)
         self._last_lookup_query: str | None = None
         self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query)
+        # セッション限りの話者の区別（WP02 B。埋め込みはメモリだけ。会話が区切れたら捨てる）
+        self._speakers = SpeakerClusters(config.speaker)
+        self._embedder: SpeakerEmbedder | None = None
         self._conversation = Conversation(
             self._dialogue, llm, config.llm.chat_model, config.actions, config.referral, facility,
             load_tags(SERVER_ROOT / "context" / "tags.yaml"),
@@ -164,6 +168,7 @@ class VoiceLoop:
             tidbits=self._tidbits, tidbit_cfg=config.tidbit,
             procedures=load_procedures(config.asr.site_context_dir),
             asr_fixes=self._asr_fixes,
+            speaker_count=lambda: self._speakers.accepted_count,
         )
         self._llm = llm
         self._backchannels = (BackchannelBank(config.actions.backchannel_path)
@@ -237,6 +242,12 @@ class VoiceLoop:
                         self._transcripts.retention_days, removed_lines)
         await asyncio.to_thread(self._knowledge.reload_if_changed)
         self._dialogue.attach_knowledge(self._knowledge)
+        if self._mode == "voice" and config.speaker.enabled:
+            try:
+                self._embedder = await asyncio.to_thread(SpeakerEmbedder, config.speaker,
+                                                         config.data_dir / "models")
+            except Exception:
+                logger.warning("話者埋め込みのモデルを読めません。話者の区別なしで動きます", exc_info=True)
         self._spawn(self._watch_knowledge(), "kb-watch")
         if self._edge is not None:
             self._edge.on_hello = self._on_edge_hello
@@ -439,16 +450,24 @@ class VoiceLoop:
         """1 セグメントを ASR に掛け、確定テキストが出たら応答タスクを起こす。"""
         assert self._asr is not None
         timing = TurnTiming(t_speech_end=time.monotonic())
+        voiced = voiced_ms(frames, config.vad.sample_rate, config.vad.voiced_peak_ratio, config.vad.voiced_min_rms)
+        wave = np.concatenate(frames) if frames else np.zeros(0, dtype=np.float32)
         if not (self._party_at_start or self._camera_listening()):
-            # 目の前に輪が無い: 後ろの会話や職員の声は ASR に渡さない（VAD は回すが、結果を捨てる）
-            logger.info("輪が無いので、この発話区間は聞き取りません（%s）", self._camera_state()["state"])
+            # 目の前に輪が無い: 後ろの会話や職員の声は ASR に渡さない（VAD は回すが、結果を捨てる）。
+            # 話者だけは覚えておき、この声が後で輪の中で話しても相手にしない（二重の網）
+            state = self._camera.snapshot.state if self._camera is not None else PartyState.NONE
+            logger.info("輪が無いので、この発話区間は聞き取りません（%s）", state.value)
+            emb = await self._embed(wave)
+            if emb is not None:
+                self._speakers.assign(emb, voiced / 1000, state)
             return
+        # 話者の埋め込みは ASR と並べて取る（応答の遅れにしない）
+        emb_task = asyncio.create_task(self._embed(wave)) if self._embedder is not None else None
         await self._send_state("thinking")
         # 提案の返事待ちは短い発話（うん・はい）が多く、言語判定を誤りやすいので会話の言語に固定する
         short_reply = self._conversation.expects_short_reply
         force = (language_name(self._conversation.language)
                  if config.asr.force_language_on_reply and short_reply else None)
-        voiced = voiced_ms(frames, config.vad.sample_rate, config.vad.voiced_peak_ratio, config.vad.voiced_min_rms)
         frames = pad_segment(frames, config.vad.reply_pad_to_sec if short_reply else config.vad.pad_to_sec,
                              config.vad.sample_rate)
         final_text, language = await self._transcribe(frames, t_speech_start, force)
@@ -461,9 +480,19 @@ class VoiceLoop:
                         language, session_lang)
             final_text, language = await self._transcribe(frames, t_speech_start, language_name(session_lang))
         timing.t_asr_done = time.monotonic()
+        emb = await emb_task if emb_task is not None else None
         if not final_text:
             await self._send_state("idle")
             return
+        speaker: str | None = None
+        if emb is not None:
+            turn = self._speakers.assign(emb, voiced / 1000, PartyState.PARTY)
+            if not turn.accepted:
+                logger.info("輪の外で先に聞いた話者 %s の発話なので、応答しません", turn.label)
+                self._record_user(final_text, final_text, language, "輪の外の話者", turn.label)
+                await self._send_state("idle")
+                return
+            speaker = turn.label
 
         self._last_utterance_at = time.monotonic()
         self._asr.push_rolling_context(final_text)
@@ -471,16 +500,16 @@ class VoiceLoop:
         if self._conversation.ignores(final_text):
             # 紹介状の保存直後の断片（読み上げに重なった番号の残りなど）: 相槌も字幕も出さない
             logger.info("紹介状の保存直後の短い断片を無視しました")
-            self._record_user(asr_raw, final_text, language, "保存直後の断片")
+            self._record_user(asr_raw, final_text, language, "保存直後の断片", speaker)
             await self._send_state("idle")
             return
-        self._record_user(asr_raw, final_text, language, None)
+        self._record_user(asr_raw, final_text, language, None, speaker)
         shown = self._shown_user_text(final_text)
         print(f"[聞き取り:{language}] {shown}")
         await self._send_caption(shown, role="user")
         # 応答生成中も音声フレームの消費を止めない（マイクのキューが詰まらないように）
         task = asyncio.create_task(
-            self._respond_and_speak(final_text, language, timing), name="turn"
+            self._respond_and_speak(final_text, language, timing, speaker=speaker), name="turn"
         )
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
@@ -509,6 +538,7 @@ class VoiceLoop:
         self._last_utterance_at = None
         self._farewell_said = False
         await self._conversation.end_session()
+        self._speakers.reset()  # 話者の埋め込みも捨てる（メモリのみ）
         if self._asr is not None:
             self._asr.clear_rolling_context()
         await self._send_state("idle")
@@ -578,6 +608,7 @@ class VoiceLoop:
         self, text: str, language: str, timing: TurnTiming | None,
         source: Callable[[], AsyncIterator[str]] | None = None,
         trigger: str | None = None,
+        speaker: str | None = None,
     ) -> None:
         """LLM の応答を 1 文ずつ受け、1 文できるごとに合成して流す。
 
@@ -593,7 +624,7 @@ class VoiceLoop:
                 return
             sentences: asyncio.Queue[str | None] = asyncio.Queue()
             producer = asyncio.create_task(
-                self._produce_sentences(text, language, sentences, timing, source), name="llm-stream"
+                self._produce_sentences(text, language, sentences, timing, source, speaker), name="llm-stream"
             )
             self._reply_count += 1
             utterance_id = f"u{self._reply_count:04d}"
@@ -703,10 +734,11 @@ class VoiceLoop:
         out: asyncio.Queue[str | None],
         timing: TurnTiming | None,
         source: Callable[[], AsyncIterator[str]] | None = None,
+        speaker: str | None = None,
     ) -> None:
         """LLM の応答を文に切って out に積む。最後に None を積む。source があればその文を流す。"""
         try:
-            stream = source() if source is not None else self._conversation.respond(text, language)
+            stream = source() if source is not None else self._conversation.respond(text, language, speaker)
             async for sentence in stream:
                 if timing is not None and not timing.t_first_sentence:
                     timing.t_first_sentence = time.monotonic()
@@ -756,7 +788,17 @@ class VoiceLoop:
     # 文字記録（WP06）
     # ------------------------------------------------------------------
 
-    def _record_user(self, asr_raw: str, text: str, language: str, ignored: str | None) -> None:
+    async def _embed(self, wave: np.ndarray) -> np.ndarray | None:
+        if self._embedder is None or len(wave) < config.vad.sample_rate // 4:
+            return None
+        try:
+            return await asyncio.to_thread(self._embedder.embed, wave)
+        except Exception:
+            logger.warning("話者埋め込みに失敗しました（この区間は話者を区別しません）", exc_info=True)
+            return None
+
+    def _record_user(self, asr_raw: str, text: str, language: str, ignored: str | None,
+                     speaker: str | None = None) -> None:
         """来訪者の 1 発話を文字記録に書く。氏名・地区・電話番号の答えは書かない。"""
         label = self._conversation.private_label
         if label:
@@ -766,7 +808,8 @@ class VoiceLoop:
         else:
             asr_raw, text = self._conversation.redact(asr_raw), self._conversation.redact(text)
         self._transcripts.append("user", self._conversation.session_id, self._edge_id(),
-                                 asr_raw=asr_raw, text=text, language=language, ignored=ignored)
+                                 asr_raw=asr_raw, text=text, language=language, ignored=ignored,
+                                 speaker_label=speaker)
 
     def _record_assistant(self, lines: list[str], timing: TurnTiming | None, trigger: str | None) -> None:
         """案内役の 1 応答を文字記録に書く（読み上げた文・行為・検索語・出典・安全装置で捨てた文・計測値）。"""
@@ -847,6 +890,7 @@ class VoiceLoop:
     async def _shutdown(self) -> None:
         await self._drain_turns()
         await self._conversation.end_session()
+        self._speakers.reset()
         await close_browser()
         if self._asr is not None:
             await self._asr.close()

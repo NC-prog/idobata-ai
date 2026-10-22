@@ -126,6 +126,9 @@ class Pending:
     phone_reasked: bool = False
     # 提案した時点の対話履歴の写し（保存後、聞き取りを外してここに戻す）
     history_before: list[tuple[str, str]] = field(default_factory=list)
+    # 話者の記号（WP02 B）: 提案のきっかけを言った人と、同意を言った人（聞き取りの主。ほかの人の答えも受け付ける）
+    speaker: str | None = None
+    consent_speaker: str | None = None
 
 
 @dataclass
@@ -169,6 +172,7 @@ class Conversation:
         now: Callable[[], datetime] | None = None,
         clock: Callable[[], float] = time.monotonic,
         asr_fixes: AsrFixes | None = None,
+        speaker_count: Callable[[], int] | None = None,
     ) -> None:
         self.dialogue = dialogue
         self._llm = llm
@@ -186,6 +190,9 @@ class Conversation:
         self._tidbit_cfg = tidbit_cfg or TidbitConfig()
         self._procedures = procedures or Procedures()
         self._asr_fixes = asr_fixes
+        # この会話で相手として受け付けた話者の数（来訪記録に書く。WP02 B）と、いま話している人の記号
+        self._speaker_count = speaker_count
+        self._speaker: str | None = None
         # この会話のターン（来訪者, 応答）（プロセス内のみ）
         self._turns: list[tuple[str, str]] = []
         # 聞き取った氏名・地区・電話番号（画面・コンソールで伏せるため。会話の区切りで消す）
@@ -269,6 +276,7 @@ class Conversation:
             "turns": session.turns, "language": session.language, "tags": tags,
             "backchannel_count": session.backchannel_count, "proposals": session.proposals,
             "referral_id": session.referral_id, "edge_id": self._edge_id(),
+            "speakers": self._speaker_count() if self._speaker_count is not None else None,
         }
         try:
             self._visits.write(record)
@@ -279,8 +287,9 @@ class Conversation:
     # 1 ターン
     # ------------------------------------------------------------------
 
-    async def respond(self, text: str, language: str = "ja") -> AsyncIterator[str]:
-        """1 発話に応答する。ターンを記録する。"""
+    async def respond(self, text: str, language: str = "ja", speaker: str | None = None) -> AsyncIterator[str]:
+        """1 発話に応答する。ターンを記録する。speaker は話者の記号（WP02 B。無ければ区別しない）。"""
+        self._speaker = speaker
         self.dialogue.begin_turn()
         if self.ignores(text):
             logger.info("紹介状の保存直後の短い断片（数字だけ・1〜2 語）なので応答しません")
@@ -331,7 +340,7 @@ class Conversation:
         # 問いの文から後は、提案が付くか分かるまで（応答の終わりまで）読み上げずに預かる。
         # 提案が付けば LLM の問いは落とし、提案文だけを問いとして残す（問いは 1 回の応答で 1 つ）
         held: list[str] = []
-        async for s in self.dialogue.respond(text, language, hint=hint):
+        async for s in self.dialogue.respond(text, language, hint=hint, speaker=self._speaker):
             reply.append(s)
             if held or self.dialogue.is_question(s):
                 held.append(s)
@@ -356,7 +365,7 @@ class Conversation:
         if kind is not None and proposing:
             line = self._t(kind, "propose")
             self.dialogue.extend_last_reply(line)
-            self._pending = Pending(kind, text, language, turn_index=index,
+            self._pending = Pending(kind, text, language, turn_index=index, speaker=self._speaker,
                                     history_before=self.dialogue.history)
             self._session.proposals.append({"action": kind, "outcome": None})
             self.turn_info["proposed"] = kind
@@ -498,6 +507,7 @@ class Conversation:
                 self.dialogue.add_turn(text, line)
                 return
             self._outcome("accepted")
+            p.consent_speaker = self._speaker
             async for s in self._act(p):
                 lines.append(s)
                 yield s
@@ -570,7 +580,8 @@ class Conversation:
         if not result.found:
             yield self._t("lookup", "not_found" if result.queued else "failed")
             return
-        async for s in self.dialogue.respond(p.user_text, p.language, extra_refs=result.references):
+        async for s in self.dialogue.respond(p.user_text, p.language, extra_refs=result.references,
+                                             speaker=p.speaker):
             yield s
 
     # ---- つなぐ（紹介状）------------------------------------------------
@@ -631,7 +642,10 @@ class Conversation:
         skipped = re.search(cfg.skip_pattern, text) is not None
         ack = self._t("refer", "skipped") if skipped else ""
         if p.phase == "intake":
-            p.intake[p.intake_idx]["answer"] = "" if skipped else text.strip()
+            answer = "" if skipped else text.strip()
+            if answer and self._speaker and p.consent_speaker and self._speaker != p.consent_speaker:
+                answer += cfg.companion_answer_suffix  # 付き添いの方が代わりに答えた（職員に分かるように）
+            p.intake[p.intake_idx]["answer"] = answer
             p.intake_idx += 1
             if p.intake_idx < len(p.intake):
                 yield ack + p.intake[p.intake_idx]["ask"]

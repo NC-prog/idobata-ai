@@ -17,6 +17,8 @@
 | `visitor_name_ja.wav` / `visitor_hai_ja.wav` / `visitor_area_ja.wav` | 「山田です。」（架空の名前）「はい。」「能美町です。」 | VOICEVOX:玄野武宏 |
 | `visitor_contact_ja.wav` / `visitor_phone_ja.wav` | 「電話でお願いします。」「090の1234の5678です。」（架空の番号。かなで読ませる） | VOICEVOX:玄野武宏 |
 | `visitor_phone_part1_ja.wav` / `_part2_` / `_part3_` | 区切って言った番号の断片「ゼロキューゼロの。」「イチニーサンヨンの。」「ゴーロクナナハチ。」（WP05 実機の指摘。part3 は保存後に重なる断片の確認にも使う） | VOICEVOX:玄野武宏 |
+| `pair_honin_{1,2,3}_ja.wav` / `pair_tsuki_{1,2,3}_ja.wav` | 本人と付き添いの会話（WP02 B の話者の区別。交互に流す） | VOICEVOX:玄野武宏（本人）・冥鳴ひまり（付き添い） |
+| `staff_bg_{1,2}_ja.wav` | 後ろの職員の声（輪が無いときと、会話の途中に流して捨てられることを見る） | VOICEVOX:青山龍星 |
 | `visitor_trouble_ja.wav` | 課の決まらない相談「ちょっと困ったことがあって。」（WP04 未特定） | VOICEVOX:青山龍星 |
 
 形式: 24kHz / mono / PCM16、前 0.5 秒・後 0.8 秒の無音つき。

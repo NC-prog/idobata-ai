@@ -16,7 +16,9 @@
   Ruri v3 埋め込み → LanceDB、気象庁の予報）。手続きの詳細は出典があるときだけ言う。結果は `docs/WP03_result.md`
 - WP06（現在）: 会話の文字記録（7 日・管理者だけが読む・保全）と誤り探しの素材（`scripts/export_review.py`）、
   アバターの呼び名の語彙、紹介状の要約の窓、設備の作り話・雑談の資料の安全装置。結果は `docs/WP06_result.md`
-- 日本語 TTS は VOICEVOX で確定（WP00.5）。カメラ・YOLO11-pose・別機のエッジ PC は WP02、紹介状・職員パネルは WP04
+- WP02（現在）: カメラ（エッジのブラウザが撮って JPEG で送る）と YOLO11-pose で目の前の「輪」を決め、輪の中の人とだけ話す。
+  セッション限りの話者の区別（ECAPA、A・B…）、能動的な切り出し・沈黙・別れ、別機エッジの設計。結果は `docs/WP02_result.md`
+- 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
 
 ## 実行環境（重要）
 
@@ -40,7 +42,7 @@
 | LLM（Qwen3-8B-AWQ） | `http://127.0.0.1:8001/v1` | `IDOBATA_BACKEND_URL`（Tailscale 経由の T2／3660。未設定なら起動時エラー） | `/models/llm` | 0.45（約7.2GB、実測 7.3GB、`--enforce-eager`） |
 | TTS（VOICEVOX） | `http://127.0.0.1:50021` | 同左 | - | CPU（8 スレッド、`VOICEVOX_CPU_THREADS`） |
 | エッジ（`--edge`） | ページ `http://localhost:8080/edge/`、WebSocket `ws://127.0.0.1:8765` | 同左 | - | - |
-| 予備 | - | - | - | 0.20（約3.2GB、YOLO11-pose・多言語TTS用。使い切らない） |
+| 予備 | - | - | - | 0.20（約3.2GB、YOLO11-pose・多言語TTS用。使い切らない。WP02 でフロントのプロセスが YOLO＋話者埋め込みで約 0.4GB） |
 
 - モデル名は必ず `/models/` プレフィックス付き。API key は `"dummy"`
 - Qwen3 の思考モードは既定オフ（サーバに `--reasoning-parser` を付けず、リクエストで `chat_template_kwargs.enable_thinking=false`）
@@ -63,6 +65,10 @@
   人物像と食い違う言い方（contradictions）は読み上げない。資料の無い地区の様子は作らず教えてもらう
 - 短い返事（うん・はい・そう）: 返事待ちの間だけ VAD のしきい値と最小発話長を下げ、短い区間は無音を足して ASR に渡す。
   日本語の会話で短い区間が他言語と判定されたら日本語に固定して聞き直す（`VADConfig` / `ASRConfig`）
+- カメラ（WP02）: カメラは**エッジのブラウザが開いて** 320×180 の JPEG・5fps を WebSocket で送る（Python から直接開かない）。
+  フロントはメモリ上でだけ YOLO11-pose に掛け、**フレームを保存しない・顔識別をしない**。輪（PARTY）が無いときは ASR に渡さない。
+  `IDOBATA_CAMERA=0` でカメラ無し（従来どおり）。ultralytics は AGPL-3.0 で、既定では利用状況を外に送るので `YOLO_OFFLINE=1`・`sync=False` で止めている。
+  モデルの重みは `~/idobata-data/models/`（yolo11n-pose.pt、speechbrain の spkrec-ecapa-voxceleb）。エッジのブラウザは GPU で描画させる
 - 挨拶は時間帯で変える（`src/timeofday.py`。5〜10 時 おはようございます、10〜17 時 こんにちは、17 時以降 こんばんは）。
   応答・相槌・定型文（`{greeting}`）・アナウンスで同じ判定を使い、LLM が別の時間帯の挨拶を言ったら読み上げ前に直すASR は返事待ちの間だけ言語を固定する
   （`deploy/standalone/asr/chat_template.jinja` の `force_language`）
@@ -93,6 +99,7 @@ uv run python -m tests.eval.run --site etajima --set smalltalk   # 雑談 10 問
 # エッジ（ブラウザ）モード: マイク・スピーカー・アバターはブラウザ側
 (cd ../edge && npm ci && npm run build)    # 初回と edge/ を変えたとき。成果物は server/static/edge/
 uv run python -m src.main --mode voice --edge   # → Chrome で http://localhost:8080/edge/ を開き「はじめる」
+uv run python -m src.main --mode voice --edge --camera-debug   # → http://localhost:8080/edge/debug で検出の重ね描き（メモリのみ）
 
 # WP04: 職員パネル・行為（.env で設定。職員パネルは IDOBATA_STAFF_PASSWORD を入れたときだけ有効）
 #   IDOBATA_AVATAR_NAME=いどちゃん          アバターの呼び名（仮）
@@ -157,6 +164,10 @@ server/
 │   ├── lookup.py         # 調べる（許可ドメインだけ・5 秒で打ち切り・見つからなければ夜のビルドに回す）
 │   ├── referrals.py      # 紹介状（受付番号・保存・期限・安芸太田は CSV）、来訪記録、小ネタ、今日の集計
 │   ├── procedures.py     # 手続きの常用語（procedures.yaml）と担当課の規則による決定
+│   ├── camera.py         # カメラと「輪」（YOLO11-pose・ByteTrack。フレームはメモリのみ。WP02 A）
+│   ├── speaker.py        # セッション限りの話者の区別（ECAPA。A・B…。埋め込みはメモリのみ。WP02 B）
+│   ├── openers.py        # 切り出し・沈黙・別れの定型文（context/openers.yaml。WP02 C）
+│   ├── transcripts.py    # 会話の文字記録（WP06）
 │   ├── caption_feed.py   # 字幕配信（WP03 で使用予定）
 │   ├── announcer.py      # テンプレート発話（未使用）
 │   └── main.py           # text / voice の 2 モード、--edge
@@ -165,7 +176,7 @@ server/
 └── tests/
 kb/                       # 知識パックのビルド（sources/<site>.yaml、build.py、README.md。pack/ は git 管理外）
 edge/                     # エッジページ（Vite + TypeScript、three.js + @pixiv/three-vrm）
-├── src/                  # main.ts / avatar.ts / audio.ts / link.ts / protocol.ts
+├── src/                  # main.ts / avatar.ts / audio.ts / camera.ts / link.ts / protocol.ts
 └── public/               # mic-processor.js（AudioWorklet）、models/（VRM サンプル）、backgrounds/
 ```
 
