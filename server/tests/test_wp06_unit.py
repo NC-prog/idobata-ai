@@ -264,3 +264,16 @@ async def test_fragment_heard_during_save_is_ignored_even_after_long_readback(tm
     clock.t += 14  # 受付番号の読み上げが終わってから順番が回ってきた
     assert conv.ignores("五六七八。", heard_at=heard)  # 聞いた時刻で数える
     assert not conv.ignores("五六七八。")  # 今聞いたものなら 10 秒を過ぎている
+
+
+async def test_template_turn_does_not_carry_previous_search_state(tmp_path: Path) -> None:
+    ref = Reference("国保の加入・脱退時の届出", "https://x/2", "国保", 0.891, 3.0, chunk_id="c2")
+    llm = SpyLLM([["国保ですね。[出典:1]<propose:refer>"]], chat_reply=[PHRASED, _refer_json()])
+    c = _conv(llm, tmp_path)
+    c.dialogue.attach_knowledge(_KB([ref]))
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    assert c.dialogue.last_references == [ref] and c.dialogue.last_search_query
+    await _say(c, "お願いします")  # 定型文で答えるターン（LLM を通らない）
+    d = c.dialogue
+    assert (d.last_references, d.last_cited, d.last_search_query, d.last_search_ms, d.last_dropped) == (
+        [], [], None, None, [])

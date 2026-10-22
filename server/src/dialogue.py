@@ -321,6 +321,14 @@ class Dialogue:
             user, reply = self._history[-1]
             self._history[-1] = (user, reply + line)
 
+    def begin_turn(self) -> None:
+        """ターンごとの記録（提案・検索・出典・捨てた文）を消す。LLM を通さない定型文のターンでも前のものを残さない。"""
+        self.last_proposal = None
+        self.last_dropped = []
+        self.last_search_query = None
+        self.last_search_ms = None
+        self.last_references, self.last_cited = [], []
+
     def replace_last_reply(self, user: str, old: str, new: str) -> None:
         """直前のターン (user, old) の応答を、実際に読み上げた文 new に置き換える（提案のために落とした問いを残さない）。
 
@@ -366,16 +374,13 @@ class Dialogue:
             応答の文。LLM が 1 文も返せなかった場合は定型の聞き返し文を 1 つ。
             履歴には、言い終えた全文を 1 ターンとして積む。
         """
-        self.last_proposal = None
-        self.last_dropped = []
-        self.last_search_query = None
+        self.begin_turn()
         text = text.strip()
         if not text:
             return
 
         if language != "ja":
             # 多言語は後日。LLM に任せると日本語で中身を答えてしまうので、決まった文を返す
-            self.last_references, self.last_cited, self.last_search_ms = [], [], None
             logger.info("日本語以外の発話（%s）には準備中の旨を返します", language)
             yield self._cfg.foreign_reply
             return
@@ -383,7 +388,6 @@ class Dialogue:
         asked = self._asked_unknown_facility(text)
         if asked is not None:
             # 登録の無い館内の設備の場所・有無は、場所を作らせないよう決まった文で答える
-            self.last_references, self.last_cited, self.last_search_ms = [], [], None
             reply = self._cfg.unknown_facility_sentence.format(name=asked)
             logger.info("登録の無い館内の設備（%s）を聞かれたので、決まった文で答えます", asked)
             self._push(text, reply)

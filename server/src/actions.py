@@ -281,6 +281,7 @@ class Conversation:
 
     async def respond(self, text: str, language: str = "ja") -> AsyncIterator[str]:
         """1 発話に応答する。ターンを記録する。"""
+        self.dialogue.begin_turn()
         if self.ignores(text):
             logger.info("紹介状の保存直後の短い断片（数字だけ・1〜2 語）なので応答しません")
             return
@@ -699,6 +700,7 @@ class Conversation:
         deadline = self.phone_deadline
         if p is None or deadline is None or self._clock() < deadline:
             return
+        self.dialogue.begin_turn()
         logger.info("電話番号の続きが %.0f 秒来ませんでした（%d 桁）", self._ref_cfg.phone_wait_sec, len(p.phone_buf))
         lines: list[str] = []
         async for s in self._phone_incomplete(p):
