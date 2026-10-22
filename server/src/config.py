@@ -492,7 +492,7 @@ class KnowledgeConfig:
     keyword_rank: int = 5
     # 知識パックの差し替え（manifest.json の更新）を確かめる間隔（秒）
     reload_check_sec: float = 60.0
-    # 埋め込みは CPU（GPU の予備枠は YOLO11-pose 用に残す）
+    # 埋め込みは CPU（GPU の予備枠は姿勢推定と話者埋め込み用に残す）
     embed_device: str = "cpu"
     embed_threads: int = 4
 
@@ -715,11 +715,20 @@ class CameraConfig:
     send_height: int = 180
     send_fps: float = 5.0
     jpeg_quality: float = 0.7
-    # YOLO11-pose（ultralytics。重みは $DATA/models/。GPU の予備枠で動かす）
-    model_file: str = "yolo11n-pose.pt"
-    imgsz: int = 320
-    device: str = "0"
-    det_conf: float = 0.4
+    # 姿勢推定は rtmlib（RTMDet-nano で人を見つけ、RTMPose-s で COCO 17 点。Apache-2.0、ONNX Runtime）。
+    # 重みは $DATA/models/rtmpose/<名前>/ の下の end2end.onnx（download.openmmlab.com の onnx_sdk の zip を展開したもの）
+    det_model: str = "rtmdet_nano_8xb32-100e_coco-obj365-person-05d8511e"
+    pose_model: str = "rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504"
+    det_input: tuple[int, int] = (320, 320)
+    pose_input: tuple[int, int] = (192, 256)
+    det_score: float = 0.4
+    # ONNX Runtime の実行先。cuda が使えなければ cpu で動く
+    device: str = "cuda"
+    # 人の対応付け（簡易トラッカー）: 前のフレームの矩形と IoU がこれ以上なら同じ人。届かなければ中心の距離が
+    # 画面の対角のこの割合以内の最も近い人。この数のフレーム見えなければ忘れる（5fps で 3 秒）
+    track_iou: float = 0.3
+    track_center_dist: float = 0.15
+    track_max_missed: int = 15
     # キーポイント（鼻・目・耳）が見えているとみなす信頼度
     kpt_conf: float = 0.5
     # この秒数フレームが来なければカメラが止まったとみなし、輪の判定をやめて従来どおり聞く（耳を塞がない）

@@ -97,3 +97,34 @@ async def test_silence_line_after_silence_sec_at_most_twice(monkeypatch: Any) ->
     task.cancel()
     assert said == ["ゆっくりで大丈夫ですよ。", "ほかにも何かあれば、どうぞ。"]  # 1 会話 2 回まで
     await app._tts.close()
+
+
+async def test_silence_while_proposed_repeats_the_proposal_once(monkeypatch: Any) -> None:
+    import src.main as main_mod
+    from src.actions import Pending
+
+    monkeypatch.setattr(main_mod, "config", replace(main_mod.config, party=PartyConfig(silence_sec=0.2)))
+    monkeypatch.setattr(main_mod, "_SILENCE_POLL_SEC", 0.02)
+    app, _edge = _loop()
+    assert app._camera is not None
+    said: list[tuple[str, list[str]]] = []
+
+    async def fake_respond(text: str, language: str, timing: object, source: Any = None,
+                           trigger: str | None = None, speaker: str | None = None) -> None:
+        said.append((trigger or "", [s async for s in source()]))
+        app._last_activity = time.monotonic()
+
+    app._respond_and_speak = fake_respond  # type: ignore[method-assign]
+    app._camera.tracker.snapshot = PartySnapshot(PartyState.PARTY, 1, True)
+    app._opener_said = True
+    app._conversation._ensure_session("ja")
+    app._conversation._pending = Pending("refer", "国保の切り替え", "ja")
+    app._last_activity = time.monotonic()
+    task = asyncio.create_task(app._watch_silence())
+    for _ in range(30):
+        app._camera.push_jpeg(b"\xff\xd8")
+        await asyncio.sleep(0.05)
+    task.cancel()
+    assert said == [("silence_reask", ["このこと、担当の課に伝えておきましょうか？"])]  # 1 回だけ、沈黙の一言は言わない
+    assert app._silence_count == 0
+    await app._tts.close()

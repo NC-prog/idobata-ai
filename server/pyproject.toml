@@ -21,10 +21,15 @@ dependencies = [
     "transformers>=4.48",
     "trafilatura>=2.3.1",
     "playwright>=1.64.0",
-    "ultralytics>=8.4.183",
     "speechbrain>=1.1.2",
-    "lap>=0.5.13",
+    "rtmlib>=0.0.16",
+    "onnxruntime-gpu>=1.31.0",
 ]
+
+[tool.uv]
+# rtmlib は CPU 版の onnxruntime を要求するが、GPU 版（onnxruntime-gpu、同じ import 名）を使う。
+# 両方入ると壊れるので、CPU 版はここで外す（GPU が使えなければ onnxruntime-gpu が CPU で動く）
+override-dependencies = ["onnxruntime; sys_platform == 'never'"]
 
 [dependency-groups]
 dev = [

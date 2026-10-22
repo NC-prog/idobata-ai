@@ -72,7 +72,7 @@ def test_unseen_member_leaves_after_leave_sec() -> None:
 
 
 async def test_camera_client_stale_means_listening() -> None:
-    cam = CameraClient(CameraConfig(stale_sec=0.2), CFG, Path("unused.pt"))
+    cam = CameraClient(CameraConfig(stale_sec=0.2), CFG, Path("unused"))
     assert not cam.active and cam.listening  # まだフレームが来ていない＝従来どおり聞く
     cam.push_jpeg(b"\xff\xd8")
     assert cam.active and not cam.listening  # フレームが来ていて輪が無い＝聞かない
@@ -156,3 +156,42 @@ async def test_farewell_once_and_bye_ends_conversation(monkeypatch: Any) -> None
     assert edge.sent[0] == {"type": "party", "state": "NONE", "count": 0, "facing": False}
     assert app._conversation.session_language is None and "idle" in edge.states  # 8 秒（ここでは 0.2 秒）で区切る
     await app._tts.close()
+
+
+def test_simple_tracker_keeps_ids_by_iou_and_center() -> None:
+    from src.camera import SimpleTracker
+
+    t = SimpleTracker(CameraConfig(track_max_missed=2))
+    a, b = np.array([10, 10, 60, 170.0]), np.array([200, 20, 260, 175.0])
+    first = t.update(np.stack([a, b]), 320, 180)
+    assert first == [1, 2]
+    # 少し動いても同じ ID（IoU）。並び順が入れ替わっても対応付ける
+    assert t.update(np.stack([b + 4, a + 3]), 320, 180) == [2, 1]
+    # 速く動いて重ならなくても、中心が近ければ同じ人
+    assert t.update(np.stack([a + 40, b + 4]), 320, 180) == [1, 2]
+    # 見えなくなって track_max_missed を超えたら忘れる → 次は新しい ID
+    for _ in range(3):
+        t.update(np.zeros((0, 4)), 320, 180)
+    assert t.update(np.stack([a]), 320, 180) == [3]
+    t.reset()
+    assert t.update(np.stack([a]), 320, 180) == [1]
+
+
+def test_pose_detector_on_local_weights() -> None:
+    """重みが $DATA/models/rtmpose にあれば、本物の推論（CPU）が動き、誰もいない画面では人を出さない（無ければ飛ばす）。"""
+    import pytest
+
+    from src.camera import PoseDetector
+    from src.config import config
+
+    root = config.data_dir / "models" / "rtmpose"
+    if not root.is_dir():
+        pytest.skip("姿勢推定の重みが無い")
+    import cv2
+
+    img = np.full((180, 320, 3), 40, dtype=np.uint8)
+    ok, buf = cv2.imencode(".jpg", img)
+    assert ok
+    det = PoseDetector(CameraConfig(device="cpu"), CFG, root)
+    out = det.detect(buf.tobytes(), debug=True)
+    assert out is not None and out.people == [] and out.debug_jpeg  # 誰もいない画面

@@ -148,6 +148,7 @@ IDOBATA_CAMERA_LABEL=<USB カメラの名前の一部>
 | 5〜10 分 | Windows の初期設定（ローカルアカウント `idobata-kiosk`）。固定 IP（1 章）。`ping 192.168.50.10` が通ること |
 | 10〜15 分 | Chrome を入れる（オフラインインストーラを USB メモリで）。3 章のポリシーを PowerShell で入れ、`chrome://policy` で確認 |
 | 15〜18 分 | `C:\idobata\kiosk.cmd`（4 章）を置き、`shell:startup` にショートカット |
+| 18 分 | **GPU で描画しているかを確かめる**: キオスクではない普通の Chrome（同じプロファイル `--user-data-dir=C:\idobata\chrome-profile`）で `chrome://gpu` を開き、「Graphics Feature Status」の **WebGL** と **WebGL2** が「**Hardware accelerated**」であること。「Software only」「Unavailable」なら、GPU のドライバを入れ直す（ソフトウェア描画ではカメラの送出が 1fps 未満に落ちる。WP02 A の測定） |
 | 18〜23 分 | 5 章の Windows の設定（電源・自動ログオン・Update の時間・通知・音声の既定・カメラとマイクの許可・画面の向き） |
 | 23〜25 分 | フロントの `.env` に 6 章の設定を入れて再起動（`IDOBATA_EDGE_ALLOW` にエッジ PC の IP） |
 | 25〜30 分 | `kiosk.cmd` を実行 → アバターが出る → フロントのログに `エッジ hello` と `エッジのカメラ: ok=True label=<USB カメラ>`。カメラの前に立って 2 秒で `輪: PRESENT → PARTY` と切り出しの声、話しかけて応答、離れて別れの一言。最後に再起動して、自動ログオン → キオスク → つながるまでを確かめる |

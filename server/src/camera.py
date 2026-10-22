@@ -2,8 +2,9 @@
 
 エッジ（ブラウザ）が撮ったカメラの映像を、320×180 の JPEG・5fps で WebSocket に載せて送ってくる
 （カメラを Python から直接開く経路は作らない。別機のエッジでも同じ形で動かすため）。
-ここではそれを **メモリ上でだけ** YOLO11-pose に掛け、目の前の「輪」（会話の相手の 1〜3 人）を決める。
-映像フレームはディスクに書かない。顔識別（個人特定）はしない。人の対応付けはトラック ID（セッション限り）。
+ここではそれを **メモリ上でだけ** 姿勢推定（rtmlib の RTMDet-nano＋RTMPose-s、COCO 17 点、ONNX Runtime）に掛け、
+目の前の「輪」（会話の相手の 1〜3 人）を決める。映像フレームはディスクに書かない。顔識別（個人特定）はしない。
+人の対応付けは矩形の IoU と中心の距離による簡易トラッカー（トラック ID はセッション限り）。
 
 輪の判定（人ごと、毎フレーム）:
 - 近い: 矩形の高さが画面の高さの party.min_box_ratio 以上
@@ -17,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import statistics
 import time
 from collections import deque
@@ -133,22 +133,106 @@ class Detection:
     debug_jpeg: bytes | None = None
 
 
-class PoseDetector:
-    """YOLO11-pose（ultralytics）。JPEG を受け取り、人ごとの矩形・キーポイントから PersonObs を作る。
+class SimpleTracker:
+    """人の対応付け（セッション限りのトラック ID。保存しない）。
 
-    ultralytics の利用状況の送信と、実行時の自動インストールは止める（外に何も送らない）。
+    前のフレームの矩形と IoU がしきい値以上の人を同じ人とみなし（IoU の大きい組から貪欲に）、残りは中心の距離が
+    画面の対角の track_center_dist 以内で最も近い人に対応付ける。track_max_missed フレーム見えなければ忘れる。
     """
 
-    def __init__(self, cfg: CameraConfig, party: PartyConfig, model_path: Path) -> None:
+    def __init__(self, cfg: CameraConfig) -> None:
+        self._cfg = cfg
+        self._tracks: dict[int, tuple[np.ndarray, int]] = {}  # id → (矩形 xyxy, 見えなかったフレーム数)
+        self._next = 1
+
+    def reset(self) -> None:
+        self._tracks.clear()
+        self._next = 1
+
+    def update(self, boxes: np.ndarray, frame_w: int, frame_h: int) -> list[int]:
+        cfg = self._cfg
+        ids: list[int | None] = [None] * len(boxes)
+        free = dict(self._tracks)
+        pairs = sorted(((_iou(b, tb), i, tid) for i, b in enumerate(boxes) for tid, (tb, _) in free.items()),
+                       reverse=True)
+        for iou, i, tid in pairs:
+            if iou < cfg.track_iou:
+                break
+            if ids[i] is None and tid in free:
+                ids[i] = tid
+                del free[tid]
+        diag = float(np.hypot(frame_w, frame_h))
+        for i, b in enumerate(boxes):
+            if ids[i] is not None or not free:
+                continue
+            tid, dist = min(((t, float(np.linalg.norm(_center(b) - _center(tb)))) for t, (tb, _) in free.items()),
+                            key=lambda x: x[1])
+            if dist <= cfg.track_center_dist * diag:
+                ids[i] = tid
+                del free[tid]
+        out: list[int] = []
+        for i, b in enumerate(boxes):
+            known = ids[i]
+            if known is None:
+                known, self._next = self._next, self._next + 1
+            self._tracks[known] = (np.asarray(b, dtype=np.float32), 0)
+            out.append(known)
+        for tid, (tb, missed) in free.items():
+            if missed + 1 > cfg.track_max_missed:
+                del self._tracks[tid]
+            else:
+                self._tracks[tid] = (tb, missed + 1)
+        return out
+
+
+def _iou(a: np.ndarray, b: np.ndarray) -> float:
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, float(x2 - x1)) * max(0.0, float(y2 - y1))
+    union = float((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1])) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _center(b: np.ndarray) -> np.ndarray:
+    return np.array([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2], dtype=np.float32)
+
+
+def _onnx(model_root: Path, name: str) -> Path:
+    found = sorted((model_root / name).rglob("end2end.onnx"))
+    if not found:
+        raise FileNotFoundError(f"姿勢推定の重みがありません: {model_root / name}（docs/WP02_result.md の 0 章）")
+    return found[0]
+
+
+class PoseDetector:
+    """rtmlib（RTMDet-nano で人の矩形、RTMPose-s で COCO 17 点。ONNX Runtime）。JPEG から PersonObs を作る。
+
+    ONNX Runtime は CUDA が使えればそれ、使えなければ CPU。重みはローカルにある前提（実行時に取りに行かない）。
+    """
+
+    def __init__(self, cfg: CameraConfig, party: PartyConfig, model_root: Path) -> None:
+        import onnxruntime as ort  # type: ignore[import-untyped]
+        from rtmlib import RTMDet, RTMPose  # type: ignore[import-untyped]
+
         self._cfg = cfg
         self._party = party
-        os.environ.setdefault("YOLO_OFFLINE", "1")
-        import ultralytics
-
-        yolo: Any = ultralytics
-        yolo.settings.update({"sync": False})
-        self._model: Any = yolo.YOLO(str(model_path))
-        self._quantize = "fp16" if cfg.device != "cpu" else None
+        ort.set_default_logger_severity(3)
+        device = cfg.device
+        if device != "cpu":
+            try:
+                ort.preload_dlls()  # torch が入れた nvidia の CUDA・cuDNN を使う
+            except Exception:
+                logger.debug("onnxruntime の preload_dlls に失敗しました", exc_info=True)
+            if "CUDAExecutionProvider" not in ort.get_available_providers():
+                logger.warning("ONNX Runtime で CUDA が使えないので、姿勢推定は CPU で動かします")
+                device = "cpu"
+        det_path, pose_path = _onnx(model_root, cfg.det_model), _onnx(model_root, cfg.pose_model)
+        self._det: Any = RTMDet(str(det_path), model_input_size=cfg.det_input, backend="onnxruntime",
+                                device=device, score_thr=cfg.det_score)
+        self._pose: Any = RTMPose(str(pose_path), model_input_size=cfg.pose_input, backend="onnxruntime",
+                                  device=device)
+        self.device = self._det.session.get_providers()[0]
+        self._tracker = SimpleTracker(cfg)
 
     def detect(self, jpeg: bytes, debug: bool = False) -> Detection | None:
         import cv2
@@ -158,22 +242,28 @@ class PoseDetector:
             return None
         h, w = img.shape[:2]
         t0 = time.perf_counter()
-        results: Any = self._model.track(img, imgsz=self._cfg.imgsz, device=self._cfg.device, conf=self._cfg.det_conf,
-                                    classes=[0], quantize=self._quantize, persist=True, tracker="bytetrack.yaml",
-                                    verbose=False)
+        boxes = np.asarray(self._det(img), dtype=np.float32).reshape(-1, 4)
+        kxy: np.ndarray = np.zeros((0, 17, 2), dtype=np.float32)
+        kconf: np.ndarray = np.zeros((0, 17), dtype=np.float32)
+        if len(boxes):
+            kxy, kconf = self._pose(img, bboxes=boxes)
         infer_ms = (time.perf_counter() - t0) * 1000
-        r = results[0]
-        people: list[PersonObs] = []
-        if r.boxes is not None and r.keypoints is not None and len(r.boxes):
-            ids = r.boxes.id.int().tolist() if r.boxes.id is not None else [-(i + 1) for i in range(len(r.boxes))]
-            kxy: list[Any] = r.keypoints.xy.tolist()
-            kconf: list[Any] = r.keypoints.conf.tolist() if r.keypoints.conf is not None else [[0.0] * 17] * len(ids)
-            for tid, box, xy, conf in zip(ids, r.boxes.xyxy.tolist(), kxy, kconf, strict=True):
-                people.append(PersonObs(int(tid), (box[3] - box[1]) / h,
-                                        is_facing(xy, conf, w, self._cfg.kpt_conf, self._party.face_center_tol)))
+        ids = self._tracker.update(boxes, w, h)
+        people = [PersonObs(tid, float(box[3] - box[1]) / h,
+                            is_facing(xy.tolist(), conf.tolist(), w, self._cfg.kpt_conf, self._party.face_center_tol))
+                  for tid, box, xy, conf in zip(ids, boxes, kxy, kconf, strict=True)]
         dbg = None
         if debug:
-            ok, buf = cv2.imencode(".jpg", r.plot())
+            from rtmlib import draw_skeleton
+
+            canvas = img.copy()
+            for tid, box in zip(ids, boxes, strict=True):
+                cv2.rectangle(canvas, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 200, 255), 1)
+                cv2.putText(canvas, str(tid), (int(box[0]), int(box[1]) + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            (0, 200, 255), 1)
+            if len(boxes):
+                canvas = draw_skeleton(canvas, kxy, kconf, kpt_thr=self._cfg.kpt_conf, radius=2, line_width=1)
+            ok, buf = cv2.imencode(".jpg", canvas)
             dbg = buf.tobytes() if ok else None
         return Detection(people, infer_ms, dbg)
 
@@ -187,7 +277,7 @@ class CameraClient:
 
     cfg: CameraConfig
     party_cfg: PartyConfig
-    model_path: Path
+    model_root: Path
     on_change: PartyHandler | None = None
     debug: bool = False
     tracker: PartyTracker = field(init=False)
@@ -257,8 +347,8 @@ class CameraClient:
             if data is None:
                 continue
             if self._detector is None:
-                self._detector = await asyncio.to_thread(PoseDetector, self.cfg, self.party_cfg, self.model_path)
-                logger.info("YOLO11-pose を読み込みました（%s、imgsz %d）", self.model_path.name, self.cfg.imgsz)
+                self._detector = await asyncio.to_thread(PoseDetector, self.cfg, self.party_cfg, self.model_root)
+                logger.info("姿勢推定（RTMDet-nano＋RTMPose-s）を読み込みました（%s）", self._detector.device)
             try:
                 det = await asyncio.to_thread(self._detector.detect, data, self.debug)
             except Exception:

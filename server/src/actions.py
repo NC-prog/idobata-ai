@@ -129,6 +129,8 @@ class Pending:
     # 話者の記号（WP02 B）: 提案のきっかけを言った人と、同意を言った人（聞き取りの主。ほかの人の答えも受け付ける）
     speaker: str | None = None
     consent_speaker: str | None = None
+    # 提案の返事待ちに黙られて、提案をもう一度言ったか（1 回だけ。WP02 C）
+    silence_reasked: bool = False
 
 
 @dataclass
@@ -241,6 +243,17 @@ class Conversation:
         if self._pending is not None:
             return self._pending.language
         return self._session.language if self._session is not None else "ja"
+
+    def silence_reask(self) -> str | None:
+        """提案の返事待ちのまま黙られたら、提案の文（「〜しましょうか？」）をもう一度。1 回だけ（無ければ None）。"""
+        p = self._pending
+        if p is None or p.phase != "proposed" or p.silence_reasked:
+            return None
+        p.silence_reasked = True
+        line = self._t(p.action, "propose")
+        self.dialogue.extend_last_reply(line)
+        logger.info("提案の返事待ちに黙っているので、提案をもう一度言います（%s）", p.action)
+        return line
 
     def note_opener(self, text: str) -> None:
         """案内役から話しかけた切り出しを履歴に積む（LLM が挨拶を重ねない・同じ問いを繰り返さないように。WP02 C）。"""

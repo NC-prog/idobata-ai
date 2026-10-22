@@ -195,7 +195,7 @@ class VoiceLoop:
         self._camera: CameraClient | None = None
         if edge and config.camera.enabled:
             self._camera = CameraClient(config.camera, config.party,
-                                        config.data_dir / "models" / config.camera.model_file,
+                                        config.data_dir / "models" / "rtmpose",
                                         on_change=self._on_party_change, debug=camera_debug)
         self._openers = load_openers(SERVER_ROOT / "context" / "openers.yaml")
         # 輪が NONE になってからの、会話を区切るタイマーと、別れの一言を言ったか
@@ -612,7 +612,10 @@ class VoiceLoop:
                     "opener")
 
     async def _watch_silence(self) -> None:
-        """輪のまま相手が party.silence_sec 黙ったら、沈黙の一言（1 会話 silence_max 回まで）。"""
+        """輪のまま相手が party.silence_sec 黙ったら、沈黙の一言（1 会話 silence_max 回まで）。
+
+        提案の返事待ち（PROPOSED）のときは、沈黙の一言ではなく提案をもう一度言う（1 回だけ）。
+        """
         cfg = config.party
         while True:
             await asyncio.sleep(_SILENCE_POLL_SEC)
@@ -622,6 +625,13 @@ class VoiceLoop:
                     or self._turn_lock.locked() or self._turn_tasks or self._hearing or self._gate.is_muted
                     or self._conversation.phone_deadline is not None
                     or time.monotonic() - self._last_activity < cfg.silence_sec):
+                continue
+            if self._conversation.phase == "proposed":
+                # 提案の返事待ち: 沈黙の一言ではなく、提案をもう一度（1 回だけ。2 回目からは黙って待つ）
+                reask = self._conversation.silence_reask()
+                if reask is not None:
+                    await self._respond_and_speak("", "ja", None, source=partial(_lines, reask),
+                                                  trigger="silence_reask")
                 continue
             line = self._openers.silence[self._silence_count % len(self._openers.silence)]
             self._silence_count += 1
