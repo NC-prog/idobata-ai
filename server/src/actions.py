@@ -390,6 +390,11 @@ class Conversation:
                 and not re.search(self._cfg.lookup_fallback_topic, text)):
             logger.info("尋ねていない発話への lookup の提案を捨てます")
             return None
+        refer_offered = self._session is not None and any(x.get("action") == "refer" for x in self._session.proposals)
+        if kind != "refer" and self._is_worry(text) and self._available("refer") and not refer_offered:
+            # 健康・物忘れ・介護の不安は、雑談や調べるにせず専門の窓口につなぐ
+            logger.info("健康・物忘れ・介護の不安の打ち明けなので refer を提案します")
+            return "refer"
         if kind is not None:
             return kind
         if procedure and re.search(self._cfg.refer_fallback_cue, text) and self._available("refer"):
@@ -403,6 +408,21 @@ class Conversation:
             logger.info("タグはありませんが、資料に無い行事・営業の質問なので lookup を提案します")
             return "lookup"
         return None
+
+    def _is_worry(self, text: str) -> bool:
+        """健康・物忘れ・介護の不安の打ち明けか（規則で。LLM に判断させない）。"""
+        cfg = self._cfg
+        return (re.search(cfg.worry_pattern, text) is not None
+                or (re.search(cfg.worry_topic_pattern, text) is not None
+                    and re.search(cfg.worry_cue_pattern, text) is not None))
+
+    def _worry_department(self) -> str | None:
+        """不安の打ち明けの担当課（地域包括支援センターを handles に持つ課、無ければ社会福祉課）。"""
+        depts = self._facility.departments if self._facility else ()
+        for d in depts:
+            if any(self._cfg.worry_department_handle in h for h in d.handles):
+                return d.name
+        return next((d.name for d in depts if d.name == self._cfg.worry_fallback_department), None)
 
     def _share_fits(self, text: str) -> bool:
         """覚えておくの提案に合う雑談か（尋ねていない・手続きでない・個人の事情の語が無い・1 会話 1 回）。
@@ -559,8 +579,13 @@ class Conversation:
         topic = "\n".join(u for u, _ in window)
         cands = (self._procedures.departments_for(recent, self._facility)
                  or self._procedures.departments_for(topic, self._facility))
+        worry = self._worry_department() if self._is_worry(topic) else None
         if len(cands) == 1:
             p.department = cands[0]
+        elif worry is not None:
+            # 健康・物忘れ・介護の不安: 地域包括支援センターを持つ課（無ければ社会福祉課）
+            p.department = worry
+            logger.info("健康・物忘れ・介護の不安の相談なので %s につなぎます", worry)
         else:
             p.department = UNSPECIFIED_DEPARTMENT
             logger.info("担当課が規則で一意に決まりません（候補 %d）。未特定で保存します", len(cands))
@@ -819,10 +844,9 @@ class Conversation:
         summary = self._fix(self._visitor_only(str(data.get("summary") or ""), "\n".join(visitor))
                             or p.user_text)
         note = self._fix(str(data.get("assistant_note") or "").strip().replace("\n", " "))
-        # タグは、手続きが規則で分かれば procedures.yaml の手続き→タグを先に、LLM の選んだタグは補助（後ろに足す）
-        llm_tags = data.get("tags")
-        tags = pick_tags([*self._procedures.tags_for("\n".join(visitor) or p.user_text, self._facility),
-                          *(llm_tags if isinstance(llm_tags, list) else [])], self._tags)
+        # タグは、手続きが規則で分かれば procedures.yaml の手続き→タグだけ。分からないときだけ LLM の選んだタグ
+        proc_tags = pick_tags(self._procedures.tags_for("\n".join(visitor) or p.user_text, self._facility), self._tags)
+        tags = proc_tags or pick_tags(data.get("tags"), self._tags)
         return {
             "department": p.department or UNSPECIFIED_DEPARTMENT,
             "category": _pick(data.get("category"), CATEGORIES, "その他"),

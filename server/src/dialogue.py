@@ -269,6 +269,11 @@ class Dialogue:
         self._building_claim_res = [re.compile(p) for p in self._cfg.building_claim_patterns]
         self._building_context_re = re.compile(self._cfg.building_context_pattern)
         self._smalltalk_re = re.compile(self._cfg.smalltalk_pattern)
+        self._medical_judgment_re = re.compile(
+            rf"(?:{self._cfg.medical_subject_pattern})[^。！？!?]{{0,20}}(?:{self._cfg.judgment_pattern})")
+        self._legal_judgment_re = re.compile(self._cfg.legal_judgment_pattern)
+        self._residence_question_re = re.compile(self._cfg.residence_question_pattern)
+        self._residence_allow_re = re.compile(self._cfg.residence_question_allow_pattern)
         # (user, assistant) の組を直近 history_turns 件だけ保持する
         self._history: deque[tuple[str, str]] = deque(maxlen=self._cfg.history_turns)
         self._question_re = re.compile(self._cfg.question_sentence_pattern)
@@ -429,7 +434,7 @@ class Dialogue:
                     sentence = await self._finish_sentence(raw, cited)
                     sentence, dept_state = self._fix_department(sentence, expected_dept, dept_state)
                     sentence = self._fix_floor_of_last_department(sentence, sentences)
-                    if self._asks_personal(sentence) or self._drop(sentence, text, sentences, previous):
+                    if self._must_drop(sentence) or self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
                         continue
                     if dropped_echo and not sentences:
@@ -451,7 +456,7 @@ class Dialogue:
             if tail and dropped_echo and not sentences:
                 tail = _LEADING_PARTICLE_RE.sub("", tail)
             # 何も言っていないときの最後の文は捨てない（応答が空になる）
-            if tail and not self._asks_personal(tail) and (
+            if tail and not self._must_drop(tail) and (
                     not sentences or not self._drop(tail, text, sentences, previous)):
                 sentences.append(tail)
                 yield tail
@@ -615,12 +620,30 @@ class Dialogue:
         """氏名・電話番号・住所を尋ねる文か。LLM の応答は紹介状の聞き取りの外なので、言わずに捨てる。
 
         聞き取り（同意の後）の質問は actions.py の定型文で言い、この対話を通らない。
+        住まいは「お住まい」「住所」「地区」を含む問いを広く止める（景色・季節が主語の雑談の問いは残す）。
         """
-        if not sentence or not self._personal_question_re.search(sentence):
+        if not sentence:
+            return False
+        residence = (self.is_question(sentence) and self._residence_question_re.search(sentence) is not None
+                     and not self._residence_allow_re.search(sentence))
+        if not residence and not self._personal_question_re.search(sentence):
             return False
         logger.warning("紹介状の聞き取りの外で、氏名・電話番号・住所を尋ねる文を LLM が出したので読み上げずに捨てました")
         logger.debug("捨てた文: %s", sentence)
         self.note_drop("聞き取りの外の個人情報の質問", sentence)
+        return True
+
+    def _must_drop(self, sentence: str) -> bool:
+        """応答が 1 文だけでも読み上げない文（聞き取りの外の個人情報の質問・医療や法律の判断）。"""
+        return self._asks_personal(sentence) or self._judges_medical_or_legal(sentence)
+
+    def _judges_medical_or_legal(self, sentence: str) -> bool:
+        """病名・症状・障害・認知症などの見立てや、法的な可否を言う文か（「〜かもしれません」「違法です」）。"""
+        if not sentence or not (self._medical_judgment_re.search(sentence) or self._legal_judgment_re.search(sentence)):
+            return False
+        logger.warning("病気・法律の判断をする文を LLM が出したので読み上げずに捨てました")
+        logger.debug("捨てた文: %s", sentence)
+        self.note_drop("医療・法律の判断", sentence)
         return True
 
     def note_drop(self, reason: str, sentence: str) -> None:

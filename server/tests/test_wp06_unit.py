@@ -183,7 +183,7 @@ def test_avatar_name_heads_vocabulary_and_user_dict(tmp_path: Path) -> None:
 # ------------------------------------------------------------------
 
 
-async def test_referral_window_starts_at_trigger_and_procedure_tags_lead(tmp_path: Path) -> None:
+async def test_referral_window_starts_at_trigger_and_procedure_tags_only(tmp_path: Path) -> None:
     llm = SpyLLM([["それはよかったですね。"], ["国保ですね。<propose:refer>"]],
                  chat_reply=[PHRASED, _refer_json(tags=["雑談", "保険・年金"],
                                                   assistant_note="国宝の切り替えは保健医療課と案内した")])
@@ -199,7 +199,7 @@ async def test_referral_window_starts_at_trigger_and_procedure_tags_lead(tmp_pat
     assert "孫" not in transcript and "それはよかった" not in transcript  # きっかけより前の往復は使わない
     assert "国保の切り替え" in transcript and "会社を退職したので" in transcript  # 聞き取りの答えは入る
     ref = _saved(tmp_path)
-    assert ref.tags[0] == "保険・年金" and ref.tags == ["保険・年金", "雑談"]  # 手続きのタグが先、LLM は補助
+    assert ref.tags == ["保険・年金"]  # 手続きが分かれば手続き→タグだけ（LLM の「雑談」は付けない）
     assert "国宝" not in ref.assistant_note and "国保" in ref.assistant_note
     assert R["acting"]  # 定型文が読めること（聞き取りの流れは test_actions_unit で見る）
 
@@ -283,3 +283,72 @@ async def test_template_turn_does_not_carry_previous_search_state(tmp_path: Path
     d = c.dialogue
     assert (d.last_references, d.last_cited, d.last_search_query, d.last_search_ms, d.last_dropped) == (
         [], [], None, None, [])
+
+
+# ------------------------------------------------------------------
+# WP06 追加: タグ・医療と法律の判断・住まいを尋ねる問い・不安の打ち明けの refer
+# ------------------------------------------------------------------
+
+
+async def test_llm_tags_only_when_procedure_unknown(tmp_path: Path) -> None:
+    llm = SpyLLM([["それは大変ですね。<propose:refer>"]], chat_reply=_refer_json(tags=["介護", "雑談"]))
+    c = _conv(llm, tmp_path)
+    await _say(c, "ちょっと困ったことがあって")
+    await _say(c, "お願い")
+    await c.end_session()
+    assert _saved(tmp_path).tags == ["介護", "雑談"]  # 手続きが分からないので LLM のタグ
+
+
+async def test_medical_and_legal_judgments_are_not_spoken() -> None:
+    d = Dialogue(StubLLM(["それは心配ですね。", "認知症の症状の一つかもしれません。", "物忘れは年齢によるものの可能性があります。",
+                          "うつ病の疑いがあります。", "それは違法です。", "認知症の相談は高齢介護課でできます。"]),
+                 DialogueConfig())
+    out = await _collect(d, "最近物忘れがひどくて")
+    assert out == ["それは心配ですね。", "認知症の相談は高齢介護課でできます。"]
+    assert [x["reason"] for x in d.last_dropped] == ["医療・法律の判断"] * 4
+    only = Dialogue(StubLLM(["ご主人は認知症かもしれませんね。"]), DialogueConfig())
+    assert await _collect(only, "夫が認知症かもしれない") != ["ご主人は認知症かもしれませんね。"]  # 1 文だけでも言わない
+
+
+def test_system_prompt_says_no_medical_or_legal_judgment() -> None:
+    d = Dialogue(StubLLM([]), DialogueConfig(), enabled_actions=("refer",))
+    system = d.build_messages("こんにちは", "ja")[0]["content"]
+    assert "病気や法律の判断はしない" in system and "専門の窓口" in system
+    assert "物忘れ" in system  # refer の条件に健康・物忘れ・介護の不安
+
+
+async def test_residence_questions_are_dropped_but_scenery_question_stays() -> None:
+    d = Dialogue(StubLLM(["市民課は1階です。", "お住まいの近くにどの窓口がございましょうか？"]), DialogueConfig())
+    assert await _collect(d, "住民票はどこで取れますか") == ["市民課は1階です。"]
+    for q in ["どちらにお住まいですか？", "ご住所はどちらですか？", "どの地区から来られましたか？",
+              "お住まいの近くで健康に関する話題はありますか？"]:
+        d = Dialogue(StubLLM(["そうなんですね。", q]), DialogueConfig())
+        assert await _collect(d, "今日は寒いですね") == ["そうなんですね。"], q
+    d = Dialogue(StubLLM(["そうなんですね。", "お住まいの近くは、もう紅葉していますか？"]), DialogueConfig())
+    assert await _collect(d, "今日は寒いですね") == ["そうなんですね。", "お住まいの近くは、もう紅葉していますか？"]
+    d = Dialogue(StubLLM(["お住まいの地区の公民館でも相談できます。"]), DialogueConfig())
+    assert await _collect(d, "相談したい") == ["お住まいの地区の公民館でも相談できます。"]  # 問いでなければ言う
+
+
+async def test_worry_proposes_refer_to_community_center_department(tmp_path: Path) -> None:
+    fac = Facility(name="江田島市役所", location_phrase="1階ロビー", departments=(
+        Department("社会福祉課", "2階", handles=("生活保護",)),
+        Department("高齢介護課", "2階", handles=("介護保険", "地域包括支援センター", "認知症の相談"))))
+    llm = SpyLLM([["それは心配ですね。"], ["お気持ち、わかります。"]], chat_reply=[_refer_json()])
+    c = _conv(llm, tmp_path)
+    c._facility = fac
+    out = await _say(c, "最近物忘れがひどくて")
+    assert out[-1] == R["propose"] and c.phase == "proposed"  # タグが無くても refer
+    await _say(c, "お願いします")
+    await c.end_session()
+    assert _saved(tmp_path).department == "高齢介護課"  # 地域包括支援センターを持つ課
+    # 地域包括支援センターの無い拠点は社会福祉課。断られた後は同じ会話で繰り返さない
+    c2 = _conv(SpyLLM([["それは心配ですね。"], ["そうでしたか。"]], chat_reply=[_refer_json()]), tmp_path / "b")
+    c2._facility = Facility(name="町役場", location_phrase="1階", departments=(Department("社会福祉課", "1階"),))
+    await _say(c2, "夫が認知症かもしれない")
+    assert c2.phase == "proposed"
+    await _say(c2, "いらない")
+    await _say(c2, "やっぱり物忘れが心配で")
+    assert c2.phase == "listen"
+    assert c2._worry_department() == "社会福祉課"
+
