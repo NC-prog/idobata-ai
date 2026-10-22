@@ -21,6 +21,8 @@
   hello の後に送る、カメラの取り方（WP02）
 - JSON ``party``: ``{type, state, count, facing}`` 目の前の輪（NONE / PRESENT / PARTY。アバターの視線・姿勢に使う）
 
+つないでよい相手は ``allow``（IP か CIDR。この機体自身はいつでも可）。それ以外は close code 4003 で閉じる（WP02 D）。
+
 エッジは 1 台だけ。2 台目が hello したら WARNING を出し、前のエッジを close code 4001
 （REPLACED_CLOSE_CODE）で閉じる。閉じられたページは自動で再接続しない（取り合いにしない）。
 """
@@ -28,6 +30,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 from collections.abc import Callable
@@ -41,6 +44,25 @@ logger = logging.getLogger(__name__)
 
 # 別のエッジがつながったので閉じる、という close code（ページ側はこれを見て再接続しない）
 REPLACED_CLOSE_CODE = 4001
+# 許可していない相手からの接続を閉じる close code
+FORBIDDEN_CLOSE_CODE = 4003
+
+
+def allowed_peer(host: str | None, allow: tuple[str, ...]) -> bool:
+    """エッジとしてつないでよい相手か（この機体自身、または allow の IP・CIDR に入る）。"""
+    try:
+        ip = ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    for a in allow:
+        try:
+            if ip in ipaddress.ip_network(a, strict=False):
+                return True
+        except ValueError:
+            logger.warning("IDOBATA_EDGE_ALLOW の書き方が違います: %r", a)
+    return False
 
 # エッジの状態（アバターの見た目）
 STATES = ("idle", "listening", "thinking", "speaking")
@@ -65,9 +87,10 @@ class _PlaybackWaiter:
 class EdgeBridge:
     """エッジとの WebSocket サーバ。"""
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, allow: tuple[str, ...] = ()) -> None:
         self.host = host
         self.port = port
+        self.allow = allow
         self.clients: set[ServerConnection] = set()
         self.server: Server | None = None
         self._audio_client: ServerConnection | None = None
@@ -110,8 +133,13 @@ class EdgeBridge:
     # ------------------------------------------------------------------
 
     async def _handle_client(self, websocket: ServerConnection) -> None:
-        self.clients.add(websocket)
         peer = str(websocket.remote_address)
+        host = websocket.remote_address[0] if websocket.remote_address else None
+        if not allowed_peer(host, self.allow):
+            logger.warning("許可していない相手からのエッジ接続を閉じました: %s（IDOBATA_EDGE_ALLOW）", peer)
+            await websocket.close(FORBIDDEN_CLOSE_CODE, "not allowed")
+            return
+        self.clients.add(websocket)
         logger.info("エッジ接続: %s", peer)
         try:
             async for message in websocket:

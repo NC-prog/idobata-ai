@@ -190,7 +190,7 @@ class VoiceLoop:
         self._edge: EdgeBridge | None = None
         self._edge_server: EdgeServer | None = None
         if edge:
-            self._edge = EdgeBridge(config.edge.ws_host, config.edge.ws_port)
+            self._edge = EdgeBridge(config.edge.ws_host, config.edge.ws_port, config.edge.allow)
         # カメラと輪（WP02 A）。エッジのブラウザが撮って送る。IDOBATA_CAMERA=0 なら作らない（常に輪がある扱い）
         self._camera: CameraClient | None = None
         if edge and config.camera.enabled:
@@ -221,6 +221,7 @@ class VoiceLoop:
                 admin=AdminPanel(self._transcripts, config.admin),
                 debug_frame=(lambda: self._camera.debug_jpeg if self._camera else None) if camera_debug else None,
                 debug_state=self._camera_state,
+                edge_allow=config.edge.allow,
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）

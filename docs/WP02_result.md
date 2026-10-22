@@ -190,3 +190,49 @@ GPU の予備枠に約 120 MiB を足しても YOLO と合わせて 1GB に届�
 
 `tests/test_openers_unit.py`（天気・気温・問いの回し方、事前合成する文、`Weather.today`、切り出しは 1 会話 1 回で履歴に積む、
 次の会話で問いが変わる、沈黙は 7 秒後に 2 回まで）。
+
+## D. 別機エッジ（Windows ミニ PC）
+
+- **設計書と手順書**: `docs/edge_pc_setup.md`（構成・IP・つながり方・secure context の方式・Chrome のポリシー・キオスクのショートカット・
+  Windows の設定・フロントの設定・箱から出して 30 分の手順・うまくいかないとき）
+- **方式は ②**（指定したオリジンだけを secure とみなす）。起動フラグ `--unsafely-treat-insecure-origin-as-secure` と同じことを
+  Chrome のポリシー `OverrideSecurityRestrictionsOnInsecureOrigin` で入れるのを勧めた（警告バーが出ない・ショートカットを直されても効く）。
+  カメラ・マイクの許可（`VideoCaptureAllowedUrls`・`AudioCaptureAllowedUrls`）と自動再生（`AutoplayAllowlist`）もポリシーで
+- **フロントに足した設定**: `IDOBATA_EDGE_WS_HOST`（WebSocket の待ち受け。既定 127.0.0.1）と `IDOBATA_EDGE_ALLOW`（エッジにつないでよい IP・CIDR。
+  この機体自身はいつでも可。空ならこの機体からだけ）。許可していない相手は `/edge/`（と `/`）が 403、WebSocket は close 4003。
+  職員パネル・管理者ページは別（LAN 内＋パスワード）
+
+### 確認（7560 の上で、LAN の IP でページを開いて別機の代わりにした）
+
+フロントを `0.0.0.0` で待ち受け、`IDOBATA_EDGE_ALLOW=192.168.0.10`（この機体の LAN の IP）:
+
+| 確かめたこと | 結果 |
+|---|---|
+| 許可した IP から `/edge/` | 200 |
+| 許可していない相手（この機体の別のアドレス 100.93.x）から `/edge/` | **403** |
+| 同じく WebSocket | **close 4003**（`許可していない相手からのエッジ接続を閉じました`） |
+| Chromium、フラグ無し（`http://192.168.0.10:18080/edge/`） | `isSecureContext: false`、`navigator.mediaDevices` 無し（カメラ・マイクが使えない） |
+| Chromium、方式②のフラグあり | `isSecureContext: true`、`mediaDevices` あり。1 往復: 「住民票の写しを取りたい…」→ 市民課（1階）、ASR 0.43 秒・音声開始 0.43 秒・LLM 完了 1.90 秒 |
+
+- Playwright の「headless shell」はこのフラグを無視した（通常の Chromium では効く。Chrome も同じエンジン）
+- **Windows 機での実測はしていない**（手元に無かった）。設計書の 8 章に残した
+
+## 残っていること・人が確かめること
+
+1. **カメラの前に人が立つ確認**（離席していたため、輪・切り出し・沈黙・別れは写真の映像で確かめた。本物のカメラでは、席にいた方で
+   `NONE → PRESENT → PARTY`（2.0 秒）と顔をそらして外れるところまで見た）
+2. **`party.min_box_ratio` の距離の校正**（2〜2.5m に立って `/edge/debug/party` の `people` を読む。外付けカメラに替えたらもう一度）
+3. 話者の区別の、人の声での確認（VOICEVOX の似た声どうしは分けられなかった。男女・男男は 12/12）
+4. **ultralytics の AGPL-3.0** の扱いの判断（0 章）
+5. Windows 機での別機エッジの実測（設計書 8 章）
+6. 沈黙の一言が、行為の提案の返事待ちにも出る（C の気づいたこと）
+
+## 品質
+
+```
+uv run pytest            → 356 passed, 5 deselected（integration）
+uv run mypy --strict src → Success: no issues found in 30 source files
+uv run ruff check . ../scripts → All checks passed!
+(cd edge && npm run typecheck && npm run build) → OK
+```
+

@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import AdminConfig, StaffConfig
+from .edge_bridge import allowed_peer
 from .knowledge import JST
 from .procedures import AsrFixes
 from .referrals import ReferralStore, TidbitStore, VisitLog, today_stats
@@ -250,9 +251,23 @@ def _add_debug_routes(app: FastAPI, frame: DebugFrame, state: DebugState) -> Non
 
 
 def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPanel | None = None,
-               debug_frame: DebugFrame | None = None, debug_state: DebugState | None = None) -> FastAPI:
-    """エッジページ（と職員パネル・管理者ページ・カメラのデバッグ表示）を配信する FastAPI アプリ。"""
+               debug_frame: DebugFrame | None = None, debug_state: DebugState | None = None,
+               edge_allow: tuple[str, ...] | None = None) -> FastAPI:
+    """エッジページ（と職員パネル・管理者ページ・カメラのデバッグ表示）を配信する FastAPI アプリ。
+
+    edge_allow を渡すと、/edge/ と / はこの機体自身と edge_allow の相手からだけ開ける（IDOBATA_EDGE_ALLOW。WP02 D）。
+    """
     app = FastAPI(title="idobata-edge", docs_url=None, redoc_url=None, openapi_url=None)
+    if edge_allow is not None:
+        allow = edge_allow
+
+        @app.middleware("http")
+        async def only_allowed_edges(request: Request, call_next: Any) -> Any:
+            path = request.url.path
+            if (path == "/" or path.startswith("/edge")) and not allowed_peer(
+                    request.client.host if request.client else None, allow):
+                return Response("not allowed", status_code=403)
+            return await call_next(request)
     if debug_frame is not None:
         _add_debug_routes(app, debug_frame, debug_state or (dict))  # /edge の静的配信より先に置く
     if staff is not None:
@@ -281,9 +296,9 @@ class EdgeServer:
 
     def __init__(self, host: str, port: int, static_dir: Path, staff: StaffPanel | None = None,
                  admin: AdminPanel | None = None, debug_frame: DebugFrame | None = None,
-                 debug_state: DebugState | None = None) -> None:
+                 debug_state: DebugState | None = None, edge_allow: tuple[str, ...] | None = None) -> None:
         cfg = uvicorn.Config(
-            create_app(static_dir, staff, admin, debug_frame, debug_state), host=host, port=port, log_level="warning", lifespan="off",
+            create_app(static_dir, staff, admin, debug_frame, debug_state, edge_allow), host=host, port=port, log_level="warning", lifespan="off",
         )
         self._server = uvicorn.Server(cfg)
         self._task: asyncio.Task[None] | None = None

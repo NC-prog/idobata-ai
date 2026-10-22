@@ -794,8 +794,12 @@ class CaptionConfig:
 class EdgeConfig:
     """エッジ（ブラウザのアバター画面）との接続の設定。"""
 
+    # 別機のエッジ PC からつなぐときは 0.0.0.0（環境変数 IDOBATA_EDGE_WS_HOST）。つなげる相手は allow で絞る
     ws_host: str = LOCALHOST
     ws_port: int = 8765
+    # エッジ（WebSocket と /edge/ のページ）につないでよい相手の IP または CIDR（IDOBATA_EDGE_ALLOW、カンマ区切り）。
+    # この機体自身（ループバック）はいつでも可。空なら、この機体からだけ。職員パネル・管理者ページはこれとは別（LAN 内＋認証）
+    allow: tuple[str, ...] = ()
     # エッジページの静的配信（edge/ を Vite でビルドした成果物）
     http_host: str = LOCALHOST
     http_port: int = 8080
@@ -877,6 +881,8 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         http_port=int(_parse_float(env, "IDOBATA_EDGE_HTTP_PORT", EdgeConfig.http_port)),
         # 職員パネルを LAN から見るときは 0.0.0.0（アクセスは LAN 内のアドレスだけに絞る）
         http_host=env.get("IDOBATA_EDGE_HTTP_HOST", EdgeConfig.http_host).strip() or EdgeConfig.http_host,
+        ws_host=env.get("IDOBATA_EDGE_WS_HOST", EdgeConfig.ws_host).strip() or EdgeConfig.ws_host,
+        allow=tuple(a.strip() for a in env.get("IDOBATA_EDGE_ALLOW", "").split(",") if a.strip()),
     )
     actions = ActionsConfig(
         avatar_name=env.get("IDOBATA_AVATAR_NAME", "").strip() or ActionsConfig.avatar_name)

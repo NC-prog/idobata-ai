@@ -196,3 +196,25 @@ async def test_edge_server_reports_missing_build(tmp_path: Path) -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/edge/")
         assert r.status_code == 503 and "npm run build" in r.text
+
+
+def test_allowed_peer_for_remote_edge() -> None:
+    from src.edge_bridge import allowed_peer
+
+    assert allowed_peer("127.0.0.1", ())  # この機体自身はいつでも
+    assert not allowed_peer("192.168.10.21", ())  # 空なら、この機体からだけ
+    assert allowed_peer("192.168.10.21", ("192.168.10.21",))
+    assert allowed_peer("10.0.0.7", ("192.168.10.21", "10.0.0.0/24"))
+    assert not allowed_peer("192.168.10.22", ("192.168.10.21",))
+    assert not allowed_peer("192.168.10.22", ("bad",))
+
+
+async def test_edge_page_only_for_allowed_edges(tmp_path: Any) -> None:
+    from src.edge_server import create_app
+
+    (tmp_path / "index.html").write_text("<p>edge</p>", encoding="utf-8")
+    app = create_app(tmp_path, edge_allow=("192.168.10.21",))
+    for client, code in ((("192.168.10.21", 5000), 200), (("192.168.10.99", 5000), 403), (("127.0.0.1", 5000), 200)):
+        transport = httpx.ASGITransport(app=app, client=client)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            assert (await c.get("/edge/")).status_code == code, client
