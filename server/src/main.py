@@ -507,6 +507,11 @@ class VoiceLoop:
         """
         # 応答は 1 つずつ順に話す（重なり防止）
         async with self._turn_lock:
+            heard_at = timing.t_speech_end if timing is not None else None
+            if source is None and self._conversation.ignores(text, heard_at):
+                # 前の応答（紹介状の保存）の途中に聞き取った断片: 保存が済んだ今なら無視できる（相槌も鳴らさない）
+                logger.info("紹介状の保存直後の短い断片を無視しました（保存の途中に聞き取ったもの）")
+                return
             sentences: asyncio.Queue[str | None] = asyncio.Queue()
             producer = asyncio.create_task(
                 self._produce_sentences(text, language, sentences, timing, source), name="llm-stream"

@@ -240,3 +240,27 @@ async def test_smalltalk_raises_reference_threshold() -> None:
     d2 = Dialogue(StubLLM(["保健医療課です。"]), DialogueConfig(), knowledge=_KB([weak, strong]))
     await _collect(d2, "国保の切り替えで聞きたいことがあって")
     assert d2.last_references == [weak, strong]  # 手続きの質問はふだんのしきい値（知識パック側）のまま
+
+
+async def test_fragment_heard_during_save_is_ignored_even_after_long_readback(tmp_path: Path) -> None:
+    from tests.test_actions_unit import FakeClock, _to_ask_phone
+
+    seen: list[bool] = []
+    clock = FakeClock()
+
+    class DuringSave(SpyLLM):
+        def chat(self, model: str, messages: list[dict[str, Any]], **kw: Any) -> str:
+            if "【来訪者の言葉】" in messages[-1]["content"]:
+                seen.append(conv.ignores("五六七八。"))  # 紹介状を作っている途中に聞き取った断片
+            return super().chat(model, messages, **kw)
+
+    conv = _conv(DuringSave([["国保ですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()]), tmp_path,
+                 clock=clock)
+    await _to_ask_phone(conv)
+    await _say(conv, "090の1234の5678")
+    heard = clock.t + 0.5  # 「はい」の直後に聞いた
+    await _say(conv, "はい")
+    assert seen == [True]
+    clock.t += 14  # 受付番号の読み上げが終わってから順番が回ってきた
+    assert conv.ignores("五六七八。", heard_at=heard)  # 聞いた時刻で数える
+    assert not conv.ignores("五六七八。")  # 今聞いたものなら 10 秒を過ぎている

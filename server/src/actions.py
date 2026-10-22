@@ -195,6 +195,7 @@ class Conversation:
         # 紹介状を保存した時刻（monotonic。直後の断片を無視する）と、履歴に残す 1 行（保存の直後だけ）
         self._saved_at: float | None = None
         self._history_note: tuple[str, str] | None = None
+        self._saving = False
         # このターンの発話を、電話番号の続きを待つために返事をせずに預かったか
         self._held = False
         # このターンの行為（文字記録用）: 提案した行為、返事をした相手の行為と段、その結果
@@ -705,13 +706,21 @@ class Conversation:
             yield s
         self._add_turn(p, f"（{_PRIVATE_LABELS['ask_phone']}を伺いました）", self.redact("".join(lines)))
 
-    def ignores(self, text: str) -> bool:
-        """紹介状の保存直後に来た、数字だけ・1〜2 語だけの発話か（読み上げに重なった断片とみなして無視する）。"""
+    def ignores(self, text: str, heard_at: float | None = None) -> bool:
+        """紹介状の保存中・保存直後に来た、数字だけ・1〜2 語だけの発話か（言い終わりの断片とみなして無視する）。
+
+        heard_at はその発話を聞き終えた時刻（monotonic）。保存の途中に聞き取った断片は、保存の読み上げ（10 秒前後）が
+        終わるまで順番を待つので、処理する時刻ではなく聞いた時刻で 10 秒を数える。
+        """
         cfg = self._ref_cfg
-        if self._saved_at is None or self._pending is not None:
+        if self._pending is not None:
             return False
-        if self._clock() - self._saved_at > cfg.post_save_ignore_sec:
-            return False
+        if not self._saving:
+            if self._saved_at is None:
+                return False
+            t = heard_at if heard_at is not None else self._clock()
+            if t - self._saved_at > cfg.post_save_ignore_sec:
+                return False
         digits_only = re.fullmatch(r"[0-9\s、。，．,.！？!?の\-ー－‐]+", normalize_digits(text)) is not None
         words = [w for w in re.split(r"[\s、。，．,.！？!?…]+", text) if w]
         short = 0 < len(words) <= cfg.post_save_fragment_max_words and len("".join(words)) <= cfg.post_save_fragment_max_chars
@@ -740,6 +749,15 @@ class Conversation:
         """聞き取りを終えて紹介状を作り、受付番号と持ち物の案内を言う。"""
         assert self._referrals is not None
         self._pending = None
+        self._saving = True  # 保存の途中に聞き取った番号の残りなども無視する（ignores）
+        try:
+            async for s in self._save_referral(p, prefix):
+                yield s
+        finally:
+            self._saving = False
+
+    async def _save_referral(self, p: Pending, prefix: str) -> AsyncIterator[str]:
+        assert self._referrals is not None
         if self._on_state is not None:
             await self._on_state("thinking")
         fields = await self._structure_referral(self._refer_window(p), p)
