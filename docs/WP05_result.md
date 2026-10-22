@@ -263,8 +263,8 @@ uv run ruff check        → All checks passed!
 
 - 「？」で終わる文（と「〜でしょうか。」「〜ますか。」「〜ませんか。」）を問いとして数え、2 つ目以降は読み上げない
   （`dialogue.max_questions_per_reply`）。「お困りのことは」の 1 会話 1 回の規則とは別に効く
-- 行為の提案文（「担当の課に伝えておきましょうか？」）は定型文で、LLM の応答の後に足すので数えない。
-  LLM の応答が問いで終わった後に提案が付くと問いは 2 つになる（例: 下の 8-5 の 1 往復目）
+- 行為の提案文（「担当の課に伝えておきましょうか？」）を付けるときは、LLM の応答の問いの文を読み上げずに落とし、
+  提案文だけを問いとして残す（8-7）
 - 「〜ですか、〜ですか？」のように読点でつないだ 1 文は 1 つと数える
 
 ### 8-4 氏名・電話番号・住所を尋ねる文は聞き取りの外では言わない（`dialogue.py` `_asks_personal`）
@@ -314,3 +314,17 @@ uv run pytest            → 316 passed, 5 deselected（integration）
 uv run mypy --strict src → Success: no issues found in 26 source files
 uv run ruff check        → All checks passed!
 ```
+
+### 8-7 提案文を付けるときは LLM の問いを落とす（`actions.py` `_respond_turn`）
+
+- 提案（`<propose:…>`）は LLM の応答の最後に来るので、応答の途中では付くかどうか分からない。そこで、
+  **問いの文が出たら、その文から後は応答の終わりまで読み上げずに預かる**。提案が付けば預かった文のうち問いだけを落とし
+  （順番はそのまま）、提案文を足す。提案が付かなければ預かった文をそのまま読み上げる
+- 落とした問いは対話履歴にも残さない（`Dialogue.replace_last_reply`）
+- 問いは応答の最後に来ることが多いので、預かることによる音声開始の遅れはふつう出ない（問いが先頭の応答だけ、
+  LLM の応答の終わりまで待つ）
+- 確認: `visitor_kokuho_ja.wav` を 3 回流し、3 回とも LLM の問いを落として提案文だけを問いとして読み上げた
+  （「提案文を付けるので、LLM の応答の問いの文を読み上げずに落としました」）
+- テスト: 提案が付くと問いだけ落ちて順番は保たれ・履歴にも残らない／提案が付かなければ問いはそのまま
+- `uv run pytest` 318 passed / `mypy --strict src` Success / `ruff check` All checks passed!
+

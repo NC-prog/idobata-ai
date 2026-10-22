@@ -315,6 +315,18 @@ class Dialogue:
             user, reply = self._history[-1]
             self._history[-1] = (user, reply + line)
 
+    def replace_last_reply(self, user: str, old: str, new: str) -> None:
+        """直前のターン (user, old) の応答を、実際に読み上げた文 new に置き換える（提案のために落とした問いを残さない）。
+
+        定型の聞き返しで答えたときなどはターンを積んでいないので、直前が (user, old) でなければ何もしない。
+        """
+        if self._history and self._history[-1] == (user, old):
+            self._history[-1] = (user, new)
+
+    def is_question(self, sentence: str) -> bool:
+        """問いの文か（「〜ですか？」で終わる文など。dialogue.question_sentence_pattern）。"""
+        return self._question_re.search(sentence.strip()) is not None
+
     def add_turn(self, user: str, assistant: str) -> None:
         """LLM を通さずに答えたターン（行為の定型文など）を履歴に積む。"""
         self._push(user, assistant)
@@ -592,9 +604,9 @@ class Dialogue:
 
     def _too_many_questions(self, sentence: str, said: list[str]) -> bool:
         """1 回の応答の問い（「〜ですか？」で終わる文）が上限を超えるか。"""
-        if not self._question_re.search(sentence.strip()):
+        if not self.is_question(sentence):
             return False
-        return sum(1 for x in said if self._question_re.search(x.strip())) >= self._cfg.max_questions_per_reply
+        return sum(1 for x in said if self.is_question(x)) >= self._cfg.max_questions_per_reply
 
     def _extra_help_offer(self, sentence: str, user_text: str) -> bool:
         """「お困りのことはありませんか」「お変わりありませんか」の類を言わない場面か（もう言った、または尋ねられた直後）。"""

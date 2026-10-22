@@ -315,14 +315,31 @@ class Conversation:
         reply: list[str] = []
         offered = self._tidbit_to_offer(text)
         hint = self._tidbit_cfg.offer_template.format(text=offered["text"]) if offered else ""
+        # 問いの文から後は、提案が付くか分かるまで（応答の終わりまで）読み上げずに預かる。
+        # 提案が付けば LLM の問いは落とし、提案文だけを問いとして残す（問いは 1 回の応答で 1 つ）
+        held: list[str] = []
         async for s in self.dialogue.respond(text, language, hint=hint):
             reply.append(s)
+            if held or self.dialogue.is_question(s):
+                held.append(s)
+                continue
             yield s
         if offered and self._session and self._tidbit_used(offered["text"], "".join(reply)):
             self._session.tidbit_used = True
             logger.info("さっきの方の小ネタを紹介しました")
         kind = self._adjust_proposal(self.dialogue.last_proposal, text, "".join(reply))
-        if kind and self._available(kind):
+        proposing = kind is not None and self._available(kind)
+        spoken = reply[: len(reply) - len(held)]  # 預からずに読み上げた文（応答の頭）
+        for s in held:
+            if proposing and self.dialogue.is_question(s):
+                logger.info("提案文を付けるので、LLM の応答の問いの文を読み上げずに落としました")
+                continue
+            spoken.append(s)
+            yield s
+        if len(spoken) < len(reply):
+            # 読み上げなかった問いは履歴にも残さない
+            self.dialogue.replace_last_reply(text.strip(), "".join(reply), "".join(spoken))
+        if kind is not None and proposing:
             line = self._t(kind, "propose")
             self.dialogue.extend_last_reply(line)
             self._pending = Pending(kind, text, language, turn_index=index, topic_floor=self._topic_start,

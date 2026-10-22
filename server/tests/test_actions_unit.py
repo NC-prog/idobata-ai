@@ -916,3 +916,23 @@ async def test_one_question_per_reply_and_no_personal_questions(tmp_path: Path) 
     out = await _say(c, "五六七八")
     assert out == ["ありがとうございます。"]  # 聞き取りの外では氏名・番号を尋ねない
 
+
+async def test_proposal_drops_llm_questions_and_keeps_only_the_proposal(tmp_path: Path) -> None:
+    llm = StubLLM([["国保の切り替えですね。", "退職されたのですか？", "保健医療課が担当です。<propose:refer>"]],
+                  chat_reply=[PHRASED, _refer_json()])
+    c = _conv(llm, tmp_path)
+    out = await _say(c, "国保の切り替えで聞きたいことがあって")
+    # LLM の問いと、その後の文も提案が決まるまで預かる。問いだけ落とし、順番は変えない
+    assert out == ["国保の切り替えですね。", "保健医療課が担当です。", R["propose"]]
+    assert [s for s in out if s.endswith("？")] == [R["propose"]]
+    # 読み上げなかった問いは履歴にも残さない
+    assert c.dialogue.history[-1][1] == "国保の切り替えですね。保健医療課が担当です。" + R["propose"]
+    assert c.phase == "proposed"
+
+
+async def test_question_is_kept_when_no_proposal_follows(tmp_path: Path) -> None:
+    c = _conv(StubLLM([["寒くなりましたね。", "お出かけですか？", "ゆっくりどうぞ。"]]), tmp_path)
+    out = await _say(c, "今日は寒いですね")
+    assert out == ["寒くなりましたね。", "お出かけですか？", "ゆっくりどうぞ。"]
+    assert c.dialogue.history[-1][1] == "".join(out) and c.phase == "listen"
+
