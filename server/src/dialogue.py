@@ -518,11 +518,15 @@ class Dialogue:
         self._push(labeled(text, speaker), reply)
         logger.debug("応答: %s", reply)
 
-    def _rain_likely(self) -> bool:
-        """天気の文の降水確率に、傘をすすめる基準以上のものがあるか（天気が無ければ判断しない＝True）。"""
+    def _rain_likely(self, day: str = "今日") -> bool:
+        """day（今日・明日）の予報の降水確率に、傘をすすめる基準以上のものがあるか（天気が無ければ判断しない＝True）。
+
+        明日だけ雨のときに、今日の話で傘をすすめない（WP07 の評価で、今日は晴れなのに「傘を持ち歩くと」と言った）。
+        """
         if self._weather is None:
             return True
-        lines = self._weather.lines(self._now())
+        every = self._weather.lines(self._now())
+        lines = [ln for ln in every if ln.startswith(day)] or every  # その日の予報が無ければ全部で見る
         pops = [int(x) for line in lines for x in re.findall(r"(\d+)パーセント", line)]
         return not pops or max(pops) >= self._cfg.umbrella_min_pop
 
@@ -629,7 +633,7 @@ class Dialogue:
             logger.info("会話の途中の挨拶だけの文を読み上げずに捨てました")
             self.note_drop("会話の途中の挨拶", sentence)
             return True
-        if "傘" in sentence and not self._rain_likely():
+        if "傘" in sentence and not self._rain_likely("明日" if "明日" in sentence or "明日" in text else "今日"):
             logger.info("降水確率が低いのに傘をすすめる文を読み上げずに捨てました")
             self.note_drop("傘（降水確率が低い）", sentence)
             return True

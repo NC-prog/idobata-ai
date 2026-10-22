@@ -213,3 +213,26 @@ async def test_debug_page_loads_frames_sequentially(tmp_path: Path) -> None:
         frame[0] = b"\xff\xd8jpeg"
         r = await client.get("/edge/debug.jpg")
         assert r.status_code == 200 and r.content == b"\xff\xd8jpeg" and r.headers["cache-control"] == "no-store"
+
+
+async def test_umbrella_follows_the_day_and_tag_leak_is_dropped() -> None:
+    from datetime import datetime
+
+    from src.knowledge import JST
+
+    class _W:
+        def lines(self, now: datetime) -> list[str]:
+            return ["今日（10月22日）の広島県南部は「晴れ」の予報です。降水確率は、18時から24時が0パーセントです。",
+                    "明日（10月23日）の広島県南部は「晴れ　後　雨」の予報です。降水確率は最大50パーセントです。"]
+
+    def noon() -> datetime:
+        return datetime(2026, 10, 22, 12, 0, tzinfo=JST)
+
+    d = Dialogue(StreamLLM(["今日は晴れの予報です。", "お出かけの際は傘を持ち歩くとよいかもしれませんね。"]),
+                 DialogueConfig(), weather=_W(), now=noon)  # type: ignore[arg-type]
+    assert await _collect(d, "今日の天気は") == ["今日は晴れの予報です。"]  # 今日は雨が無いので傘をすすめない
+    d = Dialogue(StreamLLM(["明日は夜遅く雨の予報です。", "傘をお持ちください。"]), DialogueConfig(), weather=_W(),
+                 now=noon)  # type: ignore[arg-type]
+    assert await _collect(d, "明日は雨が降りますか") == ["明日は夜遅く雨の予報です。", "傘をお持ちください。"]
+    d = Dialogue(StreamLLM(["オレンジドクターに相談してみてください。", "提案する：参照する"]), DialogueConfig())
+    assert await _collect(d, "物忘れが") == ["オレンジドクターに相談してみてください。"]

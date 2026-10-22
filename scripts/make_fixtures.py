@@ -98,6 +98,11 @@ UTTERANCES: tuple[Utterance, ...] = (
               text="イチニーサンヨンの。"),
     Utterance(filename="visitor_phone_part3_ja.wav", speaker_id=11, speaker_name="玄野武宏",
               text="ゴーロクナナハチ。"),
+    # 紹介状の連絡方法と電話番号（WP07）: 番号を言わない、保存の後に電話番号に触れる
+    Utterance(filename="visitor_phone_refuse_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="番号はちょっと言いたくないです。"),
+    Utterance(filename="visitor_phone_notasked_ja.wav", speaker_id=11, speaker_name="玄野武宏",
+              text="電話番号、聞いてないよね。"),
     # 本人と付き添い（WP02 B の話者の区別。本人＝玄野武宏、付き添い＝冥鳴ひまり）と、後ろの職員の声（青山龍星）
     Utterance(filename="pair_honin_1_ja.wav", speaker_id=11, speaker_name="玄野武宏", text="自分の介護のことで相談に来ました。"),
     Utterance(filename="pair_tsuki_1_ja.wav", speaker_id=14, speaker_name="冥鳴ひまり", text="私は娘で、付き添いで来ました。"),
