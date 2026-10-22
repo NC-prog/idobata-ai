@@ -56,6 +56,7 @@ from .speech_output import (
     SpokenSentence,
     WavDirWriter,
 )
+from .themes import Theme, ThemeSelector, load_themes
 from .timeofday import all_greetings, greeting_for
 from .transcripts import TranscriptStore
 from .tts_client import TTSClient
@@ -198,6 +199,8 @@ class VoiceLoop:
                                         config.data_dir / "models" / "rtmpose",
                                         on_change=self._on_party_change, debug=camera_debug)
         self._openers = load_openers(SERVER_ROOT / "context" / "openers.yaml")
+        # テーマ（WP08。拠点×季節のアバター・背景・季節の一言。暦で自動、職員パネルから手動でも）
+        self._themes = ThemeSelector(load_themes(config.theme.path, config.site))
         # 輪が NONE になってからの、会話を区切るタイマーと、別れの一言を言ったか
         self._bye_task: asyncio.Task[None] | None = None
         self._farewell_said = False
@@ -217,11 +220,13 @@ class VoiceLoop:
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir,
                 staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits,
                                  tuple(d.name for d in (facility.departments if facility else ())),
-                                 self._asr_fixes),
+                                 self._asr_fixes, self._themes),
                 admin=AdminPanel(self._transcripts, config.admin),
                 debug_frame=(lambda: self._camera.debug_jpeg if self._camera else None) if camera_debug else None,
                 debug_state=self._camera_state,
                 edge_allow=config.edge.allow,
+                avatars_dir=config.data_dir / config.theme.avatars_subdir,
+                backgrounds_dir=config.data_dir / config.theme.backgrounds_subdir,
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）
@@ -272,6 +277,7 @@ class VoiceLoop:
                 self._edge.on_video = self._camera.push_jpeg
                 self._spawn(self._camera.run(), "camera")
             await self._edge.start()
+            self._spawn(self._watch_theme(), "theme-watch")
         if self._edge_server is not None:
             await self._edge_server.start()
         self._print_banner()
@@ -608,7 +614,9 @@ class VoiceLoop:
         if self._opener_said or self._conversation.session_language is not None:
             return  # 同じ会話の中で輪ができ直したときは言わない
         weather, temp = self._weather.today(datetime.now(JST))
-        lines = opener_lines(self._openers, greeting_for(), weather, temp, self._opener_count)
+        theme = self._themes.applied or self._themes.wanted(datetime.now(JST).date())
+        lines = opener_lines(self._openers, greeting_for(), weather, temp, self._opener_count,
+                             theme.opener_line if theme else "")
         self._opener_said = True
         self._opener_count += 1
         self._last_utterance_at = time.monotonic()  # 黙ったまま立ち去らなければ、待機タイムアウトでも区切る
@@ -649,7 +657,8 @@ class VoiceLoop:
     async def _prepare_fixed_lines(self) -> None:
         """切り出し・沈黙・別れの決まった文を先に合成しておく（輪ができてから 0.5 秒以内に言い始めるため）。"""
         t0 = time.monotonic()
-        for text in all_lines(self._openers, all_greetings()):
+        season_lines = [t.opener_line for t in self._themes.choices if t.opener_line]
+        for text in all_lines(self._openers, all_greetings()) + season_lines:
             spoken = speech_text(text)
             try:
                 self._tts_cache[spoken] = await self._tts.synthesize_with_query(spoken)
@@ -936,10 +945,12 @@ class VoiceLoop:
     # ------------------------------------------------------------------
 
     def _on_edge_hello(self, hello: dict[str, Any]) -> None:
-        """エッジがつながったら、拠点と季節（背景）と現在の状態を送る。"""
+        """エッジがつながったら、テーマ（アバター・背景）と現在の状態を送る。"""
         async def greet() -> None:
             assert self._edge is not None
-            await self._edge.send_theme(config.site, current_season())
+            if self._themes.applied is None:  # 最初の接続: 会話の有無にかかわらず、今のテーマで始める
+                self._themes.applied = self._themes.wanted(datetime.now(JST).date())
+            await self._send_theme(self._themes.applied)
             await self._edge.send_state("idle")
             cam = config.camera
             await self._edge.send_json({
@@ -956,6 +967,43 @@ class VoiceLoop:
         task = asyncio.create_task(greet(), name="edge-hello")
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    async def _send_theme(self, theme: Theme | None) -> None:
+        """テーマをエッジに送る。アバターのファイルが ~/idobata-data/avatars/ に無ければ開発用のサンプル。"""
+        if self._edge is None:
+            return
+        if theme is None:
+            await self._edge.send_theme(config.site, "", config.edge.default_avatar, "")
+            return
+        avatar = f"avatars/{theme.avatar}"
+        if not (config.data_dir / config.theme.avatars_subdir / theme.avatar).is_file():
+            logger.warning("アバターのファイルがありません（開発用のサンプルで表示します）: %s", theme.avatar)
+            avatar = config.edge.default_avatar
+        await self._edge.send_theme(config.site, theme.name, avatar, f"backgrounds/{theme.background}")
+
+    def _theme_switchable(self) -> bool:
+        """テーマを切り替えてよいか（会話中でない。カメラがあれば輪が無い）。"""
+        if self._talking or self._last_utterance_at is not None or self._turn_lock.locked() or self._turn_tasks:
+            return False
+        return self._camera is None or self._camera.snapshot.state is PartyState.NONE
+
+    async def _watch_theme(self) -> None:
+        """暦と職員パネルの手動の切り替えを見て、会話の無いときにエッジのテーマを差し替える。"""
+        while True:
+            await asyncio.sleep(config.theme.check_sec)
+            await self.check_theme()
+
+    async def check_theme(self) -> bool:
+        """出したいテーマが今のものと違い、切り替えてよいときに差し替える。差し替えたら True。"""
+        wanted = self._themes.wanted(datetime.now(JST).date())
+        if wanted is None or wanted == self._themes.applied or self._themes.applied is None:
+            return False  # まだエッジがつながっていない（つながったときに送る）
+        if not self._theme_switchable():
+            return False
+        logger.info("テーマを切り替えます: %s → %s", self._themes.applied.name, wanted.name)
+        self._themes.applied = wanted
+        await self._send_theme(wanted)
+        return True
 
     def _spawn(self, coro: Coroutine[Any, Any, None], name: str) -> None:
         task = asyncio.create_task(coro, name=name)
@@ -1004,12 +1052,6 @@ async def _lines(*lines: str) -> AsyncIterator[str]:
 
 def _mask_digits(text: str) -> str:
     return re.sub(r"[0-9０-９〇零一二三四五六七八九]", "＊", text)
-
-
-def current_season(month: int | None = None) -> str:
-    """月から季節（エッジの背景の切替に使う）を返す。"""
-    m = month if month is not None else time.localtime().tm_mon
-    return config.edge.seasons[(m - 3) % 12 // 3]
 
 
 def voiced_ms(frames: list[np.ndarray], sample_rate: int, peak_ratio: float, min_rms: float) -> float:

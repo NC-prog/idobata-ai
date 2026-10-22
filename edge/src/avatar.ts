@@ -38,10 +38,14 @@ const PARTY_OFFSET: Record<PartyState, Partial<Pose>> = {
 const POSE_RATE = 4;
 const MOUTH_RATE = 28;
 const MOUTH_OPEN = 0.85;
-// カメラ: 頭の骨（首の付け根の少し上）からの相対位置（m）
-const CAMERA_DISTANCE = 1.35;
-const CAMERA_HEIGHT = -0.02;
-const CAMERA_AIM = -0.1;
+// 構図（WP08）: 胸から上。頭のてっぺんの上に画面の高さの FRAME_TOP_MARGIN を空け、胸の骨の FRAME_BELOW_CHEST m 下までを、
+// 画面の上 FRAME_UPPER（下の残りは字幕が重なる）に収める。縦置きで幅が足りないときは、肩幅の FRAME_WIDTH 倍が入るまで引く
+const FRAME_TOP_MARGIN = 0.07;
+const FRAME_BELOW_CHEST = 0.08;
+const FRAME_UPPER = 0.8;
+const FRAME_WIDTH = 2.1;
+// 使う表情（モデルに無いものは使わない。VRoid Studio 製の VRM 1.0 なら全部ある）
+const EXPRESSIONS = ["happy", "relaxed", "blink", ...VISEMES] as const;
 
 function approach(current: number, target: number, rate: number, dt: number): number {
   return current + (target - current) * Math.min(1, rate * dt);
@@ -49,6 +53,9 @@ function approach(current: number, target: number, rate: number, dt: number): nu
 
 export class Avatar {
   private vrm: VRM | null = null;
+  private url: string | null = null;
+  private loadSeq = 0;
+  private available = new Set<string>();
   private readonly gazeTarget = new THREE.Object3D();
   private readonly camera: THREE.PerspectiveCamera;
   private state: AvatarState = "idle";
@@ -64,22 +71,75 @@ export class Avatar {
     scene.add(this.gazeTarget);
   }
 
+  /** 読み込み済み（または読み込み中）の VRM の URL */
+  get currentUrl(): string | null {
+    return this.url;
+  }
+
+  /**
+   * VRM を読み込んで差し替える（テーマの切り替え、WP08）。読み終わるまでは前のモデルを出したまま。
+   * 読み込み中に別の URL が来たら、古い方は読み終わっても捨てる。失敗したら前のモデルのまま例外を投げる
+   */
   async load(url: string): Promise<void> {
+    if (url === this.url) return;
+    const prevUrl = this.url;
+    this.url = url;
+    const seq = ++this.loadSeq;
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
-    const gltf = await loader.loadAsync(url);
-    const vrm = gltf.userData.vrm as VRM;
+    let gltf;
+    try {
+      gltf = await loader.loadAsync(url);
+    } catch (err) {
+      if (seq === this.loadSeq) this.url = prevUrl;
+      throw err;
+    }
+    const vrm = gltf.userData.vrm as VRM | undefined;
+    if (!vrm) {
+      if (seq === this.loadSeq) this.url = prevUrl;
+      throw new Error(`VRM ではありません: ${url}`);
+    }
+    if (seq !== this.loadSeq) {
+      VRMUtils.deepDispose(gltf.scene); // 読み込み中に次の切り替えが来た
+      return;
+    }
     VRMUtils.removeUnnecessaryVertices(gltf.scene);
     VRMUtils.combineSkeletons(gltf.scene);
     VRMUtils.rotateVRM0(vrm); // VRM 0.x を VRM 1.0 と同じ向き（+Z 向き）に揃える
     vrm.scene.traverse((obj) => {
       obj.frustumCulled = false;
     });
+    const old = this.vrm;
+    if (old) {
+      this.scene.remove(old.scene);
+      VRMUtils.deepDispose(old.scene);
+    }
     this.scene.add(vrm.scene);
     if (vrm.lookAt) vrm.lookAt.target = this.gazeTarget;
     this.vrm = vrm;
+    const names = Object.keys(vrm.expressionManager?.expressionMap ?? {});
+    this.available = new Set(EXPRESSIONS.filter((e) => names.includes(e)));
+    const missing = EXPRESSIONS.filter((e) => !this.available.has(e));
+    if (missing.length) console.warn("VRM に無い表情（使いません）", missing);
+    this.mouth = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
     this.restPose();
-    this.frameCamera();
+    this.frame();
+  }
+
+  /** 確認用（WP08）: 使える表情と今の重み、視線の向き */
+  debugInfo(): Record<string, unknown> {
+    const em = this.vrm?.expressionManager;
+    const weights: Record<string, number> = {};
+    for (const name of this.available) weights[name] = em?.getValue(name) ?? 0;
+    const look = this.vrm?.lookAt;
+    return {
+      url: this.url,
+      title: this.vrm?.meta?.metaVersion === "1" ? this.vrm.meta.name : null,
+      available: [...this.available],
+      weights,
+      lookAt: look ? { yaw: look.yaw, pitch: look.pitch } : null,
+      camera: this.camera.position.toArray(),
+    };
   }
 
   setState(state: AvatarState): void {
@@ -90,14 +150,33 @@ export class Avatar {
     this.party = party;
   }
 
-  /** 胸から上が入るようにカメラを置く（頭の高さはモデルから取る）。下 3 割は字幕が重なる */
-  private frameCamera(): void {
+  /**
+   * 胸から上が入るようにカメラを置く（頭のてっぺん・胸・肩幅はモデルから取る）。画面の縦横が変わったときも呼ぶ。
+   * カメラは水平に向ける（見上げ・見下ろしにしない）
+   */
+  frame(): void {
+    const vrm = this.vrm;
     const head = this.bone("head");
-    if (!head) return;
-    this.vrm!.scene.updateMatrixWorld(true);
-    const p = head.getWorldPosition(new THREE.Vector3());
-    this.camera.position.set(0, p.y + CAMERA_HEIGHT, CAMERA_DISTANCE);
-    this.camera.lookAt(0, p.y + CAMERA_AIM, 0);
+    if (!vrm || !head) return;
+    vrm.scene.updateMatrixWorld(true);
+    const headPos = head.getWorldPosition(new THREE.Vector3());
+    const chestBone = this.bone("upperChest") ?? this.bone("chest") ?? this.bone("spine");
+    const chestY = chestBone ? chestBone.getWorldPosition(new THREE.Vector3()).y : headPos.y - 0.3;
+    // 頭のてっぺん: 頭の骨より上にある頂点（髪を含む）の高さ。取れなければ頭の骨 + 0.2 m
+    const box = new THREE.Box3().setFromObject(vrm.scene);
+    const top = Number.isFinite(box.max.y) && box.max.y > headPos.y ? Math.min(box.max.y, headPos.y + 0.4) : headPos.y + 0.2;
+    const l = this.bone("leftUpperArm")?.getWorldPosition(new THREE.Vector3());
+    const r = this.bone("rightUpperArm")?.getWorldPosition(new THREE.Vector3());
+    const shoulders = l && r ? l.distanceTo(r) : 0.3;
+
+    const tanV = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+    const span = top - (chestY - FRAME_BELOW_CHEST);
+    let height = span / (FRAME_UPPER - FRAME_TOP_MARGIN); // 画面の高さ（m、モデルの位置で）
+    height = Math.max(height, (shoulders * FRAME_WIDTH) / this.camera.aspect);
+    const distance = height / 2 / tanV;
+    const centerY = top + height * FRAME_TOP_MARGIN - height / 2;
+    this.camera.position.set(0, centerY, headPos.z + distance);
+    this.camera.lookAt(0, centerY, headPos.z);
   }
 
   /** T ポーズから腕を下ろす */
@@ -147,12 +226,15 @@ export class Avatar {
 
     const em = vrm.expressionManager;
     if (em) {
-      em.setValue("happy", p.happy);
-      em.setValue("relaxed", p.relaxed);
-      em.setValue("blink", this.blinkWeight(dt));
+      const set = (name: string, w: number) => {
+        if (this.available.has(name)) em.setValue(name, w);
+      };
+      set("happy", p.happy);
+      set("relaxed", p.relaxed);
+      set("blink", this.blinkWeight(dt));
       for (const v of VISEMES) {
         this.mouth[v] = approach(this.mouth[v], v === viseme ? MOUTH_OPEN : 0, MOUTH_RATE, dt);
-        em.setValue(v, this.mouth[v]);
+        set(v, this.mouth[v]);
       }
     }
     vrm.update(dt);

@@ -1,0 +1,41 @@
+# テーマ（WP08）: 拠点×季節で、アバターのファイル・背景画像・切り出しの季節の一言を決める。
+#
+# - avatar: ~/idobata-data/avatars/ のファイル名（git に入れない。フロントが /edge/avatars/<name> で配信する）。
+#   ファイルが無ければ開発用のサンプル（edge/public/models/）で表示する
+# - background: 背景画像のファイル名。~/idobata-data/backgrounds/ にあればそれ（実写に差し替えるときはここに置く）、
+#   無ければ edge/public/backgrounds/ の仮置き（拠点の色味の単色グラデーション）
+# - opener_line: 切り出しの季節の一言（天気の一言と 1 会話おきに入れ替える。寒暖の一言があればそちらが優先）。
+#   拠点の行事や景色など、確かめていない事実は書かない
+#
+# calendar: 月日（MM-DD、両端を含む。年をまたいでよい）で自動で選ぶ。上から順に見て最初に当たったもの。
+# 職員パネル（/staff/）から手動でも切り替えられる（「自動に戻す」まで手動のまま。再起動で自動に戻る）。
+# 切り替えは会話中には行わず、輪が無くなってから（カメラが無ければ会話が区切られてから）エッジに送る。
+
+sites:
+  etajima:
+    themes:
+      spring: {label: 春, avatar: idochan_office.vrm, background: etajima_spring.jpg, opener_line: 春らしくなってきましたね。}
+      summer: {label: 夏, avatar: idochan_office.vrm, background: etajima_summer.jpg, opener_line: 夏らしくなってきましたね。}
+      autumn: {label: 秋, avatar: idochan_office.vrm, background: etajima_autumn.jpg, opener_line: すっかり秋らしくなりましたね。}
+      winter: {label: 冬, avatar: idochan_office.vrm, background: etajima_winter.jpg, opener_line: 寒い季節になりましたね。}
+      festival: {label: お祭り, avatar: idochan_festival.vrm, background: etajima_autumn.jpg, opener_line: お祭りの季節ですね。}
+    calendar:
+      # お祭りの期間は市に確かめてから入れる（それまでは職員パネルから手動で切り替える）
+      # - {theme: festival, from: "MM-DD", to: "MM-DD"}
+      - {theme: spring, from: "03-01", to: "05-31"}
+      - {theme: summer, from: "06-01", to: "08-31"}
+      - {theme: autumn, from: "09-01", to: "11-30"}
+      - {theme: winter, from: "12-01", to: "02-29"}
+  akiota:
+    themes:
+      spring: {label: 春, avatar: idochan_office.vrm, background: akiota_spring.jpg, opener_line: 春らしくなってきましたね。}
+      summer: {label: 夏, avatar: idochan_office.vrm, background: akiota_summer.jpg, opener_line: 夏らしくなってきましたね。}
+      autumn: {label: 秋, avatar: idochan_office.vrm, background: akiota_autumn.jpg, opener_line: すっかり秋らしくなりましたね。}
+      winter: {label: 冬, avatar: idochan_office.vrm, background: akiota_winter.jpg, opener_line: 寒い季節になりましたね。}
+      festival: {label: お祭り, avatar: idochan_festival.vrm, background: akiota_autumn.jpg, opener_line: お祭りの季節ですね。}
+    calendar:
+      # - {theme: festival, from: "MM-DD", to: "MM-DD"}
+      - {theme: spring, from: "03-01", to: "05-31"}
+      - {theme: summer, from: "06-01", to: "08-31"}
+      - {theme: autumn, from: "09-01", to: "11-30"}
+      - {theme: winter, from: "12-01", to: "02-29"}

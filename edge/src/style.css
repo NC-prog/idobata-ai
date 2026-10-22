@@ -2,7 +2,7 @@
   --caption-bg: rgba(20, 24, 32, 0.72);
   --caption-fg: #ffffff;
   --caption-user-fg: #ffe9a8;
-  --bg-fallback: linear-gradient(180deg, #f3e6d3 0%, #e7cfae 55%, #c9a57c 100%);
+  --bg-fallback: linear-gradient(180deg, #4d6f73 0%, #2f4c52 55%, #1d3136 100%);
 }
 
 * {

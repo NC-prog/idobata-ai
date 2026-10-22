@@ -24,7 +24,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -34,6 +34,7 @@ from .edge_bridge import allowed_peer
 from .knowledge import JST
 from .procedures import AsrFixes
 from .referrals import ReferralStore, TidbitStore, VisitLog, today_stats
+from .themes import ThemeSelector, safe_name
 from .transcripts import TranscriptStore
 
 logger = logging.getLogger(__name__)
@@ -65,12 +66,16 @@ class AsrFixIn(BaseModel):
     correct: str
 
 
+class ThemeIn(BaseModel):
+    name: str | None = None  # None で自動（暦）に戻す
+
+
 class StaffPanel:
     """職員パネルの中身（紹介状・来訪記録）。"""
 
     def __init__(self, referrals: ReferralStore, visits: VisitLog, cfg: StaffConfig,
                  tidbits: TidbitStore | None = None, departments: tuple[str, ...] = (),
-                 asr_fixes: AsrFixes | None = None) -> None:
+                 asr_fixes: AsrFixes | None = None, themes: ThemeSelector | None = None) -> None:
         self.referrals = referrals
         self.visits = visits
         self.cfg = cfg
@@ -78,6 +83,8 @@ class StaffPanel:
         # 職員が「未特定」の紹介状に付けられる課（拠点 YAML の facility.departments）
         self.departments = departments
         self.asr_fixes = asr_fixes
+        # テーマの手動の切り替え（WP08）
+        self.themes = themes
 
 
 class AdminPanel:
@@ -205,6 +212,22 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
             raise HTTPException(404, "小ネタがありません")
         return {"deleted": True}
 
+    @app.get("/staff/api/theme", dependencies=auth)
+    async def theme_status() -> dict[str, Any]:
+        if panel.themes is None:
+            raise HTTPException(404, "テーマはありません")
+        return panel.themes.status(datetime.now(JST).date())
+
+    @app.post("/staff/api/theme", dependencies=auth)
+    async def set_theme(body: ThemeIn) -> dict[str, Any]:
+        if panel.themes is None:
+            raise HTTPException(404, "テーマはありません")
+        try:
+            panel.themes.set_override(body.name or None)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return panel.themes.status(datetime.now(JST).date())
+
     @app.get("/staff/api/stats", dependencies=auth)
     async def stats(day: str | None = None) -> dict[str, Any]:
         return today_stats(panel.referrals, panel.visits, _parse_day(day))
@@ -281,9 +304,33 @@ def _add_debug_routes(app: FastAPI, frame: DebugFrame, state: DebugState) -> Non
         return state()
 
 
+def _add_media_routes(app: FastAPI, static_dir: Path, avatars_dir: Path | None,
+                      backgrounds_dir: Path | None) -> None:
+    """アバター（VRM）と背景を ~/idobata-data から配信する（WP08。モデルは git にもビルドにも入れない）。
+
+    /edge/avatars/<name> は avatars_dir だけ。/edge/backgrounds/<name> は backgrounds_dir（実写）にあればそれ、
+    無ければビルドに入っている仮置き（static_dir/backgrounds/）。
+    """
+    def pick(name: str, *dirs: Path | None) -> FileResponse:
+        if safe_name(name):
+            for d in dirs:
+                if d is not None and (d / name).is_file():
+                    return FileResponse(d / name, headers={"Cache-Control": "no-cache"})
+        raise HTTPException(404, "ありません")
+
+    @app.get("/edge/avatars/{name}", include_in_schema=False)
+    async def avatar_file(name: str) -> FileResponse:
+        return pick(name, avatars_dir)
+
+    @app.get("/edge/backgrounds/{name}", include_in_schema=False)
+    async def background_file(name: str) -> FileResponse:
+        return pick(name, backgrounds_dir, static_dir / "backgrounds")
+
+
 def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPanel | None = None,
                debug_frame: DebugFrame | None = None, debug_state: DebugState | None = None,
-               edge_allow: tuple[str, ...] | None = None) -> FastAPI:
+               edge_allow: tuple[str, ...] | None = None, avatars_dir: Path | None = None,
+               backgrounds_dir: Path | None = None) -> FastAPI:
     """エッジページ（と職員パネル・管理者ページ・カメラのデバッグ表示）を配信する FastAPI アプリ。
 
     edge_allow を渡すと、/edge/ と / はこの機体自身と edge_allow の相手からだけ開ける（IDOBATA_EDGE_ALLOW。WP02 D）。
@@ -301,6 +348,7 @@ def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPa
             return await call_next(request)
     if debug_frame is not None:
         _add_debug_routes(app, debug_frame, debug_state or (dict))  # /edge の静的配信より先に置く
+    _add_media_routes(app, static_dir, avatars_dir, backgrounds_dir)  # /edge の静的配信より先に置く
     if staff is not None:
         _add_staff_routes(app, staff)
     if admin is not None:
@@ -327,9 +375,11 @@ class EdgeServer:
 
     def __init__(self, host: str, port: int, static_dir: Path, staff: StaffPanel | None = None,
                  admin: AdminPanel | None = None, debug_frame: DebugFrame | None = None,
-                 debug_state: DebugState | None = None, edge_allow: tuple[str, ...] | None = None) -> None:
+                 debug_state: DebugState | None = None, edge_allow: tuple[str, ...] | None = None,
+                 avatars_dir: Path | None = None, backgrounds_dir: Path | None = None) -> None:
         cfg = uvicorn.Config(
-            create_app(static_dir, staff, admin, debug_frame, debug_state, edge_allow), host=host, port=port, log_level="warning", lifespan="off",
+            create_app(static_dir, staff, admin, debug_frame, debug_state, edge_allow, avatars_dir, backgrounds_dir),
+            host=host, port=port, log_level="warning", lifespan="off",
         )
         self._server = uvicorn.Server(cfg)
         self._task: asyncio.Task[None] | None = None

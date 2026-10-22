@@ -19,4 +19,7 @@
 | allowPoliticalOrReligiousUsage | true |
 | allowAntisocialOrHateUsage | false |
 
-本番用のアバターは人間が VRoid Studio で作って差し替える（`src/main.ts` の `MODEL_URL`）。
+このサンプルは開発用の既定値（フロントにつながらないときと、テーマのアバターのファイルが無いときに出す）。
+本番のアバター（`idochan_office.vrm`・`idochan_festival.vrm`、再配布不可）は git にもビルドにも入れず、
+`~/idobata-data/avatars/` に置いてフロントが `/edge/avatars/<name>.vrm` で配信する。どれを出すかは
+`server/context/themes.yaml`（WP08。結果は `docs/WP08_result.md`）。

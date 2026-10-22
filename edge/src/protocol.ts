@@ -32,10 +32,14 @@ export interface SpeakMessage {
   mouth: MouthKey[];
 }
 
+/** アバターと背景の切り替え（WP08）。avatar・background はエッジのページ（/edge/）からの相対パス */
 export interface ThemeMessage {
   type: "theme";
   site: string;
   season: string;
+  name?: string;
+  avatar?: string;
+  background?: string;
 }
 
 /** 応答が使った参考資料の出典タイトル（字幕の下に薄く出す。読み上げない。WP03） */

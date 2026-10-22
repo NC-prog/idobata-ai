@@ -18,7 +18,6 @@ from src.audio_input import EdgeAudioInput
 from src.config import AudioInputConfig
 from src.edge_bridge import EdgeBridge
 from src.edge_server import create_app
-from src.main import current_season
 from src.speech_output import EdgeSpeaker, SpokenSentence
 
 
@@ -172,14 +171,6 @@ async def test_edge_speaker_sends_speak_and_waits_for_last_sentence() -> None:
     assert ("caption", ("assistant", "あ。い。", True)) in bridge.sent
     assert ("wait", ("u7", 1)) in bridge.sent
     assert bridge.sent[-1] == ("state", "idle")
-
-
-@pytest.mark.parametrize(("month", "season"), [
-    (1, "winter"), (2, "winter"), (3, "spring"), (5, "spring"), (6, "summer"),
-    (9, "autumn"), (11, "autumn"), (12, "winter"),
-])
-def test_current_season(month: int, season: str) -> None:
-    assert current_season(month) == season
 
 
 async def test_edge_server_serves_built_page(tmp_path: Path) -> None:

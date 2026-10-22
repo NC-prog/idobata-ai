@@ -7,11 +7,15 @@ import { Avatar } from "./avatar";
 import { startCamera } from "./camera";
 import { FrontLink } from "./link";
 import { KIND_JPEG, KIND_PCM } from "./protocol";
-import type { CameraMessage, DownMessage, SpeakMessage } from "./protocol";
+import type { CameraMessage, DownMessage, SpeakMessage, ThemeMessage } from "./protocol";
 
 // WebSocket のポート。既定は 8765、ページの URL に ?ws=<番号> を付けると変えられる（試験用に別ポートで動かすとき）
 const WS_PORT = Number(new URLSearchParams(location.search).get("ws")) || 8765;
-const MODEL_URL = `${import.meta.env.BASE_URL}models/VRM1_Constraint_Twist_Sample.vrm`;
+// 開発用の既定のアバター。本番のアバターはフロントの theme（~/idobata-data/avatars/ から /edge/avatars/ で配信）で読む。
+// フロントにつながらないまま THEME_WAIT_MS 経ったら、これを出しておく
+const DEFAULT_MODEL = "models/VRM1_Constraint_Twist_Sample.vrm";
+const THEME_WAIT_MS = 4000;
+const asset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const statusEl = $<HTMLDivElement>("status");
@@ -34,21 +38,48 @@ const light = new THREE.DirectionalLight(0xffffff, Math.PI);
 light.position.set(0.5, 1.5, 2);
 scene.add(light, new THREE.AmbientLight(0xffffff, 0.6));
 
+const avatar = new Avatar(scene, camera);
+
 function resize(): void {
   const w = window.innerWidth;
   const h = window.innerHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  avatar.frame(); // 縦置き・横置きで構図を取り直す
 }
 window.addEventListener("resize", resize);
 resize();
 
-const avatar = new Avatar(scene, camera);
-avatar.load(MODEL_URL).catch((err: unknown) => {
-  console.error("VRM を読み込めません", err);
-  statusEl.textContent = "アバターを読み込めません";
-});
+/** アバターを読み込む。失敗したら、何も出ていなければ既定のサンプルを出す */
+function loadAvatar(url: string): void {
+  avatar.load(url).catch((err: unknown) => {
+    console.error("VRM を読み込めません", url, err);
+    if (avatar.currentUrl === null && url !== asset(DEFAULT_MODEL)) {
+      loadAvatar(asset(DEFAULT_MODEL));
+      return;
+    }
+    statusEl.textContent = "アバターを読み込めません";
+  });
+}
+
+// 確認用（WP08 のスクリーンショット・口パクの確かめ）。DevTools から __avatarDebug() で読む
+(window as unknown as { __avatarDebug: () => unknown }).__avatarDebug = () => avatar.debugInfo();
+
+let themeReceived = false;
+setTimeout(() => {
+  if (!themeReceived) loadAvatar(asset(DEFAULT_MODEL));
+}, THEME_WAIT_MS);
+
+/** テーマ（WP08）: アバターと背景を読み直す（同じものなら何もしない）。フロントは会話中には送ってこない */
+function applyTheme(msg: ThemeMessage): void {
+  themeReceived = true;
+  if (msg.avatar) loadAvatar(asset(msg.avatar));
+  const bg = msg.background || `backgrounds/${msg.site}_${msg.season}.jpg`; // 古いフロント（WP07 まで）は site と season だけ
+  const url = `url("${asset(bg)}"), var(--bg-fallback)`;
+  if (backgroundEl.style.backgroundImage !== url) backgroundEl.style.backgroundImage = url;
+  console.info("テーマ", msg.name ?? msg.season);
+}
 
 // ---------------------------------------------------------------- 音声
 const playbackCtx = new AudioContext();
@@ -157,8 +188,7 @@ function handleMessage(msg: DownMessage): void {
       avatar.setParty(msg.state);
       break;
     case "theme":
-      backgroundEl.style.backgroundImage =
-        `url("${import.meta.env.BASE_URL}backgrounds/${msg.site}_${msg.season}.jpg"), var(--bg-fallback)`;
+      applyTheme(msg);
       break;
   }
 }
@@ -236,9 +266,10 @@ if (playbackCtx.state === "running") {
 }
 
 // ---------------------------------------------------------------- ループ
-const clock = new THREE.Clock();
-renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.1);
+const timer = new THREE.Timer();
+renderer.setAnimationLoop((time) => {
+  timer.update(time);
+  const dt = Math.min(timer.getDelta(), 0.1);
   avatar.update(dt, player.currentViseme()?.v ?? null);
   updateAssistantCaption();
   renderer.render(scene, camera);

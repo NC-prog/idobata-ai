@@ -42,6 +42,8 @@
   <button type="submit">1 行足す</button> <span class="mut" id="fixmsg"></span>
 </form>
 <ul id="fixes"></ul>
+<h2>アバターと背景 <span class="mut">（暦で自動に選びます。手動で選ぶと「自動に戻す」まで手動のまま。会話中は切り替えず、来訪者がいなくなってから画面に反映します）</span></h2>
+<div id="theme"></div>
 <script>
 const STATUSES = ["未対応", "対応中", "完了"];
 const ROLES = ["", "窓口", "担当課"];
@@ -72,6 +74,22 @@ async function loadFixes() {
   const fixes = await fetch("api/asr_fixes").then((r) => r.json());
   document.getElementById("fixes").innerHTML = fixes.map((f) =>
     `<li>${esc(f.surface)} → ${esc(f.correct)} <span class="mut">${esc(f.source)}</span></li>`).join("") || `<li class="mut">ありません</li>`;
+}
+
+async function setTheme(name) {
+  await fetch("api/theme", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name})});
+  loadTheme();
+}
+
+async function loadTheme() {
+  const r = await fetch("api/theme");
+  if (!r.ok) { document.getElementById("theme").innerHTML = `<span class="mut">テーマはありません</span>`; return; }
+  const t = await r.json();
+  const label = (n) => (t.choices.find((c) => c.name === n) || {label: n ?? "-"}).label;
+  document.getElementById("theme").innerHTML =
+    t.choices.map((c) => `<button class="${c.name === t.override ? "on" : ""}" onclick='setTheme("${esc(c.name)}")'>${esc(c.label)}</button>`).join("") +
+    ` <button class="${t.override ? "" : "on"}" onclick="setTheme(null)">自動に戻す（今は${esc(label(t.auto))}）</button>` +
+    `<div class="mut">画面に出ているもの: ${esc(label(t.applied))}${t.wanted !== t.applied ? `（次に来訪者がいないときに ${esc(label(t.wanted))} に切り替えます）` : ""}</div>`;
 }
 
 async function delTidbit(id) {
@@ -123,7 +141,8 @@ async function load() {
 dayEl.addEventListener("change", load);
 load();
 loadFixes();
-setInterval(load, __POLL_SEC__ * 1000);
+loadTheme();
+setInterval(() => { load(); loadTheme(); }, __POLL_SEC__ * 1000);
 </script>
 </body>
 </html>

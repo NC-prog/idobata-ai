@@ -44,10 +44,13 @@ def load_openers(path: Path) -> Openers:
     )
 
 
-def opener_lines(op: Openers, greeting: str, weather: str | None, temp: float | None, n: int) -> list[str]:
+def opener_lines(op: Openers, greeting: str, weather: str | None, temp: float | None, n: int,
+                 season_line: str = "") -> list[str]:
     """切り出しの文: 時間帯の挨拶 ＋ 季節・天気の一言（あれば）＋ 開いた問い 1 つ（n 回目の会話で回す）。
 
     天気の一言は、寒暖が際立っていれば気温の一言、そうでなければ今日の予報の最初の天気（「晴れ　後　くもり」なら晴れ）。
+    テーマの季節の一言（WP08、themes.yaml の opener_line）は、寒暖の一言が無いとき、天気の一言と 1 会話おきに入れ替える
+    （天気が分からなければ毎回）。
     """
     lines = [op.greeting.format(greeting=greeting)]
     line = None
@@ -55,9 +58,12 @@ def opener_lines(op: Openers, greeting: str, weather: str | None, temp: float | 
         line = op.cold[1]
     elif temp is not None and op.hot is not None and temp > op.hot[0]:
         line = op.hot[1]
-    elif weather:
-        head = weather.replace("\u3000", " ").split()[0]
-        line = next((text for word, text in op.weather if word in head), None)
+    else:
+        if weather and weather.strip():
+            head = weather.replace("\u3000", " ").split()[0]
+            line = next((text for word, text in op.weather if word in head), None)
+        if season_line and (line is None or n % 2 == 1):
+            line = season_line
     if line:
         lines.append(line)
     if op.questions:

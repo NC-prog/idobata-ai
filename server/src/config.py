@@ -844,8 +844,20 @@ class EdgeConfig:
     static_dir: Path = SERVER_ROOT / "static" / "edge"
     # playback_ended を待つ上限 = 再生終了の見込み + この秒数
     playback_timeout_margin_sec: float = 3.0
-    # 季節（背景 edge/public/backgrounds/<site>_<season>.jpg）。3〜5 月が spring、以降 3 か月ずつ
-    seasons: tuple[str, str, str, str] = ("spring", "summer", "autumn", "winter")
+    # テーマのアバターのファイルが ~/idobata-data/avatars/ に無いときに使う、開発用のサンプル（edge/public/models/）
+    default_avatar: str = "models/VRM1_Constraint_Twist_Sample.vrm"
+
+
+@dataclass(frozen=True)
+class ThemeConfig:
+    """テーマ（拠点×季節のアバター・背景・切り出しの季節の一言、WP08）。"""
+
+    path: Path = SERVER_ROOT / "context" / "themes.yaml"
+    # 暦・職員パネルの手動の切り替えを見に行く間隔（秒）。切り替えは輪が無いときだけ
+    check_sec: float = 5.0
+    # ~/idobata-data の下の、アバター（VRM）と実写の背景を置くディレクトリ
+    avatars_subdir: str = "avatars"
+    backgrounds_subdir: str = "backgrounds"
 
 
 @dataclass(frozen=True)
@@ -877,6 +889,7 @@ class AppConfig:
     speaker: SpeakerConfig = field(default_factory=SpeakerConfig)
     tidbit: TidbitConfig = field(default_factory=TidbitConfig)
     edge: EdgeConfig = field(default_factory=EdgeConfig)
+    theme: ThemeConfig = field(default_factory=ThemeConfig)
 
 
 def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
