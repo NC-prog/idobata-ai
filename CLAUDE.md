@@ -20,6 +20,9 @@
   セッション限りの話者の区別（ECAPA、A・B…）、能動的な切り出し・沈黙・別れ、別機エッジの設計。結果は `docs/WP02_result.md`
 - WP07（現在）: 紹介状の連絡方法と電話番号（電話なら番号がそろうまで保存しない）、保存の後に来訪者が触れた項目だけ伺い直す、
   根拠の無い期限・金額・支払方法を言わない、定型の一言を履歴に。結果は `docs/WP07_result.md`
+- WP08（現在）: 本番アバター（`~/idobata-data/avatars/` の idochan_office / idochan_festival、**再配布不可・git に入れない**。
+  フロントが `/edge/avatars/` で配信）とテーマ（`server/context/themes.yaml`。拠点×季節のアバター・背景・季節の一言、暦で自動、
+  職員パネルから手動。**会話中は切り替えない**）。背景は `~/idobata-data/backgrounds/`（実写）が優先、無ければ仮置き。結果は `docs/WP08_result.md`
 - 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
 
 ## 実行環境（重要）
@@ -173,6 +176,7 @@ server/
 │   ├── camera.py         # カメラと「輪」（rtmlib の RTMDet＋RTMPose・簡易トラッカー。フレームはメモリのみ。WP02 A）
 │   ├── speaker.py        # セッション限りの話者の区別（ECAPA。A・B…。埋め込みはメモリのみ。WP02 B）
 │   ├── openers.py        # 切り出し・沈黙・別れの定型文（context/openers.yaml。WP02 C）
+│   ├── themes.py         # テーマ（context/themes.yaml。拠点×季節のアバター・背景・季節の一言。WP08）
 │   ├── transcripts.py    # 会話の文字記録（WP06）
 │   ├── caption_feed.py   # 字幕配信（WP03 で使用予定）
 │   ├── announcer.py      # テンプレート発話（未使用）
