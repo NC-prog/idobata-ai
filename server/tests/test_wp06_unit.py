@@ -357,5 +357,5 @@ async def test_worry_proposes_refer_to_community_center_department(tmp_path: Pat
 async def test_refer_tag_on_plain_smalltalk_is_dropped(tmp_path: Path) -> None:
     c = _conv(SpyLLM([["はい、臨時職員です。<propose:refer>"]], chat_reply="{}"), tmp_path)
     out = await _say(c, "あなたは市役所の職員さんですか")
-    assert out == ["はい、臨時職員です。"] and c.phase == "listen"
+    assert "".join(out) == "はい、臨時職員です。" and c.phase == "listen"  # 提案文を付けない
 
