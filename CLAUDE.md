@@ -25,6 +25,9 @@
   職員パネルから手動。**会話中は切り替えない**）。背景は `~/idobata-data/backgrounds/`（実写）が優先、無ければ仮置き。結果は `docs/WP08_result.md`
 - WP09（現在）: 手続きナレッジ（職員が承認する正解表。`~/idobata-data/procedures/<site>/<id>.yaml`）と職員パネルの「手続き」タブ、
   網羅 100 問・意地悪 30 問、深刻な打ち明け・迷子などの定型への切り替えと職員の呼び出し。結果は `docs/WP09_result.md`
+- WP10（現在）: 背景の実写（Wikimedia Commons の CC0・CC BY・CC BY-SA・PD。候補は `scripts/fetch_commons_backgrounds.py`、選ぶのは人間、
+  適用は `scripts/apply_background.py` → `~/idobata-data/backgrounds/<site>_<season>.jpg` と `credits.json`。**git に入れない**）。
+  CC BY / BY-SA は画面右下にクレジット（theme の `background_credit`）。結果は `docs/WP10_result.md`
 - 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
 
 ## 実行環境（重要）

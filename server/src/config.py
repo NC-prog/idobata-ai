@@ -965,6 +965,10 @@ class ThemeConfig:
     # ~/idobata-data の下の、アバター（VRM）と実写の背景を置くディレクトリ
     avatars_subdir: str = "avatars"
     backgrounds_subdir: str = "backgrounds"
+    # 実写の背景の出所（scripts/apply_background.py が書く。WP10）と、画面右下に出すクレジットの文言。
+    # CC BY / BY-SA は切り抜き・下端を暗くした改変を示し（ライセンスの「改変の表示」）、ライセンスの URI を添える
+    credits_file: str = "credits.json"
+    credit_format: str = "写真: {author} / {license}（{license_url}）/ {source}（切り抜き・加工）"
 
 
 @dataclass(frozen=True)

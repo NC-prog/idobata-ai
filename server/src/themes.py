@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -24,6 +25,48 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:vrm|jpg|jpeg|png|webp
 def safe_name(name: str) -> bool:
     """/edge/avatars/・/edge/backgrounds/ で配信してよいファイル名か。"""
     return bool(_SAFE_NAME.match(name)) and ".." not in name
+
+
+# 縦置きの画面で背景のどこを見せるか（CSS の background-position の横位置）
+ANCHORS = ("left", "center", "right")
+
+
+@dataclass(frozen=True)
+class BackgroundCredit:
+    """背景写真のクレジット（画面右下）と、縦置きで見せる横の位置（WP10）。"""
+
+    text: str = ""
+    anchor: str = "center"
+
+
+def background_credit(backgrounds_dir: Path, file: str, credits_name: str, credit_format: str) -> BackgroundCredit:
+    """``~/idobata-data/backgrounds/credits.json`` からクレジットを作る。
+
+    実写のファイルが無い（仮置きのイラストに落ちる）・credits.json に無い・credit_required が false なら文言は空。
+    """
+    if not file or not (backgrounds_dir / file).is_file():
+        return BackgroundCredit()
+    path = backgrounds_dir / credits_name
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError) as exc:
+        logger.warning("背景のクレジットを読めません: %s: %s", path, exc)
+        return BackgroundCredit()
+    entry = next((e for e in data.values() if isinstance(e, dict) and e.get("file") == file), None)
+    if entry is None:
+        return BackgroundCredit()
+    anchor = str(entry.get("anchor") or "center")
+    if anchor not in ANCHORS:
+        anchor = "center"
+    if entry.get("credit_required") is False:
+        return BackgroundCredit("", anchor)
+    # ライセンスの URI は短く（https:// と言語の deed を落とす）。CC 4.0 第3条は媒体に照らした合理的な方法で示せばよい
+    url = re.sub(r"^https?://|/(?:deed|legalcode)(?:\.[a-z-]+)?$", "", str(entry.get("license_url") or "")).rstrip("/")
+    text = credit_format.format(author=str(entry.get("author") or "").strip() or "作者不明",
+                                license=str(entry.get("license") or "").strip(),
+                                license_url=url,
+                                source=str(entry.get("source") or "Wikimedia Commons"))
+    return BackgroundCredit(text, anchor)
 
 
 @dataclass(frozen=True)

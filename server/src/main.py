@@ -58,7 +58,7 @@ from .speech_output import (
     SpokenSentence,
     WavDirWriter,
 )
-from .themes import Theme, ThemeSelector, load_themes
+from .themes import Theme, ThemeSelector, background_credit, load_themes
 from .timeofday import all_greetings, greeting_for
 from .transcripts import TranscriptStore
 from .tts_client import TTSClient
@@ -1022,7 +1022,11 @@ class VoiceLoop:
         if not (config.data_dir / config.theme.avatars_subdir / theme.avatar).is_file():
             logger.warning("アバターのファイルがありません（開発用のサンプルで表示します）: %s", theme.avatar)
             avatar = config.edge.default_avatar
-        await self._edge.send_theme(config.site, theme.name, avatar, f"backgrounds/{theme.background}")
+        th = config.theme
+        credit = background_credit(config.data_dir / th.backgrounds_subdir, theme.background, th.credits_file,
+                                   th.credit_format)
+        await self._edge.send_theme(config.site, theme.name, avatar, f"backgrounds/{theme.background}",
+                                    credit.text, credit.anchor)
 
     def _theme_switchable(self) -> bool:
         """テーマを切り替えてよいか（会話中でない。カメラがあれば輪が無い）。"""
