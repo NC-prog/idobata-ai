@@ -828,6 +828,7 @@ class VoiceLoop:
                 print(f"[検索] {self._dialogue.last_search_ms:.0f}ms、"
                       f"参考資料 {len(self._dialogue.last_references)} 件")
             self._record_assistant(spoken_lines, timing, trigger)
+            self._call_staff_if_needed()
             self._last_activity = time.monotonic()  # 沈黙は、案内役が言い終えてから数える
         self._arm_phone_timer()
 
@@ -958,6 +959,18 @@ class VoiceLoop:
             procedures=[{"id": r.id, "status": r.status} for r in d.last_procedures] or None,
             timing=timing.as_record() if timing is not None else None, trigger=trigger,
         )
+
+    def _call_staff_if_needed(self) -> None:
+        """深刻な打ち明け・迷子の定型に切り替えたら、職員パネルに呼び出しを出す（本文は送らない。WP09 C）。"""
+        kind = self._dialogue.last_safety
+        if kind not in ("crisis", "lost_child"):
+            return
+        self._dialogue.last_safety = None
+        staff = self._edge_server.staff if self._edge_server is not None else None
+        if staff is None or not staff.cfg.password:
+            logger.warning("職員パネルが無いので、呼び出しを職員パネルに出せません（IDOBATA_STAFF_PASSWORD）")
+            return
+        staff.call_staff(kind, self._edge_id())
 
     def _edge_id(self) -> str:
         return self._edge.edge_id if self._edge is not None else ""

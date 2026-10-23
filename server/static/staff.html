@@ -28,6 +28,7 @@
 <body>
 <h1>井戸端AI 職員パネル <span class="mut" id="updated"></span></h1>
 <nav style="margin-bottom:8px"><b>紹介状・今日の状況</b>　<a href="procedures/">手続き</a> <span class="mut" id="proc-badge"></span></nav>
+<div id="alerts"></div>
 <label>日付 <input type="date" id="day"></label>
 <div class="stats" id="stats"></div>
 <table>
@@ -139,6 +140,16 @@ async function load() {
     </tr>`).join("") || `<tr><td colspan="9" class="mut">この日の紹介状はありません</td></tr>`;
   document.getElementById("updated").textContent = "更新 " + new Date().toLocaleTimeString("ja-JP");
 }
+async function loadAlerts() {
+  const r = await fetch("api/alerts");
+  if (!r.ok) return;
+  const rows = await r.json();
+  document.getElementById("alerts").innerHTML = rows.map((a) =>
+    `<div style="background:#c62828;color:#fff;padding:10px 14px;margin:6px 0;border-radius:6px;font-size:18px">
+     <b>職員の呼び出し</b> ${esc(a.at.slice(11, 16))}　${esc(a.label)}
+     <button onclick='alertDone("${esc(a.id)}")'>対応しました</button></div>`).join("");
+}
+async function alertDone(id) { await fetch(`api/alerts/${id}/done`, {method: "POST"}); loadAlerts(); }
 async function loadProcBadge() {
   const r = await fetch("api/procedures?status=recheck");
   if (!r.ok) return;
@@ -147,6 +158,8 @@ async function loadProcBadge() {
 }
 dayEl.addEventListener("change", load);
 loadProcBadge();
+loadAlerts();
+setInterval(loadAlerts, 3000);
 load();
 loadFixes();
 loadTheme();

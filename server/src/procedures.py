@@ -48,6 +48,8 @@ class Procedure:
     aliases: tuple[str, ...] = ()
     # 紹介状に付けるタグ（tags.yaml の統制語彙。手続きが分かったときは LLM の選んだタグより先に使う）
     tags: tuple[str, ...] = ()
+    # handles を持たない課で、名前で担当が分かるもの（WP09）
+    departments: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,10 +64,12 @@ class Procedures:
         """ASR の語彙と VOICEVOX の辞書に渡す語（読みのあるものだけ辞書に入る）。"""
         reading = {w.surface: w for w in self.readings}
         out: list[SiteWord] = []
+        seen: set[str] = set()
         for p in self.items:
             for s in (p.term, *p.aliases):
-                if s in self.asr_exclude:
+                if s in self.asr_exclude or s in seen:
                     continue
+                seen.add(s)
                 out.append(reading.pop(s, SiteWord(s)))
         # 読みだけ持ち、ASR からは外した語も辞書には入れる
         out += [SiteWord(w.surface, w.reading, w.accent, asr=False) for w in reading.values()]
@@ -122,7 +126,14 @@ class Procedures:
         found = {r.department for r in used if r.department in names}
         said = self.mentioned(self._rest_text(text, used), facility)
         found |= {d.name for d in facility.departments if any(k in said for k in _department_keywords(d.handles))}
-        return [n for n in names if n in found]
+        found |= {n for p in self.items if p.term in said for n in p.departments if n in names}
+        out = [n for n in names if n in found]
+        if len(out) > 1:
+            # 候補にこの建物の課が 1 つだけなら、その課（安芸太田の戸籍: 税務住民課・加計支所・筒賀支所 → 税務住民課）
+            here = [d.name for d in facility.departments if d.name in out and not d.place]
+            if len(here) == 1:
+                return here
+        return out
 
 
 def _department_keywords(handles: tuple[str, ...]) -> set[str]:
@@ -155,7 +166,7 @@ def load_procedures(context_dir: Path, knowledge_dir: Path | None = None, keep_r
         logger.warning("手続きの語の表を読めません: %s", path, exc_info=True)
         data = {}
     items = tuple(
-        Procedure(str(p["term"]), _strs(p.get("aliases")), _strs(p.get("tags")))
+        Procedure(str(p["term"]), _strs(p.get("aliases")), _strs(p.get("tags")), _strs(p.get("departments")))
         for p in data.get("procedures") or [] if isinstance(p, dict) and p.get("term")
     )
     readings = tuple(

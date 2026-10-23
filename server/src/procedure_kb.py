@@ -64,6 +64,8 @@ class IntakeSet:
 class Source:
     url: str
     checked_at: str = ""
+    # このページを根拠にした項目（bring / steps / deadline / fee / audience / faq）
+    items: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -182,7 +184,7 @@ def record_from_dict(data: dict[str, Any]) -> ProcedureRecord:
                    if isinstance(q, dict) and q.get("question"))
     faq = tuple((str(f["q"]).strip(), str(f["a"]).strip()) for f in data.get("faq") or []
                 if isinstance(f, dict) and f.get("q") and f.get("a"))
-    sources = tuple(Source(str(s["url"]).strip(), str(s.get("checked_at") or ""))
+    sources = tuple(Source(str(s["url"]).strip(), str(s.get("checked_at") or ""), _strs(s.get("items")))
                     for s in data.get("sources") or [] if isinstance(s, dict) and s.get("url"))
     status = str(data.get("status") or "draft").strip()
     if status not in STATUSES:
@@ -207,7 +209,8 @@ def record_to_dict(r: ProcedureRecord) -> dict[str, Any]:
         "steps": list(r.steps), "deadline": r.deadline, "fee": r.fee, "related": list(r.related),
         "intake": [{"key": k, "question": q} for k, q in r.intake],
         "faq": [{"q": q, "a": a} for q, a in r.faq],
-        "sources": [{"url": s.url, "checked_at": s.checked_at} for s in r.sources],
+        "sources": [{"url": s.url, "checked_at": s.checked_at, **({"items": list(s.items)} if s.items else {})}
+                    for s in r.sources],
         "tags": list(r.tags) or None,
         "status": r.status, "approved_by": r.approved_by, "approved_at": r.approved_at,
         "staff_note": r.staff_note, "content_hash": r.content_hash, "recheck_reason": r.recheck_reason,

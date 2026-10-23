@@ -1,25 +1,29 @@
 """手続きナレッジの下書きを作る（WP09 B-1）。
 
-    cd server && CUDA_VISIBLE_DEVICES= uv run python ../scripts/draft_procedures.py --site etajima [--only juminhyo ...]
+下書きの作り方は 2 通り。**使うのは 1（Claude Code が出典ページを読んで書く）**。
 
-``server/context/procedure_catalog.yaml`` の 50 件について、知識パック（クロール済み）から関連ページを探し、
-LLM（standalone では 7560 の Qwen3-8B）に A-1 の形式で下書きさせて ``$DATA/procedures/<site>/<id>.yaml`` に書く。
+1. ``--import-dir <dir>``: Claude Code が出典ページを読んで書いた下書き（``<dir>/<site>/<id>.yaml``）を照合して取り込む。
+   持ち物・流れ・期限・手数料はページに書いてある言葉で、書いてあることだけ。各項目に根拠の URL（``sources[].items``）。
+   照合（``check_value``）: 項目の語（漢字・カタカナの 2 字以上）が根拠のページに無い、数（単位つき）がページに無い、
+   数の前後 40 字に項目で数の近くに書いた語が無い（金額は手続きの when の語も要る。再交付の 800円 を更新の金額にしない）。
+   照合の問題は ``staff_note`` に書き、件数を出す（0 件になるまで直す）。材料の候補は ``--candidates`` で出す
+   （手続き名・別名・handles の語と課名でページ本文を照合して点数を付ける）
+2. ``--redraft``: 知識パックを検索して 7560 の Qwen3-8B に下書きさせる（WP09 の最初の版）。持ち物・流れを作るので使わない
+   （docs/WP09_result.md の 4 章）。T2 の大きいモデルで比べるときのために残す
 
-- 下書きは全部 ``status: draft``。1 件も自動で承認しない（承認は職員パネルで職員がする）
-- 根拠の無い項目は null／空。持ち物・流れ・期限・金額・想定問答の答えは、出典のページの本文と文字 2-gram で
-  照合し、重なりが足りないもの・本文に無い数や支払方法を含むものは外す（外したものは staff_note に書く）
-- 担当課は規則だけで決める（procedure_catalog.yaml の handles を facility の handles と突き合わせる。
-  複数ならこの建物の課を優先、それでも決まらなければ空欄にして staff_note に書く）。LLM には課を選ばせない
-- ``sources`` に使ったページの URL と確認日、``content_hash`` に出典のページの本文ハッシュ（再確認の検知用）
-- 既にあるファイルは書き換えない（承認済み・職員が直したものを守る）。--redraft で下書きだけ作り直す
-- procedure_seeds.yaml（WP04 の procedures.yaml から移した 3 件、承認済み）は無ければ書く
+    cd server && uv run python ../scripts/draft_procedures.py --site etajima --candidates /tmp/cand
+    cd server && uv run python ../scripts/draft_procedures.py --site etajima --site akiota --import-dir <dir>
 
-最後に要約表（手続き名・担当課・出典の有無・空欄の数）を Markdown で出す（--out）。
+どちらも下書きは全部 ``status: draft``。1 件も自動で承認しない（承認は職員パネルで職員がする）。既にある承認済み・要再確認の
+ファイルは書き換えない。procedure_seeds.yaml（WP04 の procedures.yaml から移した 3 件、承認済み）は無ければ書く（--redraft のとき）。
+担当課は規則だけで決める（procedure_catalog.yaml の handles・dept_names を facility と突き合わせる）。--import-dir では、
+課の名前が根拠のページにあればその課を書いてよい（``department`` の項目に URL を付ける）。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -165,6 +169,224 @@ def find_pages(kb: KnowledgeBase, entry: dict[str, Any], pages: dict[str, list[d
     # 郵送・オンラインの申し込みのページは後ろに（窓口の案内を下書きの材料の先頭にする）
     out.sort(key=lambda p: (not any(w in p["title"] for w in words), bool(REMOTE_TITLE_RE.search(p["title"]))))
     return out[:MAX_PAGES]
+
+
+NOISE_TITLE_RE = re.compile(r"当選|抽選|プレゼント|キャンペーン|開催します|イベント|入札|結果|議事録|会議録|募集します")
+
+
+def candidate_pages(entry: dict[str, Any], facility: Facility | None,
+                    pages: dict[str, list[dict[str, Any]]], limit: int = 6) -> list[dict[str, Any]]:
+    """手続き名・別名と課名でページ本文を照合して、材料の候補ページを選ぶ（Claude Code が下書きを書くとき用）。
+
+    点数: タイトルにある手続きの語・探す語 1 つにつき 6、タイトルに handles の語 3、本文の手続きの語の数（10 まで）、
+    本文に担当課の名前 2。
+    郵送・オンラインのページは -2、抽選・イベント・入札などの記事は -5。
+    """
+    words = topic_words(entry)
+    hints = [h for h in entry.get("handles") or [] if len(h) >= 2]
+    dept, _ = catalog_department(entry, facility)
+    out = []
+    for url, chunks in pages.items():
+        title = str(chunks[0]["title"])
+        body = "\n".join(str(c["text"]) for c in chunks)
+        terms = set(words) | {q for q in str(entry.get("query") or "").split() if len(q) >= 2}
+        score = 6 * sum(1 for w in terms if w in title) + 3 * any(h in title for h in hints)
+        score += min(sum(body.count(w) for w in words), 10) + (2 if dept and dept in body else 0)
+        score -= 2 * bool(REMOTE_TITLE_RE.search(title)) + 5 * bool(NOISE_TITLE_RE.search(title))
+        if score >= 5:
+            out.append({"url": url, "title": title, "score": score, "chars": len(body)})
+    return sorted(out, key=lambda x: -int(str(x["score"])))[:limit]
+
+
+def dump_candidates(site: str, out_dir: Path) -> Path:
+    """全手続きの候補ページの一覧（Markdown）と、上位 3 ページの本文（1 手続き 1 ファイル）を書く。"""
+    facility = load_facility(site, config.asr.site_context_dir)
+    pages, _ = pages_of_pack((config.data_dir / "kb" / site).resolve())
+    d = out_dir / site
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [f"#### {site}", "", "| id | 手続き名 | 候補ページ（点数） |", "|---|---|---|"]
+    for entry in load_catalog(site, facility):
+        cands = candidate_pages(entry, facility, pages)
+        lines.append(f"| {entry['id']} | {entry['name']} | "
+                     + "<br>".join(f"{c['title']}（{c['score']}）{c['url']}" for c in cands) + " |")
+        body = [f"# {entry['id']} {entry['name']}（課: {catalog_department(entry, facility)[0] or '未定'}）\n"]
+        for c in cands[:3]:
+            text = "\n".join(str(x["text"]) for x in pages[c["url"]])
+            body.append(f"\n## {c['title']}（{c['score']}）\n{c['url']}\n\n{text[:4000]}\n")
+        (d / f"{entry['id']}.md").write_text("".join(body), encoding="utf-8")
+    table = out_dir / f"candidates_{site}.md"
+    table.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return table
+
+
+# ---- Claude Code が出典ページを読んで書いた下書きの取り込み（--import） ----
+
+FIELDS = ("audience", "bring", "steps", "deadline", "fee", "faq", "department")
+NOUN_RE = re.compile(r"[一-龥ァ-ヶー々〆]{2,}")
+_SPACE_RE = re.compile(r"\s+")
+CONTEXT_CHARS = 40
+OWN_CHARS = 15
+
+
+def _norm(text: str) -> str:
+    """照合用: 空白を除き、全角数字を半角に、数の桁区切り（15,000）を詰める。"""
+    t = _SPACE_RE.sub("", text.translate(_ZEN)).replace("，", ",")
+    return re.sub(r"(?<=\d),(?=\d{3})", "", t)
+
+
+def field_values(rec: dict[str, Any], field: str) -> list[str]:
+    v = rec.get(field)
+    if v is None:
+        return []
+    if field == "bring":
+        return [str(b["item"] if isinstance(b, dict) else b) for b in v]
+    if field == "steps":
+        return [str(x) for x in v]
+    if field == "faq":
+        return [str(f["a"]) for f in v if isinstance(f, dict)]
+    return [str(v)] if str(v).strip() else []
+
+
+def _own_nouns(v: str, claim: str) -> list[str]:
+    """項目に書いた文で、数と同じ句（読点・句点の間）にある語。数の前後とも OWN_CHARS 字まで。"""
+    j = v.find(claim)
+    start = max(v.rfind("、", 0, j), v.rfind("。", 0, j), v.rfind(",", 0, j), j - OWN_CHARS - 1) + 1
+    ends = [k for k in (v.find("、", j + len(claim)), v.find("。", j + len(claim))) if k >= 0]
+    end = min([*ends, len(v), j + len(claim) + OWN_CHARS])
+    clause = v[start:j] + " " + v[j + len(claim):end]
+    clause = CLAIM_RE.sub(" ", clause)
+    return list(dict.fromkeys(NOUN_RE.findall(clause)))
+
+
+def _sentence_nouns(v: str, claim: str) -> list[str]:
+    j = v.find(claim)
+    start = v.rfind("。", 0, j) + 1
+    end = v.find("。", j)
+    return list(dict.fromkeys(NOUN_RE.findall(CLAIM_RE.sub(" ", v[start:end if end >= 0 else len(v)]))))
+
+
+def check_value(value: str, pages: list[str], context: list[str] | None = None,
+                when: list[str] | None = None) -> list[str]:
+    """1 項目の照合。語（漢字・カタカナの 2 字以上）がページに無い・数が文脈語の近くに無い、の一覧（空なら合格）。
+
+    context（期限・金額のとき）: ページの数（単位つき）の前後 CONTEXT_CHARS 字に、項目に書いた文で数のすぐ前後
+    （OWN_CHARS 字）にある語（「登録手数料」「再交付」）がすべてあること。項目に語が無ければ手続きの語（context）のどれか。手続きに when（「更新」など）があれば、その語のどれかも要る
+    （マイナンバーカードの更新の金額に、同じページの再交付の 800円 を入れないように）。
+    """
+    body = "".join(_norm(p) for p in pages)
+    nouns = list(dict.fromkeys(NOUN_RE.findall(_norm(value))))
+    problems = [f"語「{w}」がページに無い" for w in nouns if w not in body]
+    for c in dict.fromkeys(CLAIM_RE.findall(_norm(value))):
+        hits = [m.start() for m in re.finditer(re.escape(c), body)]
+        if not hits:
+            problems.append(f"数・語「{c}」がページに無い")
+            continue
+        if context is None:
+            continue
+        near = [body[max(0, i - CONTEXT_CHARS): i + len(c) + CONTEXT_CHARS] for i in hits]
+        own_nouns = _own_nouns(_norm(value), c)
+
+        sentence_nouns = _sentence_nouns(_norm(value), c)
+
+        def ok(win: str, own_nouns: list[str] = own_nouns, sentence_nouns: list[str] = sentence_nouns) -> bool:
+            # 数と同じ句に語があればそれがすべて、無ければ同じ文の語か手続きの語のどれか
+            own = (all(n in win for n in own_nouns) if own_nouns
+                   else any(w in win for w in [*sentence_nouns, *(context or [])]))
+            return own and (not when or any(w in win for w in when))
+        if not any(ok(w) for w in near):
+            need = "・".join(own_nouns or context) + (f"（と {'・'.join(when)} のどれか）" if when else "")
+            problems.append(f"「{c}」の前後 {CONTEXT_CHARS} 字に文脈語（{need}）が無い")
+    return problems
+
+
+def import_drafts(site: str, src_dir: Path, today: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """src_dir/<site>/<id>.yaml（Claude Code が書いた下書き）を照合して、データディレクトリに draft で書く。
+
+    返り値: (手続きごとの集計, 照合で見つかった問題)。問題のある手続きも書く（staff_note に問題を書く）。
+    """
+    facility = load_facility(site, config.asr.site_context_dir)
+    catalog = {e["id"]: e for e in load_catalog(site, facility)}
+    pages, hashes = pages_of_pack((config.data_dir / "kb" / site).resolve())
+    fetched = src_dir / site / "_pages"  # パックに無いページを直接取ったもの（<URL の sha1>.txt）
+    book = ProcedureBook(procedures_dir(config.data_dir, site, config.procedure.subdir))
+    names = {d.name for d in (facility.departments if facility else ())}
+    rows: list[dict[str, Any]] = []
+    problems: list[str] = []
+    for path in sorted((src_dir / site).glob("*.yaml")):
+        rec: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        entry = catalog.get(str(rec.get("id")))
+        if entry is None:
+            problems.append(f"{path.name}: 対象一覧に無い id")
+            continue
+        current = book.get(entry["id"])
+        if current is not None and current.status != "draft":
+            continue  # 承認済み・要再確認は触らない
+        def text_of(url: str) -> str:
+            if url in pages:
+                return "\n".join([str(pages[url][0]["title"]), *(str(c["text"]) for c in pages[url])])
+            f = fetched / (hashlib.sha1(url.encode()).hexdigest() + ".txt")
+            return f.read_text(encoding="utf-8") if f.is_file() else ""
+
+        srcs = [x for x in rec.get("sources") or [] if isinstance(x, dict) and x.get("url")]
+        issues: list[str] = []
+        for x in srcs:
+            if not text_of(str(x["url"])):
+                issues.append(f"出典のページを読めない: {x['url']}")
+        when = list(entry.get("when") or [])
+        context = topic_words(entry)
+        counts = {"sourced": 0, "null": 0}
+        for field in FIELDS:
+            values = field_values(rec, field)
+            if not values:
+                counts["null"] += 1
+                continue
+            counts["sourced"] += 1
+            cited = [str(x["url"]) for x in srcs if field in (x.get("items") or [])]
+            if not cited:
+                issues.append(f"{field}: 根拠の URL が無い")
+                continue
+            texts = [text_of(u) for u in cited]
+            if field == "department":
+                if values[0] not in names:
+                    issues.append(f"department: 拠点の課に無い「{values[0]}」")
+                elif not any(values[0] in t for t in texts):
+                    issues.append(f"department: 「{values[0]}」が出典のページに無い")
+                continue
+            for v in values:
+                # 期限・金額・問答の答えの数は文脈語まで照合する。手続きの when（「更新」など）は金額だけに求める
+                # （同じページの再交付の 800円 を更新の金額にしないため。期限は見出しの離れたページが多いので求めない）
+                money = field in ("deadline", "fee", "faq")
+                issues += [f"{field}「{v}」: {p}" for p in
+                           check_value(v, texts, context if money else None, when if field == "fee" else None)]
+        dept = rec.get("department") or catalog_department(entry, facility)[0] or ""
+        note = rec.get("staff_note")
+        if issues:
+            problems += [f"{site}/{entry['id']}: {i}" for i in issues]
+        data = {
+            "id": entry["id"], "name": entry["name"], "aliases": entry.get("aliases") or [],
+            "when": entry.get("when") or [], "tags": entry.get("tags") or [], "department": dept,
+            "audience": rec.get("audience") or "", "bring": rec.get("bring") or [], "steps": rec.get("steps") or [],
+            "deadline": rec.get("deadline"), "fee": rec.get("fee"), "related": rec.get("related") or [],
+            "intake": rec.get("intake") or [], "faq": rec.get("faq") or [],
+            "sources": [{"url": x["url"], "checked_at": today, "items": list(x.get("items") or [])} for x in srcs],
+            "status": "draft",
+            "staff_note": "\n".join(str(x) for x in (note, *(["照合で見つかった問題: " + "／".join(issues)] if issues else []))
+                                    if x) or None,
+            "content_hash": content_hash(hashes.get(str(x["url"]), "") for x in srcs) if srcs else None,
+        }
+        book.save(record_from_dict(data))
+        rows.append({"id": entry["id"], "name": entry["name"], "department": dept, "sources": len(srcs),
+                     "sourced": counts["sourced"], "null": counts["null"], "issues": len(issues)})
+    return rows, problems
+
+
+def import_table(site: str, rows: list[dict[str, Any]]) -> str:
+    out = [f"#### {site}", "", "| id | 手続き名 | 担当課 | 出典ページ | 出典ありの項目 | null の項目 | 照合の問題 |",
+           "|---|---|---|---|---|---|---|"]
+    out += [f"| {r['id']} | {r['name']} | {r['department'] or '（未定）'} | {r['sources']} | {r['sourced']} | "
+            f"{r['null']} | {r['issues']} |" for r in rows]
+    out.append(f"\n項目は {'・'.join(FIELDS)} の {len(FIELDS)} つ。{len(rows)} 件。")
+    return "\n".join(out)
 
 
 def parse_json(raw: str) -> dict[str, Any] | None:
@@ -384,8 +606,31 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None, help="要約表を書き出す Markdown")
     ap.add_argument("--report-json", type=Path, default=None, help="点検の記録（外した項目など）を JSON で")
     ap.add_argument("--lint", action="store_true", help="LLM を使わず、既にある下書きを点検し直すだけ")
+    ap.add_argument("--import-dir", type=Path, default=None,
+                    help="Claude Code が出典ページを読んで書いた下書き（<dir>/<site>/<id>.yaml）を照合して取り込む（8B は使わない）")
+    ap.add_argument("--candidates", type=Path, default=None, help="材料の候補ページの一覧と本文を書き出す先")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if args.candidates:
+        for site in args.site or [config.site]:
+            print(dump_candidates(site, args.candidates))
+        return
+    if args.import_dir:
+        today = datetime.now(JST).date().isoformat()
+        all_problems: list[str] = []
+        tables = []
+        for site in args.site or [config.site]:
+            rows, problems = import_drafts(site, args.import_dir, today)
+            tables.append(import_table(site, rows))
+            all_problems += problems
+        text = "\n\n".join(tables)
+        print(text)
+        print(f"\n照合で見つかった問題: {len(all_problems)} 件")
+        for p in all_problems:
+            print("  " + p)
+        if args.out:
+            args.out.write_text(text + "\n", encoding="utf-8")
+        sys.exit(1 if all_problems else 0)
     if args.lint:
         today = datetime.now(JST).date().isoformat()
         for site in args.site or [config.site]:

@@ -349,6 +349,22 @@ class Conversation:
             self._session.language = language
         self._session.turns += 1
         after_action, self._after_action = self._after_action, False
+        fixed = self.dialogue.safety_reply(text)
+        # 不満・代わりの申請・市長に会わせての定型は、ご意見として伝える提案を付けるので、ふつうの流れ（dialogue.respond）で言う
+        if fixed is not None and self.dialogue.last_safety in ("complaint", "cannot_apply", "cannot_meet") \
+                and self._pending is None:
+            fixed = None
+        if fixed is not None and (self._pending is None or self.dialogue.last_safety in ("crisis", "lost_child")):
+            # 深刻な打ち明け・迷子は、提案の返事待ち・紹介状の聞き取りの途中でも最優先で定型に切り替える
+            if self._pending is not None:
+                logger.info("返事待ち・聞き取りの途中ですが、安全装置の定型に切り替えます")
+                self._outcome("declined")
+                self._pending = None
+            self.dialogue.add_turn(text, "".join(fixed))
+            for line in fixed:
+                yield line
+            return
+        self.dialogue.last_safety = None
         if (after_action and self._pending is None and classify_reply(text, self._words) != "unclear"
                 and len(re.sub(r"[\s、。！？!?]", "", text)) <= self._cfg.reply_max_chars):
             # 行為が終わった直後の「うん」「ありがとう」は決まった文で受ける
@@ -396,7 +412,9 @@ class Conversation:
         if offered and self._session and self._tidbit_used(offered["text"], "".join(reply)):
             self._session.tidbit_used = True
             logger.info("さっきの方の小ネタを紹介しました")
-        kind = self._adjust_proposal(self.dialogue.last_proposal, text, "".join(reply))
+        kind = (self.dialogue.last_proposal
+                if self.dialogue.last_safety in ("complaint", "cannot_apply", "cannot_meet")  # 定型が付けた「伝えましょうか」
+                else self._adjust_proposal(self.dialogue.last_proposal, text, "".join(reply)))
         proposing = kind is not None and self._available(kind)
         spoken = reply[: len(reply) - len(held)]  # 預からずに読み上げた文（応答の頭）
         for s in held:
