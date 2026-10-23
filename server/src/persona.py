@@ -18,6 +18,7 @@ import yaml
 
 from .config import DialogueConfig, PersonaConfig
 from .knowledge import Reference
+from .procedure_kb import PROCEDURE_TRUST
 from .site_context import Department, Facility
 
 _WEEKDAYS = "月火水木金土日"
@@ -98,19 +99,24 @@ def format_facts(facility: Facility | None) -> str:
     return "\n".join(lines)
 
 
-def format_references(refs: list[Reference], none_text: str) -> str:
+def format_references(refs: list[Reference], none_text: str, start: int = 1) -> str:
     if not refs:
         return none_text
     return "\n".join(
         f"[{i}] (出典: {r.title}" + (f"／{r.label}" if r.label else "") + f")\n{r.text}"
-        for i, r in enumerate(refs, 1)
+        for i, r in enumerate(refs, start)
     )
+
+
+def format_procedures(refs: list[Reference], start: int = 1) -> str:
+    """【市の案内（承認済み）】の中身（番号は参考資料と通し）。"""
+    return "\n".join(f"[{i}] {r.text}" for i, r in enumerate(refs, start))
 
 
 def source_labels(cfg: DialogueConfig, facility: Facility | None, refs: list[Reference]) -> str:
     """出典の一言の「〇〇」。使った資料の出どころを重ねずに「や」でつなぐ。"""
     default = cfg.default_source_label.format(org=organization_word(facility))
-    labels = list(dict.fromkeys(r.label or default for r in refs))
+    labels = list(dict.fromkeys(r.label or default for r in refs if r.trust != PROCEDURE_TRUST))
     return "や".join(labels)
 
 
@@ -178,11 +184,19 @@ def build_system_prompt(
 
 
 def build_turn_message(
-    cfg: DialogueConfig, facility: Facility | None, refs: list[Reference], text: str
+    cfg: DialogueConfig, facility: Facility | None, refs: list[Reference], text: str,
+    procedure_head: str = "",
 ) -> str:
-    """最新の来訪者メッセージ（参考資料 + 発話）。出典の付け方は参考資料があるときだけ書く。"""
-    return cfg.turn_template.format(
-        references=format_references(refs, cfg.no_references_text),
+    """最新の来訪者メッセージ（参考資料 + 発話）。出典の付け方は参考資料があるときだけ書く。
+
+    手続きナレッジ（承認済み、trust が procedure）の資料は、参考資料より前に procedure_head の見出しで置く（WP09）。
+    番号は通し（[出典:1] の印はどちらにも使える）。
+    """
+    procs = [r for r in refs if r.trust == PROCEDURE_TRUST]
+    rest = [r for r in refs if r.trust != PROCEDURE_TRUST]
+    head = (procedure_head + format_procedures(procs) + "\n") if procs else ""
+    return head + cfg.turn_template.format(
+        references=format_references(rest, cfg.no_references_text, start=len(procs) + 1),
         source_rule=cfg.source_rule.format(marker_example=cfg.source_marker_example) if refs else "",
         text=text,
     )

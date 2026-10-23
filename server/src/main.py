@@ -44,9 +44,11 @@ from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
 from .openers import all_lines, load_openers, opener_lines
 from .persona import load_persona
+from .procedure_kb import PROCEDURE_TRUST, ProcedureRecord, procedures_dir
+from .procedure_panel import ProcedurePanel, approved_view
 from .procedures import AsrFixes, load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
-from .site_context import load_facility, load_site_words, referral_csv_enabled
+from .site_context import Facility, load_facility, load_site_words, referral_csv_enabled
 from .speaker import SpeakerClusters, SpeakerEmbedder
 from .speech_gate import SpeechGate
 from .speech_output import (
@@ -143,6 +145,10 @@ class VoiceLoop:
         llm = LLMClient()
         self._weather = Weather.for_site(config.data_dir, config.site)
         facility = load_facility(config.site, config.asr.site_context_dir)
+        # 手続きの別名表と手続きナレッジ（WP09。職員パネルで承認・編集されると読み直す）
+        self._procedures = load_procedures(
+            config.asr.site_context_dir, procedures_dir(config.data_dir, config.site, config.procedure.subdir),
+            config.procedure.recheck_keep_using)
         self._dialogue = Dialogue(
             llm,
             facility=facility,
@@ -150,7 +156,7 @@ class VoiceLoop:
             avatar_name=config.actions.avatar_name,
             enabled_actions=config.actions.enabled,
             persona=load_persona(config.persona),
-            procedures=load_procedures(config.asr.site_context_dir),
+            procedures=self._procedures,
         )
         # 同意付きの行為（調べる・つなぐ）と来訪記録（WP04）
         self._referrals = ReferralStore(config.data_dir, config.site, config.referral.retention_days,
@@ -172,7 +178,7 @@ class VoiceLoop:
             referrals=self._referrals, visits=self._visits,
             on_state=self._send_state, edge_id=self._edge_id,
             tidbits=self._tidbits, tidbit_cfg=config.tidbit,
-            procedures=load_procedures(config.asr.site_context_dir),
+            procedures=self._procedures,
             asr_fixes=self._asr_fixes,
             speaker_count=lambda: self._speakers.accepted_count,
         )
@@ -220,7 +226,7 @@ class VoiceLoop:
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir,
                 staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits,
                                  tuple(d.name for d in (facility.departments if facility else ())),
-                                 self._asr_fixes, self._themes),
+                                 self._asr_fixes, self._themes, self._procedure_panel(llm, facility)),
                 admin=AdminPanel(self._transcripts, config.admin),
                 debug_frame=(lambda: self._camera.debug_jpeg if self._camera else None) if camera_debug else None,
                 debug_state=self._camera_state,
@@ -237,6 +243,26 @@ class VoiceLoop:
         self._phone_timer: asyncio.Task[None] | None = None
         # 来訪者の発話区間の途中か、区間を聞き取っている途中か（聞き直しを相手の発話に重ねない）
         self._hearing = False
+
+    def _procedure_panel(self, llm: LLMClient, facility: Facility | None) -> ProcedurePanel | None:
+        """職員パネルの「手続き」タブ（WP09）。想定問答は、その手続きだけを承認済みにした対話に通す。"""
+        book = self._procedures.book
+        if book is None:
+            return None
+
+        async def run_faq(record: ProcedureRecord, question: str) -> str:
+            view, tmp = approved_view(record, book)
+            try:
+                d = Dialogue(llm, facility=facility, knowledge=self._knowledge, weather=self._weather,
+                             avatar_name=config.actions.avatar_name, persona=load_persona(config.persona),
+                             procedures=replace(self._procedures, book=view))
+                return "".join([s async for s in d.respond(question)])
+            finally:
+                tmp.cleanup()
+
+        return ProcedurePanel(book, config.data_dir,
+                              tuple(d.name for d in (facility.departments if facility else ())),
+                              run_faq, config.procedure.try_timeout_sec)
 
     # ------------------------------------------------------------------
     # 起動
@@ -802,6 +828,7 @@ class VoiceLoop:
                 print(f"[検索] {self._dialogue.last_search_ms:.0f}ms、"
                       f"参考資料 {len(self._dialogue.last_references)} 件")
             self._record_assistant(spoken_lines, timing, trigger)
+            self._call_staff_if_needed()
             self._last_activity = time.monotonic()  # 沈黙は、案内役が言い終えてから数える
         self._arm_phone_timer()
 
@@ -858,9 +885,12 @@ class VoiceLoop:
         ))
         if not titles:
             return
+        # 手続きナレッジ（市の案内）は出典の URL も薄く出す（WP09）
+        urls = list(dict.fromkeys(r.source_url for r in self._dialogue.last_cited
+                                  if r.trust == PROCEDURE_TRUST and r.source_url))
         print(f"[出典] {' / '.join(titles)}")
         if self._edge is not None:
-            await self._edge.send_json({"type": "sources", "titles": titles})
+            await self._edge.send_json({"type": "sources", "titles": titles, "urls": urls})
 
     async def _pick_backchannel(self, text: str) -> BackchannelClip | None:
         assert self._backchannels is not None
@@ -926,8 +956,21 @@ class VoiceLoop:
             search_query=d.last_search_query, lookup_query=self._last_lookup_query,
             references=[{"id": r.chunk_id, "title": r.title, "url": r.source_url} for r in d.last_references],
             cited=[r.chunk_id or r.source_url for r in d.last_cited], dropped=dropped,
+            procedures=[{"id": r.id, "status": r.status} for r in d.last_procedures] or None,
             timing=timing.as_record() if timing is not None else None, trigger=trigger,
         )
+
+    def _call_staff_if_needed(self) -> None:
+        """深刻な打ち明け・迷子の定型に切り替えたら、職員パネルに呼び出しを出す（本文は送らない。WP09 C）。"""
+        kind = self._dialogue.last_safety
+        if kind not in ("crisis", "lost_child"):
+            return
+        self._dialogue.last_safety = None
+        staff = self._edge_server.staff if self._edge_server is not None else None
+        if staff is None or not staff.cfg.password:
+            logger.warning("職員パネルが無いので、呼び出しを職員パネルに出せません（IDOBATA_STAFF_PASSWORD）")
+            return
+        staff.call_staff(kind, self._edge_id())
 
     def _edge_id(self) -> str:
         return self._edge.edge_id if self._edge is not None else ""

@@ -1,0 +1,41 @@
+# 手続きナレッジの初期値（WP09 A）。WP04 の procedures.yaml にあった聞き取り（intake）と持ち物（bring）を
+# 新形式に移したもの。データディレクトリ（~/idobata-data/procedures/<site>/）に同じ id が無いときだけ書く
+# （scripts/draft_procedures.py）。ここから先の正は、データディレクトリのファイル（職員パネルで編集する）。
+#
+# department は拠点ごと（department_by_site）。拠点 YAML の facility.departments の name と同じ表記。
+# WP04 で使ってきた内容そのもの（新しい事実は足していない）なので、移行の時点で承認済みにする。
+approved_by: WP04 の procedures.yaml から移行
+seeds:
+  - id: kokuho_switch
+    name: 国民健康保険の加入（退職・転入など）
+    aliases: [国民健康保険, 国保]
+    tags: [保険・年金]
+    department_by_site: {etajima: 保健医療課, akiota: 税務住民課}
+    bring:
+      - {item: 前の健康保険の資格喪失証明書, when: [退職, 辞め, 扶養, 会社]}
+      - {item: 前の市町村の転出証明書, when: [転入, 引っ越]}
+    intake:
+      - {key: reason, question: 切り替えのきっかけ（退職・転入・扶養の変更など）}
+      - {key: since, question: いつから切り替えるか}
+      - {key: who, question: 手続きするのはご本人かご家族か}
+  - id: mynumber_lost
+    name: マイナンバーカードの紛失
+    aliases: [マイナンバーカード, マイナンバー]
+    when: [紛失, なくし, 無くし, 失くし, 落とし, 盗]
+    tags: [マイナンバー]
+    department_by_site: {etajima: 市民課, akiota: 税務住民課}
+    bring:
+      - 本人確認の書類（運転免許証など）
+    intake:
+      - {key: suspended, question: マイナンバー総合フリーダイヤルへの一時停止の連絡は済んだか}
+      - {key: reissue, question: 再交付を希望するか}
+  - id: kaigo_nintei
+    name: 介護保険の申請（要介護認定）
+    aliases: [介護保険, 要介護認定, 介護認定, 介護]
+    tags: [介護]
+    department_by_site: {etajima: 高齢介護課, akiota: 健康福祉課}
+    bring:
+      - {item: 介護保険の被保険者証, when: [更新]}
+    intake:
+      - {key: who, question: 介護が要るのはご本人かご家族か}
+      - {key: kind, question: 初めての申請か更新か}

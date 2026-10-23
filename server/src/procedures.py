@@ -1,13 +1,15 @@
-"""手続きの常用語（``server/context/procedures.yaml``）と、担当課を規則で決めること（WP04）。
+"""手続きの別名表（``server/context/procedures.yaml``）と手続きナレッジから、担当課を規則で決めること（WP04・WP09）。
 
-来訪者の発話から手続きの語（正式名・略称）を拾い、拠点 YAML の ``facility.departments[].handles``
-と突き合わせる。推測では課を確定しない（一意に決まらなければ来訪者に聞く・確かめる）。
+担当課の決定（来訪者に課を聞き返さない・LLM に課を推測させない）:
+- 対話で使える（承認済みの）手続きナレッジの name・aliases が発話にあれば、その department（WP09）
+- 残りは procedures.yaml の別名表の語（term・aliases）と拠点 YAML の ``facility.departments[].handles`` を突き合わせる
+  - 発話に term か alias があれば、その term を言ったものとする（「国保」→ 国民健康保険）
+  - handles の語（「・」で分けた各語も）が発話にそのまま出ていれば、それも言ったものとする
+  - 言った語のうち、ほかの言った語に含まれるものは捨てる（「国保税」は国民健康保険税で、国民健康保険ではない）
+  - 残った語を handles に持つ課が候補
+- 候補が一意でなければ「未特定」（職員が職員パネルで付ける）
 
-突き合わせ:
-- 発話に term か alias があれば、その term を言ったものとする（「国保」→ 国民健康保険）
-- handles の語（「・」で分けた各語も）が発話にそのまま出ていれば、それも言ったものとする
-- 言った語のうち、ほかの言った語に含まれるものは捨てる（「国保税」は国民健康保険税で、国民健康保険ではない）
-- 残った語を handles に持つ課が候補
+紹介状の聞き取り（intake）と持ち物（bring）は、承認済みの手続きナレッジから引く（procedures.yaml からは移した）。
 """
 
 from __future__ import annotations
@@ -23,9 +25,13 @@ from typing import Any
 import yaml
 
 from .knowledge import JST
+from .procedure_kb import IntakeSet, ProcedureBook, ProcedureRecord
 from .site_context import Facility, SiteWord
 
 logger = logging.getLogger(__name__)
+
+# actions.py などは IntakeSet をここから使う
+__all__ = ["AsrFixes", "IntakeSet", "Procedure", "Procedures", "load_procedures"]
 
 PROCEDURES_FILE = "procedures.yaml"
 # 職員パネルから足した聞き取り間違いの対応表（データディレクトリ。procedures.yaml の asr_fixes に足す）
@@ -37,36 +43,13 @@ _PAREN_RE = re.compile(r"[（(].*?[）)]")
 
 
 @dataclass(frozen=True)
-class BringItem:
-    """持ち物の案内 1 つ。when の語が聞き取りの答えか発話にあれば言う（空なら常に）。"""
-
-    item: str
-    when: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class IntakeSet:
-    """紹介状の同意の後に伺う項目の組。when の語が発話にあれば使う（空なら常に）。"""
-
-    questions: tuple[str, ...]
-    when: tuple[str, ...] = ()
-    bring: tuple[BringItem, ...] = ()
-
-    def bring_for(self, text: str) -> str | None:
-        """聞き取りの答えと発話から分かる持ち物（最初に合った 1 つ）。"""
-        for b in self.bring:
-            if not b.when or any(w in text for w in b.when):
-                return b.item
-        return None
-
-
-@dataclass(frozen=True)
 class Procedure:
     term: str
     aliases: tuple[str, ...] = ()
-    intake: tuple[IntakeSet, ...] = ()
     # 紹介状に付けるタグ（tags.yaml の統制語彙。手続きが分かったときは LLM の選んだタグより先に使う）
     tags: tuple[str, ...] = ()
+    # handles を持たない課で、名前で担当が分かるもの（WP09）
+    departments: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,49 +57,83 @@ class Procedures:
     items: tuple[Procedure, ...] = ()
     readings: tuple[SiteWord, ...] = ()
     asr_exclude: frozenset[str] = frozenset()
+    # 手続きナレッジ（WP09。~/idobata-data/procedures/<site>/。無ければ別名表だけで動く）
+    book: ProcedureBook | None = None
 
     def words(self) -> list[SiteWord]:
         """ASR の語彙と VOICEVOX の辞書に渡す語（読みのあるものだけ辞書に入る）。"""
         reading = {w.surface: w for w in self.readings}
         out: list[SiteWord] = []
+        seen: set[str] = set()
         for p in self.items:
             for s in (p.term, *p.aliases):
-                if s in self.asr_exclude:
+                if s in self.asr_exclude or s in seen:
                     continue
+                seen.add(s)
                 out.append(reading.pop(s, SiteWord(s)))
         # 読みだけ持ち、ASR からは外した語も辞書には入れる
         out += [SiteWord(w.surface, w.reading, w.accent, asr=False) for w in reading.values()]
         return out
 
+    def surfaces(self) -> tuple[str, ...]:
+        """別名表の語（手続きナレッジの突き合わせで、長い語に含まれる当たりを捨てるのに使う）。"""
+        return tuple(s for p in self.items for s in (p.term, *p.aliases))
+
+    def matched(self, text: str) -> list[ProcedureRecord]:
+        """発話で言った手続きナレッジ（全状態。出てきた順）。"""
+        return self.book.match(text) if self.book is not None else []
+
+    def usable_matched(self, text: str) -> list[ProcedureRecord]:
+        """発話で言った、対話で使える（承認済みの）手続きナレッジ。"""
+        book = self.book
+        return [r for r in self.matched(text) if book is not None and book.usable(r)]
+
+    def _rest_text(self, text: str, used: list[ProcedureRecord]) -> str:
+        """手続きナレッジで当たった語を伏せた発話（残りを別名表で見る）。"""
+        for r in used:
+            for s in sorted(r.surfaces, key=len, reverse=True):
+                text = text.replace(s, "＿")
+        return text
+
     def mentioned(self, text: str, facility: Facility | None) -> set[str]:
-        """発話で言った手続きの語（term と handles の語）。ほかの語に含まれるものは除く。"""
+        """発話で言った手続きの語（別名表の term と handles の語）。ほかの語に含まれるものは除く。"""
         found = {p.term for p in self.items if any(s in text for s in (p.term, *p.aliases))}
         found |= {k for k in _handle_keywords(facility) if k in text}
         return {k for k in found if not any(k != o and k in o for o in found)}
 
     def intake_for(self, text: str, facility: Facility | None) -> IntakeSet | None:
-        """発話の手続きに合う聞き取りの組（表の順で最初のもの）。"""
-        said = self.mentioned(text, facility)
-        for p in self.items:
-            if p.term not in said:
-                continue
-            for s in p.intake:
-                if not s.when or any(w in text for w in s.when):
-                    return s
+        """発話の手続きに合う聞き取りの組（承認済みの手続きナレッジのうち、発話で先に出たもの）。"""
+        del facility
+        for r in self.usable_matched(text):
+            if r.intake or r.bring:
+                return r.intake_set()
         return None
 
     def tags_for(self, text: str, facility: Facility | None) -> list[str]:
-        """発話で言った手続きのタグ（表の順、重複なし）。"""
-        said = self.mentioned(text, facility)
-        return list(dict.fromkeys(t for p in self.items if p.term in said for t in p.tags))
+        """発話で言った手続きのタグ（手続きナレッジ → 別名表の順、重複なし）。"""
+        used = self.usable_matched(text)
+        said = self.mentioned(self._rest_text(text, used), facility)
+        tags = [t for r in used for t in r.tags]
+        tags += [t for p in self.items if p.term in said for t in p.tags]
+        return list(dict.fromkeys(tags))
 
     def departments_for(self, text: str, facility: Facility | None) -> list[str]:
         """発話から決まる担当課の候補（facility の並び順）。"""
         if facility is None:
             return []
-        said = self.mentioned(text, facility)
-        return [d.name for d in facility.departments
-                if any(k in said for k in _department_keywords(d.handles))]
+        names = [d.name for d in facility.departments]
+        used = self.usable_matched(text)
+        found = {r.department for r in used if r.department in names}
+        said = self.mentioned(self._rest_text(text, used), facility)
+        found |= {d.name for d in facility.departments if any(k in said for k in _department_keywords(d.handles))}
+        found |= {n for p in self.items if p.term in said for n in p.departments if n in names}
+        out = [n for n in names if n in found]
+        if len(out) > 1:
+            # 候補にこの建物の課が 1 つだけなら、その課（安芸太田の戸籍: 税務住民課・加計支所・筒賀支所 → 税務住民課）
+            here = [d.name for d in facility.departments if d.name in out and not d.place]
+            if len(here) == 1:
+                return here
+        return out
 
 
 def _department_keywords(handles: tuple[str, ...]) -> set[str]:
@@ -136,35 +153,38 @@ def _handle_keywords(facility: Facility | None) -> set[str]:
     return out
 
 
-def load_procedures(context_dir: Path) -> Procedures:
-    """procedures.yaml を読む。無い・壊れているときは空（規則では課が決まらず、確かめる流れになる）。"""
+def load_procedures(context_dir: Path, knowledge_dir: Path | None = None, keep_recheck: bool = True) -> Procedures:
+    """procedures.yaml（別名表）と手続きナレッジ（knowledge_dir）を読む。
+
+    procedures.yaml が無い・壊れているときは別名表が空（規則では課が決まらず、未特定になる）。
+    knowledge_dir が None なら手続きナレッジなし（ASR の語彙を作るときなど）。
+    """
     path = context_dir / PROCEDURES_FILE
     try:
         data: Any = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
         logger.warning("手続きの語の表を読めません: %s", path, exc_info=True)
-        return Procedures()
+        data = {}
     items = tuple(
-        Procedure(str(p["term"]), _strs(p.get("aliases")),
-                  tuple(_intake(x) for x in p.get("intake") or [] if isinstance(x, dict) and x.get("questions")),
-                  _strs(p.get("tags")))
+        Procedure(str(p["term"]), _strs(p.get("aliases")), _strs(p.get("tags")), _strs(p.get("departments")))
         for p in data.get("procedures") or [] if isinstance(p, dict) and p.get("term")
     )
     readings = tuple(
         SiteWord(str(r["surface"]), str(r["reading"]), r.get("accent") if isinstance(r.get("accent"), int) else None)
         for r in data.get("readings") or [] if isinstance(r, dict) and r.get("surface") and r.get("reading")
     )
-    return Procedures(items, readings, frozenset(str(x) for x in data.get("asr_exclude") or []))
+    book = None
+    if knowledge_dir is not None:
+        book = ProcedureBook(knowledge_dir, keep_recheck,
+                             tuple(s for p in items for s in (p.term, *p.aliases)))
+        n = len(book.records())
+        logger.info("手続きナレッジ: %s（%d 件、うち対話で使えるもの %d 件）", knowledge_dir, n,
+                    sum(1 for r in book.records() if book.usable(r)))
+    return Procedures(items, readings, frozenset(str(x) for x in data.get("asr_exclude") or []), book)
 
 
 def _strs(value: Any) -> tuple[str, ...]:
     return tuple(str(x) for x in value or [])
-
-
-def _intake(data: dict[str, Any]) -> IntakeSet:
-    bring = tuple(BringItem(str(b["item"]), _strs(b.get("when")))
-                  for b in data.get("bring") or [] if isinstance(b, dict) and b.get("item"))
-    return IntakeSet(_strs(data.get("questions")), _strs(data.get("when")), bring)
 
 
 class AsrFixes:

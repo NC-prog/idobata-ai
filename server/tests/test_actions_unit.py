@@ -18,7 +18,6 @@ from src.config import SERVER_ROOT, ActionsConfig, DialogueConfig, ReferralConfi
 from src.dialogue import Dialogue
 from src.knowledge import JST, Reference
 from src.lookup import LookupResult, candidate_links, chunk_plain, score_label
-from src.procedures import load_procedures
 from src.referrals import (
     ReferralStore,
     TidbitStore,
@@ -29,6 +28,7 @@ from src.referrals import (
     today_stats,
 )
 from src.site_context import Department, Facility
+from tests.procedure_helpers import seeded_procedures
 
 TAGS = ["子育て", "介護", "保険・年金", "観光", "行事", "雑談"]
 FAC = Facility(name="江田島市役所", location_phrase="1階ロビー",
@@ -36,7 +36,7 @@ FAC = Facility(name="江田島市役所", location_phrase="1階ロビー",
                             Department("税務課", "1階", handles=("国民健康保険税", "税証明書")),
                             Department("保健医療課", "2階", handles=("国民健康保険（資格・給付）", "後期高齢者医療")),
                             Department("高齢介護課", "2階", handles=("介護保険",))))
-PROCS = load_procedures(SERVER_ROOT / "context")
+PROCS = seeded_procedures()
 
 
 def _noon() -> datetime:

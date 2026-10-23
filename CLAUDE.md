@@ -23,6 +23,8 @@
 - WP08（現在）: 本番アバター（`~/idobata-data/avatars/` の idochan_office / idochan_festival。作者 Fuji Engineering LLC / 富士製作所合同会社、改変可・再配布可・クレジット不要。**サイズの都合で git に入れない**。
   フロントが `/edge/avatars/` で配信）とテーマ（`server/context/themes.yaml`。拠点×季節のアバター・背景・季節の一言、暦で自動、
   職員パネルから手動。**会話中は切り替えない**）。背景は `~/idobata-data/backgrounds/`（実写）が優先、無ければ仮置き。結果は `docs/WP08_result.md`
+- WP09（現在）: 手続きナレッジ（職員が承認する正解表。`~/idobata-data/procedures/<site>/<id>.yaml`）と職員パネルの「手続き」タブ、
+  網羅 100 問・意地悪 30 問、深刻な打ち明け・迷子などの定型への切り替えと職員の呼び出し。結果は `docs/WP09_result.md`
 - 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
 
 ## 実行環境（重要）
@@ -61,12 +63,29 @@
   資料にそのまま有る**ときだけ読み上げる。無ければ捨てて「詳しい期限や金額は担当の課でご確認ください」を 1 回
 - 同意付きの行為（WP04）: LLM が応答の末尾に `<propose:lookup|refer|share>` を付け、決まった文で提案し、
   返事は規則で判定する（`server/context/actions.yaml`）。相槌は `server/context/backchannel.yaml`、
-  紹介状のタグは統制語彙 `server/context/tags.yaml`。紹介状の担当課は規則だけで決める（`server/context/procedures.yaml` の
-  別名表で発話と `facility.departments[].handles` を突き合わせ、一意でなければ「未特定」で保存して職員が職員パネルで付ける。
-  来訪者に課を聞き返さない・LLM に課を推測させない）。procedures.yaml は ASR の語彙（先頭に置く）・VOICEVOX 辞書・
-  聞き取り間違いの対応表（asr_fixes。職員パネルから足した行は `~/idobata-data/asr_fixes.jsonl`）にも使う。
-  紹介状の同意の後は、手続きごとの聞き取り（procedures.yaml の intake、最大 3 問）→ お名前・地区・連絡方法を伺う。
+  紹介状のタグは統制語彙 `server/context/tags.yaml`。紹介状の担当課は規則だけで決める（承認済みの手続きナレッジの name・aliases →
+  `server/context/procedures.yaml` の**別名表**（term・aliases・名前で分かる課 departments）と `facility.departments[].handles` の突き合わせ。
+  候補が複数でこの建物の課（place の無い課）が 1 つならその課、それでも一意でなければ「未特定」で保存して職員が職員パネルで付ける。
+  来訪者に課を聞き返さない・LLM に課を推測させない・**下書きの手続きナレッジの課は使わない**）。procedures.yaml は別名表だけで、
+  ASR の語彙（先頭に置く）・VOICEVOX 辞書・聞き取り間違いの対応表（asr_fixes。職員パネルから足した行は `~/idobata-data/asr_fixes.jsonl`）にも使う。
+  紹介状の同意の後は、承認済みの手続きナレッジの intake（最大 3 問）→ お名前・地区・連絡方法を伺い、保存の後に bring を 1 つ案内する。
   **氏名・地区・電話番号は字幕・エッジ画面・コンソール・ログに出さない**（「お名前：伺いました」と伏せる。保存は紹介状 JSON だけ）
+- 手続きナレッジ（WP09）: `~/idobata-data/procedures/<site>/<id>.yaml`（1 手続き 1 ファイル、git 管理外、市が育てる成果物）。
+  状態は draft（下書き）/ approved（承認済み）/ recheck（要再確認）。**対話で使うのは承認済みだけ**（優先順位: 固定事実 ＞ 承認済みの
+  手続きナレッジ【市の案内（承認済み）】＞ パック ＞ LLM の一般知識）。下書きだけに当たった問いは資料に入れず「手続きの詳しいことは〇〇課で
+  ご案内します」。答えた文には「市の案内では、」を 1 回。承認済みの deadline / fee は期限・金額の安全装置の「資料にある」に入る。
+  承認・編集・差し戻しは職員パネルの「手続き」タブ（`/staff/procedures/`。承認者はログイン名）で、ファイルを直接書き換え、次のターンから効く。
+  **下書きを自動で承認しない**。下書きは Claude Code が出典ページを読んで書き（`scripts/draft_procedures.py --import-dir`。持ち物・流れ・期限・
+  手数料はページの言葉で、書いてあることだけ。各項目に根拠の URL。取り込み時に「語がページに無い」「数の前後に文脈語が無い」を照合して 0 件にする）、
+  8B に書かせる経路（`--redraft`）は持ち物・流れを作るので使わない。対象 50 件は `server/context/procedure_catalog.yaml`、WP04 から移した承認済み 3 件は
+  `procedure_seeds.yaml`。パックの更新の後に `scripts/check_procedures.py` が出典の変化を見て承認済みを recheck にする
+  （`IDOBATA_PROCEDURE_RECHECK_USE`、既定 1 = 使い続けて印だけ）
+- 定型への切り替え（WP09、LLM を通さない。`DialogueConfig` の `*_pattern` と `*_lines`）: 深刻な打ち明け（自死・暴力・虐待）が最優先で、
+  紹介状の聞き取りの途中でも切り替え、110 と facility の相談先（handles に地域包括支援センター・生活困窮など）を言い、職員パネルに呼び出し
+  （時刻と種類だけ。本文は出さない・メモリのみ）。迷子も呼び出し。ほかの来訪者・個人のこと／政治・宗教・市長の評価／お金を貸す・代わりに申請・
+  市長に会わせる／職員への不満（ご意見として伝える提案）／AI か（正直に AI と答える）／録音してるか（掲示文言どおり）。
+  WP09 C の評価で足した安全装置: 規則で課が決まらない下書きの手続きで LLM が言う課を捨てる、拠点に無い課の名前、課の階・場所の作り話、
+  資料に無い書類（持ち物）・日付、過ぎた日付をこれからと言う、ト書きの漏れ
 - 案内役の人物像は `server/context/persona.yaml`（WP05。肩書 `role_title` は `IDOBATA_ROLE_TITLE` で差し替え可）。
   人物像は【話し方の決まり】の後ろに置き、事実・出典・設備と課の安全装置・日本語のみの規則が優先。
   人物像と食い違う言い方（contradictions）は読み上げない。資料の無い地区の様子は作らず教えてもらう
@@ -104,6 +123,11 @@ CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajim
 bash ../deploy/standalone/install-kb-timers.sh   # 自動更新（毎朝 6:00 差分・毎週日曜 3:00 全体・毎時 05 分天気。有効化済み）
 uv run python -m tests.eval.run --site etajima   # 評価セット 30 問（WP03 の 20 問＋人物像 10 問。LLM と知識パックを使う）
 uv run python -m tests.eval.run --site etajima --set smalltalk   # 雑談 10 問（締めの定型で終わる割合を数える）
+uv run python -m tests.eval.run_wp09 --set procedures   # 手続き 100 問（WP09。課の誤り・作り話・言い回し・過剰な定型を数える）
+uv run python -m tests.eval.run_wp09 --set adversarial  # 意地悪 30 問（WP09）
+uv run python ../scripts/draft_procedures.py --site etajima --candidates /tmp/cand   # 手続きの材料の候補ページの一覧と本文
+uv run python ../scripts/draft_procedures.py --site etajima --site akiota --import-dir <dir>   # 手書きの下書きを照合して取り込む（draft のまま）
+uv run python ../scripts/check_procedures.py --site etajima   # 出典の再確認（パックの更新の後に自動でも動く）
 
 # エッジ（ブラウザ）モード: マイク・スピーカー・アバターはブラウザ側
 (cd ../edge && npm ci && npm run build)    # 初回と edge/ を変えたとき。成果物は server/static/edge/
@@ -172,7 +196,9 @@ server/
 │   ├── actions.py        # 同意付きの行為（提案 → 返事 → 実行）と来訪記録
 │   ├── lookup.py         # 調べる（許可ドメインだけ・5 秒で打ち切り・見つからなければ夜のビルドに回す）
 │   ├── referrals.py      # 紹介状（受付番号・保存・期限・安芸太田は CSV）、来訪記録、小ネタ、今日の集計
-│   ├── procedures.py     # 手続きの常用語（procedures.yaml）と担当課の規則による決定
+│   ├── procedures.py     # 手続きの別名表（procedures.yaml）と担当課の規則による決定
+│   ├── procedure_kb.py   # 手続きナレッジ（読み書き・突き合わせ・承認・出典の再確認。WP09）
+│   ├── procedure_panel.py # 職員パネルの「手続き」タブ（編集・承認・想定問答を試す。WP09）
 │   ├── camera.py         # カメラと「輪」（rtmlib の RTMDet＋RTMPose・簡易トラッカー。フレームはメモリのみ。WP02 A）
 │   ├── speaker.py        # セッション限りの話者の区別（ECAPA。A・B…。埋め込みはメモリのみ。WP02 B）
 │   ├── openers.py        # 切り出し・沈黙・別れの定型文（context/openers.yaml。WP02 C）
@@ -182,7 +208,7 @@ server/
 │   ├── announcer.py      # テンプレート発話（未使用）
 │   └── main.py           # text / voice の 2 モード、--edge
 ├── static/edge/          # edge/ のビルド成果物（git 管理外）
-├── static/staff.html     # 職員パネル
+├── static/staff.html     # 職員パネル（staff_procedures.html が「手続き」タブ）
 └── tests/
 kb/                       # 知識パックのビルド（sources/<site>.yaml、build.py、README.md。pack/ は git 管理外）
 edge/                     # エッジページ（Vite + TypeScript、three.js + @pixiv/three-vrm）

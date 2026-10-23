@@ -26,6 +26,7 @@ from src.dialogue import Dialogue, ends_with_closing
 from src.knowledge import KnowledgeBase, Weather
 from src.llm_client import LLMClient
 from src.persona import load_persona
+from src.procedure_kb import procedures_dir
 from src.procedures import load_procedures
 from src.referrals import ReferralStore, load_tags
 from src.site_context import load_facility
@@ -54,11 +55,14 @@ async def run(site: str, case_set: str = "") -> str:
     kb = KnowledgeBase.load(config.data_dir, site, config.knowledge)
     # 実機と同じ条件（呼び名・行為のタグの決まり・人物像）で聞く
     llm = LLMClient()
+    procs = load_procedures(config.asr.site_context_dir,
+                            procedures_dir(config.data_dir, site, config.procedure.subdir),
+                            config.procedure.recheck_keep_using)
     dialogue = Dialogue(llm, facility=facility, knowledge=kb,
                         weather=Weather.for_site(config.data_dir, site),
                         avatar_name=config.actions.avatar_name, enabled_actions=config.actions.enabled,
                         persona=load_persona(config.persona),
-                        procedures=load_procedures(config.asr.site_context_dir))
+                        procedures=procs)
     allow = {a.lower() for a in (facility.allow_ascii if facility else ())}
     cases = yaml.safe_load(
         (Path(__file__).parent / f"cases_{site}{'_' + case_set if case_set else ''}.yaml").read_text(encoding="utf-8")
@@ -66,7 +70,7 @@ async def run(site: str, case_set: str = "") -> str:
     conv = Conversation(dialogue, llm, config.llm.chat_model, config.actions, config.referral, facility,
                         load_tags(SERVER_ROOT / "context" / "tags.yaml"),
                         referrals=ReferralStore(Path(tempfile.mkdtemp(prefix="idobata-eval-")), site, 1, False),
-                        procedures=load_procedures(config.asr.site_context_dir))
+                        procedures=procs)
     rows = ["| # | 発話 | 応答（全文） | 参考資料（上位） | 出典表示 | 検索 | 提案 | 補助判定 |",
             "|---|---|---|---|---|---|---|---|"]
     ascii_total = 0

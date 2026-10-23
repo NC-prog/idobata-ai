@@ -13,6 +13,7 @@ Basic 認証（ユーザー staff、パスワードは .env の IDOBATA_STAFF_PA
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import logging
 import secrets
@@ -32,6 +33,7 @@ from pydantic import BaseModel
 from .config import AdminConfig, StaffConfig
 from .edge_bridge import allowed_peer
 from .knowledge import JST
+from .procedure_panel import ProcedurePanel
 from .procedures import AsrFixes
 from .referrals import ReferralStore, TidbitStore, VisitLog, today_stats
 from .themes import ThemeSelector, safe_name
@@ -45,6 +47,7 @@ _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>井戸端AI エ
 
 
 _STAFF_HTML = Path(__file__).resolve().parent.parent / "static" / "staff.html"
+_PROCEDURES_HTML = Path(__file__).resolve().parent.parent / "static" / "staff_procedures.html"
 _ADMIN_HTML = Path(__file__).resolve().parent.parent / "static" / "admin_transcripts.html"
 
 
@@ -70,12 +73,32 @@ class ThemeIn(BaseModel):
     name: str | None = None  # None で自動（暦）に戻す
 
 
+class ProcedureEdit(BaseModel):
+    fields: dict[str, Any]
+
+
+class ApproveIn(BaseModel):
+    by: str = ""  # 空なら職員パネルのログイン名
+
+
+class FaqReview(BaseModel):
+    q: str
+    answer: str
+    ok: bool
+    note: str = ""
+
+
+ALERT_LABELS = {"crisis": "深刻な打ち明け（自死・暴力・虐待など）。すぐにロビーで声をかけてください",
+                "lost_child": "子どもが保護者を探しています。ロビーで声をかけてください"}
+
+
 class StaffPanel:
     """職員パネルの中身（紹介状・来訪記録）。"""
 
     def __init__(self, referrals: ReferralStore, visits: VisitLog, cfg: StaffConfig,
                  tidbits: TidbitStore | None = None, departments: tuple[str, ...] = (),
-                 asr_fixes: AsrFixes | None = None, themes: ThemeSelector | None = None) -> None:
+                 asr_fixes: AsrFixes | None = None, themes: ThemeSelector | None = None,
+                 procedures: ProcedurePanel | None = None) -> None:
         self.referrals = referrals
         self.visits = visits
         self.cfg = cfg
@@ -85,6 +108,20 @@ class StaffPanel:
         self.asr_fixes = asr_fixes
         # テーマの手動の切り替え（WP08）
         self.themes = themes
+        # 手続きナレッジ（WP09）
+        self.procedures = procedures
+        # 職員の呼び出し（深刻な打ち明け・迷子。WP09 C）。発話の本文は持たない。メモリだけ（再起動で消える）
+        self.alerts: list[dict[str, Any]] = []
+
+    def call_staff(self, kind: str, edge_id: str = "") -> dict[str, Any]:
+        """ロビーに職員を呼ぶ（職員パネルの上に赤で出す）。本文・氏名は書かない。"""
+        label = ALERT_LABELS.get(kind, kind)
+        item = {"id": secrets.token_hex(4), "kind": kind, "label": label, "edge": edge_id,
+                "at": datetime.now(JST).isoformat(timespec="seconds"), "done": False}
+        self.alerts.append(item)
+        del self.alerts[:-50]
+        logger.warning("職員を呼びました（%s）", label)
+        return item
 
 
 class AdminPanel:
@@ -227,6 +264,86 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return panel.themes.status(datetime.now(JST).date())
+
+    def procs() -> ProcedurePanel:
+        if panel.procedures is None:
+            raise HTTPException(404, "手続きナレッジはありません")
+        return panel.procedures
+
+    def login_name(request: Request) -> str:
+        try:
+            raw = request.headers.get("authorization", "").split(" ", 1)[1]
+            return base64.b64decode(raw).decode().split(":", 1)[0] or panel.cfg.user
+        except (IndexError, ValueError, UnicodeDecodeError):
+            return panel.cfg.user
+
+    @app.get("/staff/procedures/", include_in_schema=False, dependencies=auth)
+    async def procedures_page() -> HTMLResponse:
+        return HTMLResponse(_PROCEDURES_HTML.read_text(encoding="utf-8"))
+
+    @app.get("/staff/api/procedures", dependencies=auth)
+    async def list_procedures(status: str | None = None) -> list[dict[str, Any]]:
+        return procs().rows(status or None)
+
+    @app.get("/staff/api/procedures/{rid}", dependencies=auth)
+    async def get_procedure(rid: str) -> dict[str, Any]:
+        d = procs().detail(rid)
+        if d is None:
+            raise HTTPException(404, "手続きがありません")
+        return d
+
+    @app.put("/staff/api/procedures/{rid}", dependencies=auth)
+    async def edit_procedure(rid: str, body: ProcedureEdit, request: Request) -> dict[str, Any]:
+        try:
+            return procs().edit(rid, body.fields, login_name(request))
+        except KeyError as e:
+            raise HTTPException(404, "手続きがありません") from e
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e)) from e
+
+    @app.post("/staff/api/procedures/{rid}/{action}", dependencies=auth)
+    async def procedure_action(rid: str, action: str, request: Request,
+                               body: ApproveIn | None = None) -> dict[str, Any]:
+        p = procs()
+        try:
+            if action == "approve":
+                p.book.approve(rid, (body.by.strip() if body else "") or login_name(request))
+            elif action == "send_back":
+                p.book.send_back(rid)
+            elif action == "clear_recheck":
+                p.book.clear_recheck(rid)
+            else:
+                raise HTTPException(404, "その操作はありません")
+        except KeyError as e:
+            raise HTTPException(404, "手続きがありません") from e
+        d = p.detail(rid)
+        assert d is not None
+        return d
+
+    @app.post("/staff/api/procedures/{rid}/faq/try", dependencies=auth)
+    async def try_procedure_faq(rid: str) -> list[dict[str, str]]:
+        try:
+            return await procs().try_faq(rid)
+        except KeyError as e:
+            raise HTTPException(404, "手続きがありません") from e
+        except RuntimeError as e:
+            raise HTTPException(503, str(e)) from e
+
+    @app.post("/staff/api/procedures/{rid}/faq/review", dependencies=auth)
+    async def review_procedure_faq(rid: str, body: FaqReview) -> dict[str, bool]:
+        return {"written": procs().review(rid, body.q, body.answer, body.ok, body.note)}
+
+    @app.get("/staff/api/alerts", dependencies=auth)
+    async def list_alerts() -> list[dict[str, Any]]:
+        return [a for a in panel.alerts if not a["done"]]
+
+    @app.post("/staff/api/alerts/{aid}/done", dependencies=auth)
+    async def alert_done(aid: str) -> dict[str, bool]:
+        for a in panel.alerts:
+            if a["id"] == aid:
+                a["done"] = True
+                return {"done": True}
+        raise HTTPException(404, "呼び出しがありません")
 
     @app.get("/staff/api/stats", dependencies=auth)
     async def stats(day: str | None = None) -> dict[str, Any]:
@@ -382,6 +499,7 @@ class EdgeServer:
             host=host, port=port, log_level="warning", lifespan="off",
         )
         self._server = uvicorn.Server(cfg)
+        self.staff = staff
         self._task: asyncio.Task[None] | None = None
         self.url = f"http://{host}:{port}/edge/"
 

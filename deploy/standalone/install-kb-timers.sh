@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 知識パックの自動更新を systemd の user タイマーで有効にする:
 #   毎朝 6:00 更新の速い区画（--daily）/ 毎週日曜 3:00 全体の作り直し / 毎時 05 分 天気
+#   パックの更新の後に、手続きナレッジの出典の再確認（scripts/check_procedures.py、WP09）
 # sudo は使わない。使い方: bash deploy/standalone/install-kb-timers.sh [拠点]（省略時は .env の IDOBATA_SITE）
 set -euo pipefail
 
