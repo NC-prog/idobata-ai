@@ -861,6 +861,34 @@ class ThemeConfig:
 
 
 @dataclass(frozen=True)
+class ProcedureConfig:
+    """手続きナレッジ（職員が承認する正解表、WP09）。~/idobata-data/procedures/<site>/ に 1 手続き 1 ファイル。"""
+
+    subdir: str = "procedures"
+    # 要再確認（出典のページが変わった）になった承認済みの手続きを使い続けるか。
+    # 環境変数 IDOBATA_PROCEDURE_RECHECK_USE（既定 1 = 使い続けて、職員パネルで要再確認の印を出す）
+    recheck_keep_using: bool = True
+    # 1 ターンに【市の案内（承認済み）】へ入れる手続きの数
+    max_per_turn: int = 2
+    # 手続きナレッジから答えた文には「市の案内では、」を一度だけ添える。文字 2-gram の重なりがこれ以上の文を、
+    # 手続きナレッジから答えた文とみなす
+    attribution_min_overlap: float = 0.5
+    attribution_prefix: str = "{org}の案内では、"
+    # 承認済みの手続きを入れたターンに、参考資料の前へ付ける見出しと決まり
+    section_head: str = (
+        "【市の案内（承認済み）】（市の職員が確かめた案内。持ち物・流れ・期限・金額はこれを最優先で使い、"
+        "書いていないことは言わない）\n"
+    )
+    # 下書き（未承認）の手続きだけに当たった問いでは、応答の最後にこの一文を足す（応答がもう担当の課を案内していなければ）
+    draft_sentence: str = "手続きの詳しいことは、{department}でご案内します。"
+    draft_department_fallback: str = "担当の課"
+    # draft_sentence を足さなくてよい応答（もう担当の課での案内を言っている）。課の名前か「担当の課」と同じ文にあるとき
+    draft_covered_pattern: str = r"ご案内|ご説明|ご確認|お尋ね|お声がけ|お問い合わせ|ご相談|お聞き|お越し|手続きでき|承り"
+    # 「想定問答を試す」で 1 問に掛ける上限（秒）
+    try_timeout_sec: float = 60.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """アプリケーション全体の設定。"""
 
@@ -890,6 +918,7 @@ class AppConfig:
     tidbit: TidbitConfig = field(default_factory=TidbitConfig)
     edge: EdgeConfig = field(default_factory=EdgeConfig)
     theme: ThemeConfig = field(default_factory=ThemeConfig)
+    procedure: ProcedureConfig = field(default_factory=ProcedureConfig)
 
 
 def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
@@ -972,6 +1001,8 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         transcript=transcript,
         camera=camera,
         persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
+        procedure=ProcedureConfig(recheck_keep_using=env.get("IDOBATA_PROCEDURE_RECHECK_USE", "1").strip().lower()
+                                  not in ("0", "false", "no", "off")),
     )
 
 

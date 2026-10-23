@@ -46,6 +46,8 @@ export interface ThemeMessage {
 export interface SourcesMessage {
   type: "sources";
   titles: string[];
+  /** 手続きナレッジ（市の案内）の出典 URL（タイトルの後ろにさらに薄く出す。WP09） */
+  urls?: string[];
 }
 
 /** カメラの取り方（hello の後にフロントから届く。WP02） */

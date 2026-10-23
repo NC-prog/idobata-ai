@@ -27,6 +27,7 @@
 </head>
 <body>
 <h1>井戸端AI 職員パネル <span class="mut" id="updated"></span></h1>
+<nav style="margin-bottom:8px"><b>紹介状・今日の状況</b>　<a href="procedures/">手続き</a> <span class="mut" id="proc-badge"></span></nav>
 <label>日付 <input type="date" id="day"></label>
 <div class="stats" id="stats"></div>
 <table>
@@ -138,7 +139,14 @@ async function load() {
     </tr>`).join("") || `<tr><td colspan="9" class="mut">この日の紹介状はありません</td></tr>`;
   document.getElementById("updated").textContent = "更新 " + new Date().toLocaleTimeString("ja-JP");
 }
+async function loadProcBadge() {
+  const r = await fetch("api/procedures?status=recheck");
+  if (!r.ok) return;
+  const n = (await r.json()).length;
+  document.getElementById("proc-badge").innerHTML = n ? `<span class="unspec">要再確認 ${n} 件</span>` : "";
+}
 dayEl.addEventListener("change", load);
+loadProcBadge();
 load();
 loadFixes();
 loadTheme();

@@ -167,9 +167,17 @@ function handleMessage(msg: DownMessage): void {
       avatar.setState(msg.value);
       if (msg.value === "listening" || msg.value === "thinking") sourcesCaption.textContent = "";
       break;
-    case "sources":
+    case "sources": {
       sourcesCaption.textContent = msg.titles.length ? `出典: ${msg.titles.join(" / ")}` : "";
+      const urls = msg.urls ?? [];
+      if (msg.titles.length && urls.length) {
+        const span = document.createElement("span");
+        span.className = "source-urls";
+        span.textContent = ` ${urls.join(" ")}`;
+        sourcesCaption.appendChild(span);
+      }
       break;
+    }
     case "caption":
       if (msg.role === "user") {
         if (msg.final) onUserFinal(msg.text);

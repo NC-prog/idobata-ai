@@ -20,9 +20,17 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 
-from .config import DialogueConfig, config
+from .config import DialogueConfig, ProcedureConfig, config
 from .knowledge import JST, Reference, SearchResult, Weather
-from .persona import Persona, build_system_prompt, build_turn_message, source_labels, this_weekend
+from .persona import (
+    Persona,
+    build_system_prompt,
+    build_turn_message,
+    organization_word,
+    source_labels,
+    this_weekend,
+)
+from .procedure_kb import PROCEDURE_TRUST, ProcedureRecord
 from .procedures import Procedures
 from .site_context import Facility
 from .timeofday import fix_greeting, greeting_for
@@ -257,6 +265,7 @@ class Dialogue:
         enabled_actions: tuple[str, ...] = (),
         persona: Persona | None = None,
         procedures: Procedures | None = None,
+        procedure_cfg: ProcedureConfig | None = None,
     ) -> None:
         self._llm = llm
         self._cfg = cfg or config.dialogue
@@ -268,6 +277,12 @@ class Dialogue:
         self._enabled_actions = enabled_actions
         self._persona = persona
         self._procedures = procedures
+        self._proc_cfg = procedure_cfg or config.procedure
+        self._draft_covered_re = re.compile(self._proc_cfg.draft_covered_pattern)
+        # このターンで当たった手続きナレッジ（承認済み・下書き。文字記録用）
+        self.last_procedures: list[ProcedureRecord] = []
+        # この会話で「詳しいことは〇〇課でご案内します」を足した手続き（同じ手続きで繰り返さない）
+        self._draft_noted: set[str] = set()
         # 直近の応答が出した行為の提案（<propose:…>）。無ければ None
         self.last_proposal: str | None = None
         self._now = now
@@ -322,6 +337,7 @@ class Dialogue:
     def reset(self) -> None:
         """履歴を消す（来訪者の切り替わり時など）。"""
         self._history.clear()
+        self._draft_noted.clear()
         logger.info("対話履歴をクリアしました")
 
     def build_messages(
@@ -343,7 +359,8 @@ class Dialogue:
         # 履歴には発話だけを積む（参考資料は今のターンにだけ付ける）
         # hint は今のターンにだけ添える材料（さっき来た方の小ネタなど）
         messages.append({"role": "user",
-                         "content": hint + build_turn_message(self._cfg, self._facility, refs or [], content)})
+                         "content": hint + build_turn_message(self._cfg, self._facility, refs or [], content,
+                                                              self._proc_cfg.section_head)})
         return messages
 
     @property
@@ -360,6 +377,7 @@ class Dialogue:
     def begin_turn(self) -> None:
         """ターンごとの記録（提案・検索・出典・捨てた文）を消す。LLM を通さない定型文のターンでも前のものを残さない。"""
         self.last_proposal = None
+        self.last_procedures = []
         self.last_dropped = []
         self.last_search_query = None
         self.last_search_ms = None
@@ -435,6 +453,12 @@ class Dialogue:
         refs = list(extra_refs) if extra_refs is not None else await self._search(text)
         if extra_refs is not None:
             self.last_references, self.last_search_ms = refs, None
+        # 手続きナレッジ（WP09）: 承認済みのものだけ【市の案内（承認済み）】として参考資料より前に置く。
+        # 下書きだけに当たったら、資料には入れず、最後に「詳しいことは〇〇課でご案内します」を足す
+        proc_refs, draft_dept = self._procedure_refs(text) if extra_refs is None else ([], None)
+        if proc_refs:
+            refs = proc_refs + refs
+            self.last_references = refs
         place = self._unknown_place(text, refs)
         if place is not None:
             # 地区・町の様子を聞かれたのに資料が無い: 様子を作らず、教えてもらう（人物像の「土地勘がまだ薄い」）
@@ -492,6 +516,7 @@ class Dialogue:
                         # おうむ返しの断片を捨てた後の続き（「は、保健医療課で…」）の頭の助詞を外す
                         sentence = _LEADING_PARTICLE_RE.sub("", sentence)
                     if sentence:
+                        sentence = self._attribute(sentence, proc_refs, sentences, cited)
                         sentences.append(sentence)
                         yield sentence
         except Exception:
@@ -515,16 +540,24 @@ class Dialogue:
             tail = self._strip_judgment_clause(tail)
             if tail and not self._must_drop(tail) and (
                     not sentences or not self._drop(tail, text, sentences, previous)):
+                tail = self._attribute(tail, proc_refs, sentences, cited)
                 sentences.append(tail)
                 yield tail
         self.last_cited = [refs[i - 1] for i in sorted(cited) if 0 < i <= len(refs)]
         already = any(self._mentions_source_re.search(x) for x in sentences)
-        # 出典の一言は、応答が資料の中身を実際に使ったときだけ（雑談に関係の薄い資料の番号が付いても足さない）
-        if self.last_cited and not already and self._uses_references(sentences, self.last_cited):
+        # 出典の一言は、応答が資料の中身を実際に使ったときだけ（雑談に関係の薄い資料の番号が付いても足さない）。
+        # 手続きナレッジは「市の案内では、」を添えたので、ホームページの一言には数えない
+        page_cited = [r for r in self.last_cited if r.trust != PROCEDURE_TRUST]
+        if page_cited and not already and self._uses_references(sentences, page_cited):
             # 出典の一言は、使った資料の出どころから決めて足す（「観光協会のホームページ」など）。
             # 応答がすでに「〇〇のホームページに載っています」と言っていれば重ねない
             line = self._cfg.source_sentence.format(
-                labels=source_labels(self._cfg, self._facility, self.last_cited))
+                labels=source_labels(self._cfg, self._facility, page_cited))
+            sentences.append(line)
+            yield line
+        if draft_dept is not None and sentences and not self._points_to_department(sentences):
+            line = self._proc_cfg.draft_sentence.format(department=draft_dept)
+            logger.info("承認前の手続きなので、詳しいことは担当の課で、の一文を足します")
             sentences.append(line)
             yield line
         # 緊急連絡先の名前を言ったのに番号を言っていなければ、番号の文を足す（いちばん大事な事実なので）
@@ -538,6 +571,58 @@ class Dialogue:
         reply = "".join(sentences)
         self._push(labeled(text, speaker), reply)
         logger.debug("応答: %s", reply)
+
+    def _procedure_refs(self, text: str) -> tuple[list[Reference], str | None]:
+        """発話で言った手続きナレッジ。承認済みは参考資料にし、下書きだけなら足す一文の課（WP09）。"""
+        if self._procedures is None:
+            return [], None
+        matched = self._procedures.matched(text)
+        self.last_procedures = matched
+        if not matched:
+            return [], None
+        usable = [r for r in matched if self._procedures.book is not None and self._procedures.book.usable(r)]
+        if usable:
+            refs = [r.to_reference(self._department_line(r.department)) for r in usable[: self._proc_cfg.max_per_turn]]
+            logger.info("承認済みの手続きナレッジを %d 件、市の案内として入れます", len(refs))
+            return refs, None
+        fresh = [r for r in matched if r.id not in self._draft_noted]
+        if not fresh or not re.search(f"{self._cfg.visitor_question_pattern}|{config.referral.procedure_pattern}", text):
+            return [], None
+        self._draft_noted.update(r.id for r in fresh)
+        dept = self._expected_department(text) or self._proc_cfg.draft_department_fallback
+        logger.info("承認前（下書き）の手続きに当たりました。手続きナレッジは使いません")
+        return [], dept
+
+    def _points_to_department(self, sentences: list[str]) -> bool:
+        """応答がもう担当の課での案内を言っているか（課の名前か「担当の課」と、案内の言い方が同じ文にある）。"""
+        names = [d.name for d in (self._facility.departments if self._facility else ())] + ["担当の課", "窓口"]
+        return any(self._draft_covered_re.search(x) and any(n in x for n in names) for x in sentences) \
+            or any(self._cfg.grounding_caution in x for x in sentences)
+
+    def _department_line(self, name: str) -> str:
+        """手続きナレッジの担当の書き方（「保健医療課（2階）」。階は facility から引く）。"""
+        d = next((d for d in (self._facility.departments if self._facility else ()) if d.name == name), None)
+        if d is None:
+            return name
+        if d.floor:
+            return f"{name}（{d.floor}）"
+        return f"{name}（この建物ではなく {d.place}）" if d.place else name
+
+    def _attribute(self, sentence: str, proc_refs: list[Reference], said: list[str], cited: set[int]) -> str:
+        """手続きナレッジから答えた最初の文に「市の案内では、」を一度だけ添える（WP09）。"""
+        if not proc_refs or not sentence:
+            return sentence
+        prefix = self._proc_cfg.attribution_prefix.format(org=organization_word(self._facility))
+        if any(prefix.rstrip("、") in x for x in [*said, sentence]):
+            return sentence
+        for i, r in enumerate(proc_refs, 1):
+            # 手続き名・担当の行は除く（課の案内は固定事実なので、市の案内とは言わない）
+            body = "\n".join(x for x in r.text.splitlines() if not x.startswith(("手続き:", "担当:")))
+            if grounding_overlap(sentence, body) >= self._proc_cfg.attribution_min_overlap:
+                cited.add(i)
+                m = re.match(r"(はい|ええ|そうですね|それでしたら|それなら)、", sentence)
+                return sentence[:m.end()] + prefix + sentence[m.end():] if m else prefix + sentence
+        return sentence
 
     def _rain_likely(self, day: str = "今日") -> bool:
         """day（今日・明日）の予報の降水確率に、傘をすすめる基準以上のものがあるか（天気が無ければ判断しない＝True）。

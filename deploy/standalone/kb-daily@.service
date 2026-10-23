@@ -11,4 +11,6 @@ Type=oneshot
 WorkingDirectory=__REPO__
 Environment=CUDA_VISIBLE_DEVICES=
 ExecStart=/usr/bin/flock __DATA__/kb/.%i.lock __UV__ run --project kb python kb/build.py --site %i --daily
+# 手続きナレッジの出典の再確認（WP09 B-3。ページが変わった手続きを要再確認に。失敗してもパックの更新は失敗にしない）
+ExecStartPost=-__UV__ run --project server python scripts/check_procedures.py --site %i
 Nice=10

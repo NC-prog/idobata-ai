@@ -1,27 +1,20 @@
-# 手続きの常用語（全拠点共通）。
+# 手続きの別名表（全拠点共通）。
 #
 # - term: 拠点 YAML の facility.departments[].handles と突き合わせる名前（handles の語と同じ表記にする）
 # - aliases: 来訪者の言い方（略称・表記ゆれ・関連する手続き）。発話にこれがあれば term を言ったものとみなす
 # ASR の語彙には term と aliases をすべて入れる（asr_exclude に書いたものを除く）
 #
-# 担当課は規則で決める（src/procedures.py）。発話から term を拾い、handles にその term を持つ課が
-# 一つなら確定、複数なら来訪者に聞き、無ければ LLM の候補を来訪者に確かめる。
+# 担当課は規則で決める（src/procedures.py）。承認済みの手続きナレッジ（WP09。~/idobata-data/procedures/<site>/）の
+# name・aliases が発話にあればその department、残りはこの表の term を handles に持つ課。一意でなければ「未特定」。
 # readings は VOICEVOX のユーザー辞書に登録する語（読みが自明でないものだけ）。
 #
-# intake: 紹介状の同意の後に伺う項目（担当の方が準備できるように）。when の語が発話にあればその組を使う
-#   （when が無い組は常に合う）。questions は最大 3 問、LLM が自然な言い方に直して順に聞く。
-#   bring は持ち物の案内（when の語が聞き取りの答えか発話にあれば。when 無しは常に）。最初に合った 1 つだけ言う
+# 紹介状の聞き取り（intake）と持ち物（bring）は WP09 で手続きナレッジに移した（二重管理をやめる）。
 # tags: 紹介状のタグ（tags.yaml の統制語彙）。手続きが分かったときは LLM の選んだタグより先に付ける（LLM は補助）
 
 procedures:
   - term: 国民健康保険
     tags: [保険・年金]
     aliases: [国保]
-    intake:
-      - questions: [切り替えのきっかけ（退職・転入・扶養の変更など）, いつから切り替えるか, 手続きするのはご本人かご家族か]
-        bring:
-          - {when: [退職, 辞め, 扶養, 会社], item: 前の健康保険の資格喪失証明書}
-          - {when: [転入, 引っ越], item: 前の市町村の転出証明書}
   - term: 国民健康保険税
     tags: [税]
     aliases: [国保税, 国民健康保険料, 国保料]
@@ -31,10 +24,6 @@ procedures:
   - term: 介護保険
     tags: [介護]
     aliases: [要介護認定, 介護認定, 介護]
-    intake:
-      - questions: [介護が要るのはご本人かご家族か, 初めての申請か更新か]
-        bring:
-          - {when: [更新], item: 介護保険の被保険者証}
   - term: 児童手当
     tags: [子育て]
   - term: 保育施設
@@ -55,11 +44,6 @@ procedures:
     aliases: [課税証明, 納税証明]
   - term: マイナンバーカード
     tags: [マイナンバー]
-    intake:
-      - when: [紛失, なくし, 無くし, 失くし, 落とし, 盗]
-        questions: [マイナンバー総合フリーダイヤルへの一時停止の連絡は済んだか, 再交付を希望するか]
-        bring:
-          - {item: 本人確認の書類（運転免許証など）}
   - term: パスポート
   - term: ごみ
     tags: [ごみ]

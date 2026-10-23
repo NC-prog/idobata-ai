@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>井戸端AI 手続きナレッジ</title>
+<style>
+  :root { --bg:#fafafa; --fg:#222; --mut:#666; --line:#ddd; --draft:#fff8e1; --recheck:#ffebee; --ok:#e8f5e9; }
+  body { margin:16px; font-family:"Noto Sans JP",sans-serif; background:var(--bg); color:var(--fg); }
+  h1 { font-size:20px; margin:0 0 12px; }
+  nav a { margin-right:12px; }
+  nav a.on { font-weight:bold; color:var(--fg); text-decoration:none; }
+  .wrap { display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+  .list { flex:1 1 420px; min-width:0; }
+  .detail { flex:1 1 520px; min-width:0; background:#fff; border:1px solid var(--line); border-radius:6px; padding:12px; }
+  table { border-collapse:collapse; width:100%; background:#fff; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
+  tr { cursor:pointer; }
+  tr.sel td { outline:2px solid #333; }
+  .st-draft { background:var(--draft); }
+  .st-recheck { background:var(--recheck); color:#b00020; font-weight:bold; }
+  .st-approved { background:var(--ok); }
+  .mut { color:var(--mut); font-size:12px; }
+  label { display:block; margin-top:8px; font-size:13px; font-weight:bold; }
+  input[type=text], textarea, select { width:100%; box-sizing:border-box; font-size:14px; font-family:inherit; }
+  textarea { min-height:3.2em; }
+  .faq { display:flex; gap:4px; margin-top:4px; }
+  .faq input { flex:1; }
+  button { margin:2px; padding:4px 10px; font-size:13px; }
+  button.primary { background:#2e7d32; color:#fff; border:1px solid #2e7d32; }
+  .note { white-space:pre-wrap; background:#f5f5f5; padding:6px; font-size:12px; }
+  .try td { font-size:13px; }
+  .warn { color:#b00020; }
+</style>
+</head>
+<body>
+<h1>井戸端AI 職員パネル</h1>
+<nav><a href="../">紹介状・今日の状況</a><a class="on" href="./">手続き</a></nav>
+<p class="mut">市の手続きの「正解表」です。下書きは自動で作ったもので、<b>承認したものだけ</b>を案内役が来訪者への案内に使います
+（下書き・要再確認の手続きは「担当の課でご案内します」と伝えます）。出典のページを開いて内容を確かめてから承認してください。</p>
+<label style="display:inline">状態で絞り込み
+  <select id="filter" style="width:auto" onchange="loadList()">
+    <option value="">すべて</option><option value="recheck">要再確認</option><option value="draft">下書き</option><option value="approved">承認済み</option>
+  </select></label>
+<span class="mut" id="counts"></span>
+<div class="wrap">
+  <div class="list">
+    <table>
+      <thead><tr><th>手続き名</th><th>担当課</th><th>状態</th><th>出典の確認日</th><th>問答</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div class="detail" id="detail"><span class="mut">左の一覧から手続きを選んでください。</span></div>
+</div>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let DEPTS = [], current = null;
+const lines = (id) => document.getElementById(id).value.split("\n").map((x) => x.trim()).filter(Boolean);
+
+async function loadList() {
+  if (!DEPTS.length) DEPTS = await fetch("../api/departments").then((r) => r.json());
+  const f = document.getElementById("filter").value;
+  const [rows, all] = await Promise.all([
+    fetch("../api/procedures" + (f ? "?status=" + f : "")).then((r) => r.json()),
+    fetch("../api/procedures").then((r) => r.json()),
+  ]);
+  const n = (s) => all.filter((x) => x.status === s).length;
+  document.getElementById("counts").textContent = `　全 ${all.length} 件（承認済み ${n("approved")}・下書き ${n("draft")}・要再確認 ${n("recheck")}）`;
+  document.getElementById("rows").innerHTML = rows.map((r) => `
+    <tr class="${current === r.id ? "sel" : ""}" onclick='openDetail("${esc(r.id)}")'>
+      <td>${esc(r.name)}<div class="mut">${esc(r.id)}</div></td>
+      <td>${esc(r.department) || '<span class="warn">未定</span>'}</td>
+      <td class="st-${esc(r.status)}">${esc(r.status_label)}${r.recheck_reason ? `<div class="mut">${esc(r.recheck_reason)}</div>` : ""}</td>
+      <td>${esc(r.checked_at) || '<span class="warn">出典なし</span>'}</td>
+      <td>${r.faq}</td>
+    </tr>`).join("") || `<tr><td colspan="5" class="mut">ありません</td></tr>`;
+}
+
+function faqRow(q, a) {
+  return `<div class="faq"><input type="text" class="fq" value="${esc(q)}" placeholder="問い（来訪者の言い方）"><input type="text" class="fa" value="${esc(a)}" placeholder="答え"><button onclick="this.parentNode.remove()">消す</button></div>`;
+}
+
+async function openDetail(id) {
+  current = id;
+  const d = await fetch(`../api/procedures/${id}`).then((r) => r.json());
+  const opts = ["", ...DEPTS].map((n) => `<option ${n === (d.department ?? "") ? "selected" : ""}>${esc(n)}</option>`).join("");
+  document.getElementById("detail").innerHTML = `
+    <h2 style="margin-top:0">${esc(d.name)} <span class="st-${esc(d.status)}" style="font-size:14px;padding:2px 6px">${esc(d.status_label)}</span></h2>
+    <div class="mut">${d.approved_at ? `承認: ${esc(d.approved_by)}（${esc(d.approved_at)}）` : "未承認"}${d.recheck_reason ? `　<span class="warn">要再確認: ${esc(d.recheck_reason)}</span>` : ""}</div>
+    <div>出典: ${(d.sources || []).map((s) => `<div><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a> <span class="mut">確認 ${esc(s.checked_at)}</span></div>`).join("") || '<span class="warn">なし（内容は担当課で確かめてください）</span>'}</div>
+    ${d.staff_note ? `<label>下書き・職員のメモ</label><div class="note">${esc(d.staff_note)}</div>` : ""}
+    <label>手続き名</label><input type="text" id="f-name" value="${esc(d.name)}">
+    <label>言い方（別名。1 行に 1 つ。来訪者の発話にこの語があればこの手続き）</label><textarea id="f-aliases">${esc((d.aliases || []).join("\n"))}</textarea>
+    <label>絞り込みの語（任意。1 行に 1 つ。発話にこのどれかもあるときだけ当たる。例: なくし）</label><textarea id="f-when">${esc((d.when || []).join("\n"))}</textarea>
+    <label>担当課</label><select id="f-department">${opts}</select>
+    <label>対象</label><input type="text" id="f-audience" value="${esc(d.audience)}">
+    <label>持ち物（1 行に 1 つ。「品名 | 語1、語2」と書くと、その語が話に出たときだけ紹介状の後に案内します）</label><textarea id="f-bring" rows="5">${esc((d.bring_lines || []).join("\n"))}</textarea>
+    <label>流れ（1 行に 1 つ、3〜5 行）</label><textarea id="f-steps" rows="4">${esc((d.steps || []).join("\n"))}</textarea>
+    <label>期限（出典に明記があるときだけ。無ければ空）</label><input type="text" id="f-deadline" value="${esc(d.deadline)}">
+    <label>手数料・金額（出典に明記があるときだけ）</label><input type="text" id="f-fee" value="${esc(d.fee)}">
+    <label>紹介状の聞き取り（1 行に 1 問、最大 3 問）</label><textarea id="f-intake" rows="3">${esc((d.intake || []).map((q) => q.question).join("\n"))}</textarea>
+    <label>想定問答</label><div id="f-faq">${(d.faq || []).map((f) => faqRow(f.q, f.a)).join("")}</div>
+    <button onclick='document.getElementById("f-faq").insertAdjacentHTML("beforeend", faqRow("", ""))'>問答を足す</button>
+    <label>職員のメモ（ふだんの言い回し・注意。案内役にも渡します）</label><textarea id="f-staff_note" rows="3">${esc(d.staff_note)}</textarea>
+    <div style="margin-top:12px">
+      <button onclick="save()">保存</button>
+      ${d.status !== "approved" ? `<button class="primary" onclick="act('approve')">内容を確かめたので承認する</button>` : ""}
+      ${d.status !== "draft" ? `<button onclick="act('send_back')">差し戻し（下書きに）</button>` : ""}
+      ${d.status === "recheck" ? `<button onclick="act('clear_recheck')">要再確認を解除</button>` : ""}
+      <span class="mut" id="msg"></span>
+    </div>
+    <h3>想定問答を試す <span class="mut">（この手続きを承認済みとみなして、問いを案内役に聞きます。答えに○×を付けてください。×は誤り探しの素材になります）</span></h3>
+    <button onclick="tryFaq()">試す</button> <span class="mut" id="trymsg"></span>
+    <table class="try"><tbody id="tryrows"></tbody></table>`;
+  loadList();
+}
+
+async function save() {
+  const intake = lines("f-intake").slice(0, 3).map((q, i) => ({key: "q" + (i + 1), question: q}));
+  const faq = [...document.querySelectorAll("#f-faq .faq")].map((e) => ({q: e.querySelector(".fq").value.trim(), a: e.querySelector(".fa").value.trim()})).filter((f) => f.q && f.a);
+  const val = (id) => document.getElementById(id).value.trim() || null;
+  const fields = {name: val("f-name"), aliases: lines("f-aliases"), when: lines("f-when"), department: val("f-department"),
+                  audience: val("f-audience"), bring: lines("f-bring"), steps: lines("f-steps"), deadline: val("f-deadline"),
+                  fee: val("f-fee"), intake, faq, staff_note: val("f-staff_note")};
+  const r = await fetch(`../api/procedures/${current}`, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({fields})});
+  document.getElementById("msg").textContent = r.ok ? "保存しました" : ((await r.json()).detail || "保存できませんでした");
+  if (r.ok) openDetail(current);
+}
+
+async function act(action) {
+  if (action === "approve" && !confirm("出典と内容を確かめましたか？ 承認すると、案内役がこの内容で来訪者に案内します。")) return;
+  await save();
+  const r = await fetch(`../api/procedures/${current}/${action}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+  if (r.ok) openDetail(current);
+}
+
+async function tryFaq() {
+  document.getElementById("trymsg").textContent = "案内役に聞いています（1 問 10 秒ほど）…";
+  const r = await fetch(`../api/procedures/${current}/faq/try`, {method: "POST"});
+  if (!r.ok) { document.getElementById("trymsg").textContent = (await r.json()).detail || "試せませんでした"; return; }
+  const rows = await r.json();
+  document.getElementById("trymsg").textContent = rows.length ? "" : "想定問答がありません";
+  window.TRY = rows;
+  document.getElementById("tryrows").innerHTML = rows.map((x, i) => `
+    <tr><td><b>問</b> ${esc(x.q)}<div class="mut">想定の答え: ${esc(x.expected)}</div><div><b>案内役</b> ${esc(x.answer)}</div></td>
+    <td style="white-space:nowrap"><button onclick="review(${i}, true, this)">○</button><button onclick="review(${i}, false, this)">×</button></td></tr>`).join("");
+}
+
+async function review(i, ok, btn) {
+  const x = window.TRY[i];
+  const note = ok ? "" : (prompt("どこが違いましたか（任意）") || "");
+  await fetch(`../api/procedures/${current}/faq/review`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({q: x.q, answer: x.answer, ok, note})});
+  btn.parentNode.innerHTML = ok ? "○" : "×（素材に書きました）";
+}
+loadList();
+</script>
+</body>
+</html>
