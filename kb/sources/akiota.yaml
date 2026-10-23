@@ -34,6 +34,14 @@ seeds:
     exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
     trust: semi
     label: あきおおたからのホームページ
+  # 手続きナレッジの出典（WP09。2026-10-23 に町のサイトの教育課のページ /soshiki/14/ から URL を確認）。
+  # 就学援助（転校・入学）と、黎明館の交流スペースの利用（公共施設の利用）。毎朝の差分で取り直し、出典の再確認に使う
+  - url: https://www.akiota.jp/soshiki/14/
+    depth: 1
+    include: ['/site/kyoiku/8264\.html$', '/site/kyoiku/10011\.html$']
+    exclude: *akiota_exclude
+    daily: true
+  # 就学援助（/site/kyoiku/17778.html）は本文が PDF の案内だけでチャンクにならないので入れない
   # 町の新着・重要なお知らせ・トピックス（RSS 1.0）。入札（list8）は入れない
   - url: https://www.akiota.jp/rss/10/list1.xml
     depth: 1

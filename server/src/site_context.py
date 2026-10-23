@@ -64,6 +64,10 @@ class EmergencyLine:
 
     name: str
     number: str
+    # 深刻な打ち明けの種類（kokoro / dv / abuse / other。WP09）。その種類の打ち明けのとき、この番号を読み上げる
+    crisis: str = ""
+    # 読み上げの言い方（「#8008」→「シャープ8008」）。無ければ number
+    spoken: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,7 +151,8 @@ def load_facility(site: str, context_dir: Path) -> Facility | None:
         if isinstance(d, dict) and d.get("name")
     )
     lines = tuple(
-        EmergencyLine(name=str(e["name"]), number=str(e["number"]))
+        EmergencyLine(name=str(e["name"]), number=str(e["number"]), crisis=str(e.get("crisis") or ""),
+                      spoken=str(e.get("spoken") or ""))
         for e in raw.get("emergency_lines") or []
         if isinstance(e, dict) and e.get("name") and e.get("number")
     )

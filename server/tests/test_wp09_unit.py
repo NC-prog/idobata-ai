@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -332,8 +333,28 @@ async def test_crisis_reply_is_fixed_and_names_consult_places() -> None:
     d = Dialogue(llm, DialogueConfig(), facility=FAC, now=_NOON)
     out = await _collect(d, "もう死にたい")
     assert out[0] == "話してくださって、ありがとうございます。" and "110番" in out[1]
-    assert out[2] == "社会福祉課（2階）や高齢介護課（2階）でも、相談を受けています。"
-    assert "近くの職員を呼びます" in out[3] and d.last_safety == "crisis" and not llm.calls  # LLM を通さない
+    assert out[2] == "こころの健康相談統一ダイヤルは、0570-064-556です。"
+    assert out[3] == "社会福祉課（2階）や高齢介護課（2階）でも、相談を受けています。"
+    assert "近くの職員を呼びます" in out[4] and d.last_safety == "crisis" and not llm.calls  # LLM を通さない
+    # 残りの相談先は字幕だけ（括弧書きは読み上げない）
+    from src.dialogue import speech_text
+
+    assert out[5].startswith("（ほかの相談先: よりそいホットライン 0120-279-338") and speech_text(out[5]) == ""
+
+
+async def test_crisis_line_depends_on_topic() -> None:
+    from src.dialogue import speech_text
+
+    d = Dialogue(StubLLM(), DialogueConfig(), facility=FAC, now=_NOON)
+    cases = {"夫に殴られるんです": "DV相談ナビは、シャープ8008です。",
+             "親に叩かれるんよ、家に帰りたくない": "児童相談所虐待対応ダイヤルは、1 8 9（いちはやく）です。",
+             "知らない人に殴られた": "警察相談専用電話は、シャープ9110です。",
+             "消えたい": "こころの健康相談統一ダイヤルは、0570-064-556です。"}
+    for text, line in cases.items():
+        out = await _collect(d, text)
+        assert out[2] == line, text
+        spoken = [i for i, x in enumerate(out) if re.search(r"[0-9]", speech_text(x))]
+        assert spoken == [1, 2]  # 110 と、種類に合う番号 1 つだけ読み上げる（残りは字幕だけ）
 
 
 async def test_crisis_without_consult_place_falls_back_to_staff() -> None:
@@ -492,3 +513,11 @@ async def test_floor_claim_after_department_outside_building_is_dropped() -> Non
     assert not any("2階" in x for x in out)
     d2 = Dialogue(StubLLM(["国保は保健医療課です。", "1階にありますので、どうぞ。"]), DialogueConfig(), facility=FAC, now=_NOON)
     assert "2階にあり" in "".join(await _collect(d2, "国保はどこ"))  # この建物の課なら階を直す（従来どおり）
+
+
+async def test_floor_of_department_without_known_floor_is_removed() -> None:
+    aki = load_facility("akiota", SERVER_ROOT / "context")
+    d = Dialogue(StubLLM(["税務住民課へお声がけください。", "税務住民課は本庁舎の2階にありますので、お気軽にどうぞ。"]),
+                 DialogueConfig(), facility=aki, now=_NOON)
+    out = "".join(await _collect(d, "固定資産税のことなんじゃけど"))
+    assert "2階" not in out and "税務住民課へお声がけください。" in out
