@@ -110,6 +110,28 @@ body {
   color: rgba(255, 233, 168, 0.65);
 }
 
+/* 背景写真のクレジット（WP10）: 右下に小さく。字幕（下 2.5vh から上）より下の余白に収める */
+#bg-credit {
+  position: fixed;
+  right: 0.6vw;
+  bottom: 0.3vh;
+  max-width: 70vw;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.45);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+#bg-credit[hidden] {
+  display: none;
+}
+
 #status {
   position: fixed;
   top: 1vh;

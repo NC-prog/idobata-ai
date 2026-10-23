@@ -26,6 +26,7 @@ const previousUser = $<HTMLParagraphElement>("previous-user");
 const previousAssistant = $<HTMLParagraphElement>("previous-assistant");
 const startEl = $<HTMLDivElement>("start");
 const backgroundEl = $<HTMLDivElement>("background");
+const bgCreditEl = $<HTMLDivElement>("bg-credit");
 const replacedEl = $<HTMLDivElement>("replaced");
 
 // ---------------------------------------------------------------- 描画
@@ -78,6 +79,11 @@ function applyTheme(msg: ThemeMessage): void {
   const bg = msg.background || `backgrounds/${msg.site}_${msg.season}.jpg`; // 古いフロント（WP07 まで）は site と season だけ
   const url = `url("${asset(bg)}"), var(--bg-fallback)`;
   if (backgroundEl.style.backgroundImage !== url) backgroundEl.style.backgroundImage = url;
+  // 縦置きで見せる横の位置と、写真のクレジット（WP10。古いフロントは送ってこない → 中央・非表示）
+  backgroundEl.style.backgroundPosition = `${msg.background_anchor ?? "center"} center`;
+  const credit = msg.background_credit ?? "";
+  bgCreditEl.textContent = credit;
+  bgCreditEl.hidden = credit === "";
   console.info("テーマ", msg.name ?? msg.season);
 }
 

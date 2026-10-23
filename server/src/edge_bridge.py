@@ -253,10 +253,15 @@ class EdgeBridge:
         """字幕（caption_feed からも使う）。"""
         await self.send_json({"type": "caption", "role": role, "text": text, "final": final})
 
-    async def send_theme(self, site: str, name: str, avatar: str, background: str) -> None:
-        """アバターと背景の切替（WP08）。avatar・background はエッジのページ（/edge/）からの相対パス。"""
+    async def send_theme(self, site: str, name: str, avatar: str, background: str,
+                         credit: str = "", anchor: str = "center") -> None:
+        """アバターと背景の切替（WP08）。avatar・background はエッジのページ（/edge/）からの相対パス。
+
+        background_credit は背景写真のクレジット（空なら出さない）、background_anchor は縦置きで見せる横の位置（WP10）。
+        """
         await self.send_json({"type": "theme", "site": site, "season": name, "name": name,
-                              "avatar": avatar, "background": background})
+                              "avatar": avatar, "background": background,
+                              "background_credit": credit, "background_anchor": anchor})
 
     async def send_speak(self, header: dict[str, Any], wav: bytes) -> None:
         """1 文ぶんの ``speak`` と WAV を、間に他の送信が挟まらないよう続けて送る。"""

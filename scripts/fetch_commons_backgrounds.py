@@ -196,7 +196,7 @@ def collect(client: httpx.Client, site: str, limit: int) -> list[dict[str, Any]]
         subject = " ".join([title, *cats]).lower()
         if any(w in subject for w in EXCLUDE_WORDS):
             continue
-        if title not in in_category and not any(w in " ".join([subject, desc.lower()]) for w in SITE_WORDS[site]):
+        if title not in in_category and not any(w in f"{subject} {desc.lower()}" for w in SITE_WORDS[site]):
             continue
         cands.append({
             "title": title,

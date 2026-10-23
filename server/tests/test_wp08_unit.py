@@ -158,9 +158,12 @@ class _ThemeEdge(_Edge):
     def __init__(self) -> None:
         super().__init__()
         self.themes: list[tuple[str, str, str]] = []
+        self.credits: list[tuple[str, str]] = []
 
-    async def send_theme(self, site: str, name: str, avatar: str, background: str) -> None:
+    async def send_theme(self, site: str, name: str, avatar: str, background: str,
+                         credit: str = "", anchor: str = "center") -> None:
         self.themes.append((name, avatar, background))
+        self.credits.append((credit, anchor))
 
 
 async def test_theme_switches_only_when_nobody_is_there(tmp_path: Path, monkeypatch: Any) -> None:

@@ -40,6 +40,10 @@ export interface ThemeMessage {
   name?: string;
   avatar?: string;
   background?: string;
+  /** 背景写真のクレジット（画面右下。空・無しなら出さない。WP10） */
+  background_credit?: string;
+  /** 縦置きの画面で背景のどこを見せるか（background-position の横位置。WP10） */
+  background_anchor?: "left" | "center" | "right";
 }
 
 /** 応答が使った参考資料の出典タイトル（字幕の下に薄く出す。読み上げない。WP03） */
