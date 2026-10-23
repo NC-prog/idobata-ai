@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 STATUSES = ("draft", "approved", "recheck")
 STATUS_LABELS = {"draft": "下書き", "approved": "承認済み", "recheck": "要再確認"}
+# 開発者がまとめて仮に承認したものの approved_by（scripts/approve_procedures.py）。職員が承認し直すとログイン名に替わる
+PROVISIONAL_BY = "developer（仮承認）"
 # Reference.trust の値（手続きナレッジから作った参考資料の印）
 PROCEDURE_TRUST = "procedure"
 PROCEDURE_LABEL = "市の案内（承認済み）"
@@ -141,6 +143,21 @@ class ProcedureRecord:
         url = self.sources[0].url if self.sources else ""
         return Reference(self.name, url, self.facts_text(department_line), 1.0, 0.0,
                          trust=PROCEDURE_TRUST, label=PROCEDURE_LABEL, chunk_id=f"procedure:{self.id}")
+
+    @property
+    def provisional(self) -> bool:
+        """開発者の仮承認のまま（職員が承認し直していない）。"""
+        return self.approved_by == PROVISIONAL_BY
+
+    def provisional_skip_reason(self) -> str | None:
+        """仮承認の対象にしない理由（下書きで、出典が 1 件以上、持ち物か手順のどちらかがあるものだけが対象）。"""
+        if self.status != "draft":
+            return f"状態が{STATUS_LABELS.get(self.status, self.status)}"
+        if not self.sources:
+            return "出典なし"
+        if not self.bring and not self.steps:
+            return "持ち物・手順が空"
+        return None
 
     def blank_fields(self) -> list[str]:
         """空欄の項目（下書きの要約表に使う）。"""

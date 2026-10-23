@@ -179,3 +179,70 @@ def test_read_queue_dedupes(tmp_path: Path) -> None:
                     encoding="utf-8")
     assert build.read_queue(root, "etajima") == ["道の駅 イベント", "秋祭り"]
     assert build._overlap("秋祭り", "能美の秋祭りを開催します") == 1.0
+
+
+def test_fetch_wiped_out_and_shrink_guard() -> None:
+    assert build.fetch_wiped_out({"fetched": 0, "failed": 120})
+    assert not build.fetch_wiped_out({"fetched": 0, "failed": 0})  # 何も取りに行かなかった
+    assert not build.fetch_wiped_out({"cache_fresh": 3, "failed": 120})
+    assert not build.fetch_wiped_out({"not_modified": 1, "failed": 5})
+    assert build.shrink_refused(400, 150)
+    assert not build.shrink_refused(400, 250)
+    assert not build.shrink_refused(0, 10)  # 初回
+
+
+class _FakeCrawler:
+    def __init__(self, *_: Any) -> None:
+        self.stats = {"fetched": 0, "not_modified": 0, "cache_fresh": 0, "rendered": 0, "failed": 0,
+                      "robots_blocked": 0}
+
+    def close(self) -> None:
+        pass
+
+
+def _run_main_offline(monkeypatch: Any, tmp_path: Path, argv: list[str]) -> tuple[int, Path]:
+    """市のサイトがメンテ（403）・名前解決の失敗の日を真似て main を回す。今の版は残るはず。"""
+    monkeypatch.setattr(build, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(build, "link_pack", lambda *_: None)
+    old = tmp_path / "kb" / "etajima.versions" / "20261022060000"
+    old.mkdir(parents=True)
+    (old / "weather.json").write_text('{"old": true}', encoding="utf-8")
+    (old / "chunks.parquet").write_text("", encoding="utf-8")
+    (tmp_path / "kb" / "etajima").symlink_to(old, target_is_directory=True)
+    (tmp_path / "kb" / "etajima.seed_queue.jsonl").write_text('{"q": "犬の登録"}\n', encoding="utf-8")
+
+    def no_weather(*_: Any) -> dict[str, Any]:
+        raise httpx.ConnectError("[Errno -3] Temporary failure in name resolution")
+
+    def crawl_403(_src: Any, crawler: Any, daily: bool = False) -> list[Any]:
+        crawler.stats["failed"] = 87
+        return []
+
+    monkeypatch.setattr(build, "build_weather", no_weather)
+    monkeypatch.setattr(build, "Crawler", _FakeCrawler)
+    monkeypatch.setattr(build, "crawl", crawl_403)
+    monkeypatch.setattr(build, "read_queue", lambda *_: [])
+    monkeypatch.setattr("sys.argv", ["build.py", "--site", "etajima", *argv])
+    return build.main(), old
+
+
+def test_wiped_out_daily_keeps_current_pack_and_weather(monkeypatch: Any, tmp_path: Path) -> None:
+    code, old = _run_main_offline(monkeypatch, tmp_path, ["--daily"])
+    assert code == 1
+    assert (tmp_path / "kb" / "etajima").resolve() == old.resolve()
+    assert [p.name for p in (tmp_path / "kb" / "etajima.versions").iterdir()] == [old.name]
+    assert json.loads((old / "weather.json").read_text(encoding="utf-8")) == {"old": True}
+    assert (tmp_path / "kb" / "etajima.seed_queue.jsonl").is_file()  # 夜に回された検索語は次に回す
+
+
+def test_wiped_out_full_keeps_current_pack(monkeypatch: Any, tmp_path: Path) -> None:
+    code, old = _run_main_offline(monkeypatch, tmp_path, [])
+    assert code == 1
+    assert (tmp_path / "kb" / "etajima").resolve() == old.resolve()
+    assert len(list((tmp_path / "kb" / "etajima.versions").iterdir())) == 1
+
+
+def test_weather_only_failure_keeps_old_weather(monkeypatch: Any, tmp_path: Path) -> None:
+    code, old = _run_main_offline(monkeypatch, tmp_path, ["--weather-only"])
+    assert code == 1
+    assert json.loads((old / "weather.json").read_text(encoding="utf-8")) == {"old": True}

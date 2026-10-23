@@ -521,3 +521,67 @@ async def test_floor_of_department_without_known_floor_is_removed() -> None:
                  DialogueConfig(), facility=aki, now=_NOON)
     out = "".join(await _collect(d, "固定資産税のことなんじゃけど"))
     assert "2階" not in out and "税務住民課へお声がけください。" in out
+
+
+# ---- 開発者の仮承認（scripts/approve_procedures.py） ---------------------------
+
+
+def test_provisional_targets_need_sources_and_content(tmp_path: Path, capsys: object) -> None:
+    import importlib
+    import sys
+
+    from src.procedure_kb import PROVISIONAL_BY
+
+    d = _book(tmp_path, _rec(), _rec(id="nosrc", name="出典なし", sources=[]),
+              _rec(id="empty", name="中身なし", bring=[], steps=[]),
+              _rec(id="steps_only", name="手順だけ", bring=[]))
+    seeded = {r.id for r in ProcedureBook(d).records() if r.status == "approved"}
+    sys.path.insert(0, str(SERVER_ROOT.parent / "scripts"))
+    ap = importlib.import_module("approve_procedures")
+    # --yes が無ければ何もしない
+    assert ap.run("etajima", yes=False, directory=d) == (2, 2 + len(seeded))
+    book = ProcedureBook(d)
+    assert all(r.status == "draft" for r in book.records() if r.id not in seeded)
+    out = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "nosrc" in out and "出典なし" in out and "持ち物・手順が空" in out
+    ap.run("etajima", yes=True, directory=d)
+    book.reload_if_changed()
+    by = {r.id: r for r in book.records()}
+    assert by["juminhyo"].provisional and by["steps_only"].provisional and by["juminhyo"].approved_at
+    assert by["juminhyo"].approved_by == PROVISIONAL_BY
+    assert by["nosrc"].status == "draft" and by["empty"].status == "draft"
+    assert not any(by[i].provisional for i in seeded)  # 移行の承認はそのまま
+
+
+async def test_staff_panel_shows_provisional_and_reapproval_replaces_it(tmp_path: Path) -> None:
+    import httpx
+
+    from src.config import StaffConfig
+    from src.edge_server import StaffPanel, create_app
+    from src.procedure_kb import PROVISIONAL_BY
+    from src.procedure_panel import ProcedurePanel
+    from src.referrals import ReferralStore, VisitLog
+
+    d = _book(tmp_path, _rec())
+    procs = load_procedures(SERVER_ROOT / "context", d)
+    assert procs.book is not None
+    procs.book.approve("juminhyo", PROVISIONAL_BY)
+
+    async def runner(record: object, q: str) -> str:
+        return ""
+
+    depts = tuple(x.name for x in FAC.departments)
+    panel = StaffPanel(ReferralStore(tmp_path, "etajima", 30, csv_export=False), VisitLog(tmp_path, "etajima"),
+                       StaffConfig(password="pw"), departments=depts,
+                       procedures=ProcedurePanel(procs.book, tmp_path, depts, runner))
+    transport = httpx.ASGITransport(app=create_app(tmp_path / "none", panel), client=("192.168.1.20", 5000))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        auth = ("staff", "pw")
+        rows = (await c.get("/staff/api/procedures?status=provisional", auth=auth)).json()
+        assert [r["id"] for r in rows] == ["juminhyo"] and rows[0]["provisional"]
+        assert (await c.get("/staff/api/procedures/juminhyo", auth=auth)).json()["provisional"]
+        assert "仮承認" in (await c.get("/staff/procedures/", auth=auth)).text
+        # 仮承認の名前を名乗って押してもログイン名になる
+        r = await c.post("/staff/api/procedures/juminhyo/approve", auth=auth, json={"by": PROVISIONAL_BY})
+        assert r.json()["approved_by"] == "staff" and not r.json()["provisional"]
+        assert (await c.get("/staff/api/procedures?status=provisional", auth=auth)).json() == []

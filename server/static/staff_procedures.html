@@ -20,6 +20,7 @@
   .st-draft { background:var(--draft); }
   .st-recheck { background:var(--recheck); color:#b00020; font-weight:bold; }
   .st-approved { background:var(--ok); }
+  .prov { display:inline-block; margin-left:4px; padding:0 5px; border-radius:3px; background:#e65100; color:#fff; font-size:12px; font-weight:bold; }
   .mut { color:var(--mut); font-size:12px; }
   label { display:block; margin-top:8px; font-size:13px; font-weight:bold; }
   input[type=text], textarea, select { width:100%; box-sizing:border-box; font-size:14px; font-family:inherit; }
@@ -40,7 +41,7 @@
 （下書き・要再確認の手続きは「担当の課でご案内します」と伝えます）。出典のページを開いて内容を確かめてから承認してください。</p>
 <label style="display:inline">状態で絞り込み
   <select id="filter" style="width:auto" onchange="loadList()">
-    <option value="">すべて</option><option value="recheck">要再確認</option><option value="draft">下書き</option><option value="approved">承認済み</option>
+    <option value="">すべて</option><option value="recheck">要再確認</option><option value="draft">下書き</option><option value="approved">承認済み</option><option value="provisional">仮承認</option>
   </select></label>
 <span class="mut" id="counts"></span>
 <div class="wrap">
@@ -65,12 +66,13 @@ async function loadList() {
     fetch("../api/procedures").then((r) => r.json()),
   ]);
   const n = (s) => all.filter((x) => x.status === s).length;
-  document.getElementById("counts").textContent = `　全 ${all.length} 件（承認済み ${n("approved")}・下書き ${n("draft")}・要再確認 ${n("recheck")}）`;
+  const prov = all.filter((x) => x.provisional).length;
+  document.getElementById("counts").textContent = `　全 ${all.length} 件（承認済み ${n("approved")}・うち仮承認 ${prov}・下書き ${n("draft")}・要再確認 ${n("recheck")}）`;
   document.getElementById("rows").innerHTML = rows.map((r) => `
     <tr class="${current === r.id ? "sel" : ""}" onclick='openDetail("${esc(r.id)}")'>
       <td>${esc(r.name)}<div class="mut">${esc(r.id)}</div></td>
       <td>${esc(r.department) || '<span class="warn">未定</span>'}</td>
-      <td class="st-${esc(r.status)}">${esc(r.status_label)}${r.recheck_reason ? `<div class="mut">${esc(r.recheck_reason)}</div>` : ""}</td>
+      <td class="st-${esc(r.status)}">${esc(r.status_label)}${r.provisional ? '<span class="prov" title="開発者の仮承認。担当課で確かめて承認し直してください">仮</span>' : ""}${r.recheck_reason ? `<div class="mut">${esc(r.recheck_reason)}</div>` : ""}</td>
       <td>${esc(r.checked_at) || '<span class="warn">出典なし</span>'}</td>
       <td>${r.faq}</td>
     </tr>`).join("") || `<tr><td colspan="5" class="mut">ありません</td></tr>`;
@@ -85,8 +87,8 @@ async function openDetail(id) {
   const d = await fetch(`../api/procedures/${id}`).then((r) => r.json());
   const opts = ["", ...DEPTS].map((n) => `<option ${n === (d.department ?? "") ? "selected" : ""}>${esc(n)}</option>`).join("");
   document.getElementById("detail").innerHTML = `
-    <h2 style="margin-top:0">${esc(d.name)} <span class="st-${esc(d.status)}" style="font-size:14px;padding:2px 6px">${esc(d.status_label)}</span></h2>
-    <div class="mut">${d.approved_at ? `承認: ${esc(d.approved_by)}（${esc(d.approved_at)}）` : "未承認"}${d.recheck_reason ? `　<span class="warn">要再確認: ${esc(d.recheck_reason)}</span>` : ""}</div>
+    <h2 style="margin-top:0">${esc(d.name)} <span class="st-${esc(d.status)}" style="font-size:14px;padding:2px 6px">${esc(d.status_label)}</span>${d.provisional ? '<span class="prov">仮</span>' : ""}</h2>
+    <div class="mut">${d.approved_at ? `承認: ${esc(d.approved_by)}（${esc(d.approved_at)}）${d.provisional ? "　<b>開発者の仮承認です。担当課で内容を確かめて「承認」を押し直してください</b>" : ""}` : "未承認"}${d.recheck_reason ? `　<span class="warn">要再確認: ${esc(d.recheck_reason)}</span>` : ""}</div>
     <div>出典: ${(d.sources || []).map((s) => `<div><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a> <span class="mut">確認 ${esc(s.checked_at)}</span></div>`).join("") || '<span class="warn">なし（内容は担当課で確かめてください）</span>'}</div>
     ${d.staff_note ? `<label>下書き・職員のメモ</label><div class="note">${esc(d.staff_note)}</div>` : ""}
     <label>手続き名</label><input type="text" id="f-name" value="${esc(d.name)}">
@@ -104,7 +106,7 @@ async function openDetail(id) {
     <label>職員のメモ（ふだんの言い回し・注意。案内役にも渡します）</label><textarea id="f-staff_note" rows="3">${esc(d.staff_note)}</textarea>
     <div style="margin-top:12px">
       <button onclick="save()">保存</button>
-      ${d.status !== "approved" ? `<button class="primary" onclick="act('approve')">内容を確かめたので承認する</button>` : ""}
+      ${d.status !== "approved" || d.provisional ? `<button class="primary" onclick="act('approve')">内容を確かめたので承認する${d.provisional ? "（仮承認を置き換える）" : ""}</button>` : ""}
       ${d.status !== "draft" ? `<button onclick="act('send_back')">差し戻し（下書きに）</button>` : ""}
       ${d.status === "recheck" ? `<button onclick="act('clear_recheck')">要再確認を解除</button>` : ""}
       <span class="mut" id="msg"></span>

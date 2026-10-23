@@ -62,6 +62,8 @@ HTTP_TIMEOUT_SEC = 20.0
 RENDER_TIMEOUT_MS = 30000
 SITEMAP_MAX_DEPTH = 2
 HTTP_RETRIES = 2
+# 全体の作り直しで、採用ページが前の版のこの割合を下回ったら版を差し替えない（市のサイトの障害・メンテで痩せたパックにしない）
+FULL_MIN_PAGE_RATIO = 0.5
 
 
 def data_dir() -> Path:
@@ -990,6 +992,17 @@ def link_pack(site: str, target: Path) -> None:
     link.symlink_to(target, target_is_directory=True)
 
 
+def fetch_wiped_out(stats: dict[str, int]) -> bool:
+    """取得が全滅したか（1 件も取れず、失敗だけがある。メンテ中の 403・名前解決の失敗など）。"""
+    ok = sum(stats.get(k, 0) for k in ("fetched", "not_modified", "cache_fresh", "rendered"))
+    return ok == 0 and stats.get("failed", 0) > 0
+
+
+def shrink_refused(previous_pages: int, new_pages: int, ratio: float = FULL_MIN_PAGE_RATIO) -> bool:
+    """全体の作り直しで、前の版よりページが大きく減ったか（差し替えない）。"""
+    return previous_pages > 0 and new_pages < previous_pages * ratio
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="井戸端AI 知識パックのビルド")
     ap.add_argument("--site", required=True)
@@ -999,6 +1012,8 @@ def main() -> int:
                     help="毎朝: daily の区画だけを深さ 1 で取り、変わったページだけ作り直して差し替える")
     ap.add_argument("--from-cache", action="store_true",
                     help="取得し直さず、今のパックのページをキャッシュから作り直す（チャンク・人名除去の変更用）")
+    ap.add_argument("--allow-shrink", action="store_true",
+                    help="全体の作り直しでページが前の版の半分を下回っても差し替える（sources を絞ったときだけ）")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         stream=sys.stdout)
@@ -1013,14 +1028,21 @@ def main() -> int:
     pack = current_pack(root, args.site)  # 今の版（天気はここを書き換える）
     link_pack(args.site, root / args.site)
 
-    with httpx.Client(headers={"User-Agent": src.user_agent}, timeout=HTTP_TIMEOUT_SEC) as client:
-        weather = build_weather(src, client)
-    write_json(pack / "weather.json", weather)
-    for f in weather["forecasts"]:
-        logger.info("天気: %s %s %s %s", f["date"], f["region"], f["weather"], f["pops"])
-    logger.info("気温: %s", weather.get("observation"))
-    if args.weather_only:
-        return 0
+    try:
+        with httpx.Client(headers={"User-Agent": src.user_agent}, timeout=HTTP_TIMEOUT_SEC) as client:
+            weather = build_weather(src, client)
+    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+        # 取れなければ前の weather.json のまま（フロントは古い天気を日付で判断する）。パックの更新は続ける
+        logger.error("天気の取得に失敗しました。前の天気のままにします: %s", exc)
+        if args.weather_only:
+            return 1
+    else:
+        write_json(pack / "weather.json", weather)
+        for f in weather["forecasts"]:
+            logger.info("天気: %s %s %s %s", f["date"], f["region"], f["weather"], f["pops"])
+        logger.info("気温: %s", weather.get("observation"))
+        if args.weather_only:
+            return 0
 
     crawler = Crawler(src, root / "cache" / args.site)
     t0 = time.monotonic()
@@ -1037,6 +1059,10 @@ def main() -> int:
     finally:
         crawler.close()
     logger.info("取得完了: 採用 %d ページ, %s, %.0f 秒", len(pages), crawler.stats, time.monotonic() - t0)
+    if not args.from_cache and fetch_wiped_out(crawler.stats):
+        # 新しい版は作らない（今の版をそのまま使う。夜に回された検索語も残して次に回す）
+        logger.error("取得が全滅しました（%s）。今の版のままにします", crawler.stats)
+        return 1
     previous, reuse = load_previous(pack)
     merge_stats: dict[str, int] = {}
     if args.daily:
@@ -1053,6 +1079,12 @@ def main() -> int:
             return 0
     else:
         chunks = make_chunks(pages)
+        prev_pages = len({c.source_url for c in previous})
+        new_pages = len({c.source_url for c in chunks})
+        if not args.allow_shrink and shrink_refused(prev_pages, new_pages):
+            logger.error("ページが前の版の %d から %d に減りました（%.0f%% 未満）。取得の障害とみなし、今の版のままにします"
+                         "（意図して絞ったときは --allow-shrink）", prev_pages, new_pages, FULL_MIN_PAGE_RATIO * 100)
+            return 1
     logger.info("チャンク %d 件", len(chunks))
     if not chunks:
         logger.error("チャンクが 0 件です。sources を見直してください")
