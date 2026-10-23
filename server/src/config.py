@@ -502,11 +502,23 @@ class DialogueConfig:
     crisis_lines: tuple[str, ...] = (
         "話してくださって、ありがとうございます。",
         "今すぐ危ないときは、110番に電話してください。",
+        "{line}",
         "{consult}",
         "近くの職員を呼びますので、よければ、ここで少しお待ちください。",
+        "{others}",
     )
-    # {consult} に入れる相談先（facility の課で、handles に次の語があるもの・緊急連絡先で名前に次の語があるもの）
-    crisis_consult_keywords: tuple[str, ...] = ("地域包括支援センター", "高齢者総合相談", "生活困窮", "こころ", "DV", "配偶者暴力", "人権")
+    # 打ち明けの種類（上から順に見る。当たらなければ other）。種類の番号（facility.emergency_lines の crisis）を 1 つだけ読み上げる
+    crisis_topics: tuple[tuple[str, str], ...] = (
+        ("abuse", r"虐待|(親|父|母|お父さん|お母さん|おとうさん|おかあさん)(に|から)[^。]{0,8}(叩か|たたか|殴ら|なぐら|蹴ら|けら)れ"),
+        ("dv", (r"DV|ＤＶ|(夫|妻|旦那|主人|嫁|彼氏|彼女|パートナー|配偶者|つれあい|連れ合い)(に|から)[^。]{0,8}"
+                r"(叩|たた|殴|なぐ|蹴|け|暴力|首を絞)")),
+        ("kokoro", r"死にたい|しにたい|死んでしまいたい|死のうと|消えてしまいたい|消えたい|自殺|生きていたくない|生きるのが|命を絶"),
+    )
+    crisis_line_sentence: str = "{name}は、{number}です。"
+    # 読み上げなかった相談先は字幕だけに出す（括弧書きは読み上げない。speech_text）
+    crisis_others_sentence: str = "（ほかの相談先: {lines}）"
+    # {consult} に入れる相談先（facility のこの建物の課で、handles に次の語があるもの）
+    crisis_consult_keywords: tuple[str, ...] = ("地域包括支援センター", "高齢者総合相談", "生活困窮")
     crisis_consult_sentence: str = "{places}でも、相談を受けています。"
     # 相談先が facility に無いとき（{consult} の代わり）
     crisis_consult_fallback: str = ""

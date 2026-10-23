@@ -237,6 +237,11 @@ _ZEN_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 _DATE_RE = re.compile(r"[0-9０-９]{1,2}月[0-9０-９]{1,2}日")
 
 
+def _short_name(name: str) -> str:
+    """相談先の名前の括弧書き（説明）を除いた呼び名。"""
+    return re.split(r"[（(]", name, maxsplit=1)[0].strip()
+
+
 def speech_text(sentence: str) -> str:
     """読み上げる文（括弧書きは字幕だけに残し、読み上げない）。"""
     return re.sub(r"\s+", " ", _PAREN_RE.sub("", sentence)).strip()
@@ -644,7 +649,8 @@ class Dialogue:
         cfg = self._cfg
         self.last_proposal = None
         if kind == "crisis":
-            lines = [x.format(consult=self._consult_sentence()) for x in cfg.crisis_lines]
+            line, others = self._crisis_lines(text)
+            lines = [x.format(consult=self._consult_sentence(), line=line, others=others) for x in cfg.crisis_lines]
         elif kind == "lost_child":
             lines = list(cfg.lost_child_lines)
         elif kind == "other_person":
@@ -676,15 +682,32 @@ class Dialogue:
             logger.info("定型で答えます（%s）", kind)
         return [x for x in lines if x]
 
+    def crisis_topic(self, text: str) -> str:
+        """深刻な打ち明けの種類（abuse / dv / kokoro / other）。"""
+        return next((k for k, p in self._cfg.crisis_topics if re.search(p, text)), "other")
+
+    def _crisis_lines(self, text: str) -> tuple[str, str]:
+        """種類に合う相談先の番号を 1 つ（読み上げる文）と、残りの相談先（字幕だけの括弧書き）。"""
+        lines = [e for e in (self._facility.emergency_lines if self._facility else ()) if e.crisis]
+        if not lines:
+            return "", ""
+        topic = self.crisis_topic(text)
+        pick = next((e for e in lines if e.crisis == topic), None) or next((e for e in lines if e.crisis == "other"), None)
+        said = ""
+        if pick is not None:
+            said = self._cfg.crisis_line_sentence.format(name=_short_name(pick.name), number=pick.spoken or pick.number)
+        rest = [f"{_short_name(e.name)} {e.number}" for e in lines if e is not pick]
+        others = self._cfg.crisis_others_sentence.format(lines="／".join(rest)) if rest else ""
+        return said, others
+
     def _consult_sentence(self) -> str:
-        """深刻な打ち明けの相談先（facility の課・緊急連絡先から。無ければ crisis_consult_fallback）。"""
+        """深刻な打ち明けの相談先（facility のこの建物の課から。無ければ crisis_consult_fallback）。"""
         f = self._facility
         if f is None:
             return self._cfg.crisis_consult_fallback
         keys = self._cfg.crisis_consult_keywords
         places = [self._department_line(d.name) for d in f.departments if not d.place
                   and any(k in h for h in d.handles for k in keys)]
-        places += [f"{e.name.split('（')[0]}（{e.number}）" for e in f.emergency_lines if any(k in e.name for k in keys)]
         if not places:
             return self._cfg.crisis_consult_fallback
         return self._cfg.crisis_consult_sentence.format(places="や".join(places))
@@ -880,6 +903,14 @@ class Dialogue:
                 logger.info("課の階を施設の事実に直しました（%s）", d.name)
                 sentence = fixed
         for d in (self._facility.departments if self._facility else ()):
+            if not d.floor and not d.place and d.name in sentence:
+                # 階の分からない課（安芸太田は課の階が拠点 YAML に無い）の「〇〇課は本庁舎の2階にあります」は作り話
+                m = re.search(rf"{re.escape(d.name)}(は|が)[^。]{{0,8}}[0-9０-９一二三四五]階(に|で)(あり|ござい)[^、。]*[、。]?", sentence)
+                if m:
+                    logger.info("階の分からない課の階を言う部分を外しました（%s）", d.name)
+                    self.note_drop("階の分からない課の階", m.group(0))
+                    sentence = sentence.replace(m.group(0), "")
+                continue
             if d.floor or not d.place or d.name not in sentence:
                 continue
             # この建物に無い課の「（2階）」「（にこ♡にこハウス）」の作り話を、拠点 YAML の場所に直す
