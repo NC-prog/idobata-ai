@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from .config import AdminConfig, StaffConfig
 from .edge_bridge import allowed_peer
 from .knowledge import JST
+from .procedure_kb import PROVISIONAL_BY
 from .procedure_panel import ProcedurePanel
 from .procedures import AsrFixes
 from .referrals import ReferralStore, TidbitStore, VisitLog, today_stats
@@ -307,7 +308,8 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
         p = procs()
         try:
             if action == "approve":
-                p.book.approve(rid, (body.by.strip() if body else "") or login_name(request))
+                by = body.by.strip() if body else ""
+                p.approve(rid, by if by and by != PROVISIONAL_BY else login_name(request))
             elif action == "send_back":
                 p.book.send_back(rid)
             elif action == "clear_recheck":

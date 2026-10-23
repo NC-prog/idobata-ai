@@ -479,7 +479,7 @@ crisis と lost_child のときは、**職員パネルの上に赤で「職員�
 
 ## 6. 品質・テスト・コミット
 
-- `uv run pytest`: 424 passed（5 deselected＝integration）。`uv run pytest -m integration`: 5 passed（実サービス）
+- `uv run pytest`: 424 passed（8 章の後は 428 passed。`kb/` は 16 passed）（5 deselected＝integration）。`uv run pytest -m integration`: 5 passed（実サービス）
 - `uv run mypy --strict src`: Success（33 files）。`scripts/draft_procedures.py`・`scripts/check_procedures.py` も strict で通る
 - `uv run ruff check`: All checks passed
 - `(cd edge && npm run typecheck && npm run build)`: 通る
@@ -549,6 +549,58 @@ seed を足して（教育課のページ /soshiki/14/ から黎明館の交流�
 | kujo | **町のページに記載なし**（意見・要望の窓口の記事が無い。各課のページにメールのお問い合わせフォームがあるだけ） | — |
 
 出典なし（中身が全部空）は 11 件 → 2 件（senkyo・kujo）。
+
+## 8. 追加作業（2026-10-23 夕方）: 開発者の仮承認と、市のサイトのメンテ中の知識パック
+
+### 8-1. 開発者の仮承認（`scripts/approve_procedures.py`）
+
+人間が明示的に実行するスクリプト（対話・職員パネルの経路からは呼ばない）。
+
+    cd server && uv run python ../scripts/approve_procedures.py --site etajima --provisional          # 対象と対象外の一覧だけ
+    cd server && uv run python ../scripts/approve_procedures.py --site etajima --provisional --yes    # 実行
+
+- 対象: 状態が下書き、出典（sources）が 1 件以上、持ち物（bring）か流れ（steps）のどちらかがあるもの。
+  `approved_by: developer（仮承認）`、`approved_at` は実行した時刻。出典なし・中身が空・承認済み（移行の 3 件）は対象外
+- `--provisional` が無ければ動かない。`--yes` が無ければ一覧を出すだけ
+- 職員パネル: 一覧の状態の欄と詳細の見出しに「仮」のバッジ、件数に「うち仮承認」、絞り込みに「仮承認」（`?status=provisional`）。
+  仮承認のものにも「内容を確かめたので承認する（仮承認を置き換える）」のボタンを出し、押すとログイン名の通常の承認に置き換わる
+  （`by` に `developer（仮承認）` を名乗っても職員パネルからはログイン名になる）。承認済みを職員が編集したときも、従来どおり編集した人の承認になる
+- 実行前の手続きナレッジは開発機の作業用ディレクトリに写しを取ってから実行した
+
+| 拠点 | 仮承認した | 下書きのまま: 出典なし | 下書きのまま: 持ち物・流れが空 | 移行の承認 |
+|---|---|---|---|---|
+| 江田島 | **32** | 3（furusato・kanko・senkyo） | 12（gomi・iju・inu_toroku・jutaku_hojo・kotei_shisan・kouki_korei・nogyo・shisetsu_yoyaku・shizei_nofu・shuro・sodai_gomi・suido） | 3 |
+| 安芸太田 | **29** | 2（kujo・senkyo） | 16（furusato・houkatsu・jido_teate・kanko・kodomo_iryo・kotei_shisan・kouki_korei・mynumber_apply・mynumber_renew・passport・seijinshiki・seikatsu_hogo・shizei_nofu・shogai_techo・suido・toshokan） | 3 |
+
+市への確認事項 6 に「仮承認 61 件を担当課で再確認」を足した。
+
+### 8-2. 市のサイトのメンテ中（403）の知識パックと天気
+
+**ログ（`journalctl --user`、2026-10-23）**
+
+- 有効なタイマーは **江田島だけ**（`kb-daily@etajima`・`kb-weather@etajima`・`kb-full@etajima`）。`install-kb-timers.sh` は拠点ごと（省略時は `.env` の拠点）で、
+  この機体は江田島だけを入れている。**安芸太田のパックは自動では更新されていない**（今朝の安芸太田のログは無い）
+- 毎朝の差分（6:00）は、6:00 に機体が止まっていたため、起動直後の **08:45:13 に追いかけて実行** され、ネットワークがまだ上がっておらず
+  天気の取得で `httpx.ConnectError: [Errno -3] Temporary failure in name resolution` で異常終了。**市のサイトには取りに行っていない**
+  （403 の経路は今朝のタイマーでは通っていない）
+- 毎時の天気は 08:45 が同じ名前解決の失敗、09:05・10:05・11:05 は成功（気象庁は市のサイトのメンテと関係ない）
+- **置き換えの有無**: 今の版は `etajima.versions/` の前の版のまま、`weather.json` は 08:45 には書き換わらず 09:05 に更新。空のパックでの置き換えは起きていない
+- なお、この作業の時点（夕方）では両サイトとも `200` が返った
+
+**コードを読んで分かった弱いところ（直した。`kb/build.py`）**
+
+| 場合 | 直す前 | 直した後 |
+|---|---|---|
+| 天気が取れない（毎朝・毎週の中で） | 例外で **パックの更新ごと止まる**（今朝の 08:45 がこれ） | 前の `weather.json` のまま、パックの更新は続ける。`--weather-only` は終了コード 1 |
+| 毎朝の差分で取得が全滅（403・名前解決） | 取れたページが 0 なので「変わったページがない」となり版は作らないが、**夜に回された検索語（seed_queue）を消していた** | 「取得が全滅しました」で終了コード 1。版は作らず、検索語も残す |
+| 毎週の全体で取得が全滅 | チャンク 0 件で終了コード 1（版は作らない） | 全滅の判定で先に止める（同じく版を作らない） |
+| 毎週の全体で一部だけ取れた（メンテ中にキャッシュの新しいページだけ残る など） | **取れた分だけの痩せたパックで置き換えていた** | ページ数が前の版の半分（`FULL_MIN_PAGE_RATIO = 0.5`）を下回ったら差し替えない。sources を意図して絞ったときは `--allow-shrink` |
+
+全滅の判定は、取得の集計で「取れた（fetched・not_modified・cache_fresh・rendered）が 0 で、失敗が 1 以上」。
+テストは `kb/tests/test_build.py` に 4 件（判定の関数・毎朝の全滅で今の版と天気と検索語が残る・毎週の全滅・天気だけの失敗）。
+
+**手を付けていないこと**: 起動直後にネットワークより先にタイマーが走る件（ユーザーのタイマーは `network-online.target` を待てない）。
+全滅の扱いで版は守られるので、そのままにした。安芸太田も自動で更新するなら `bash deploy/standalone/install-kb-timers.sh akiota`（未実施。持ち回りのデモ機で両方回すかは判断を待つ）。
 
 ## 付録 A. 材料の候補ページ（`--candidates`）と選んだページ
 

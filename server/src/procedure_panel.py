@@ -20,6 +20,7 @@ from typing import Any
 
 from .knowledge import JST
 from .procedure_kb import (
+    PROVISIONAL_BY,
     STATUS_LABELS,
     ProcedureBook,
     ProcedureRecord,
@@ -43,7 +44,7 @@ def summary_row(r: ProcedureRecord) -> dict[str, Any]:
     return {"id": r.id, "name": r.name, "department": r.department, "status": r.status,
             "status_label": STATUS_LABELS.get(r.status, r.status), "checked_at": checked,
             "faq": len(r.faq), "sources": len(r.sources), "recheck_reason": r.recheck_reason,
-            "approved_by": r.approved_by, "approved_at": r.approved_at}
+            "approved_by": r.approved_by, "approved_at": r.approved_at, "provisional": r.provisional}
 
 
 def parse_bring(lines: list[Any]) -> list[Any]:
@@ -72,7 +73,13 @@ class ProcedurePanel:
         self.try_timeout_sec = try_timeout_sec
 
     def rows(self, status: str | None = None) -> list[dict[str, Any]]:
-        rows = [summary_row(r) for r in self.book.records() if not status or r.status == status]
+        """一覧。status は draft/approved/recheck のほか provisional（開発者の仮承認のまま）。"""
+        records = self.book.records()
+        if status == "provisional":
+            records = [r for r in records if r.provisional]
+        elif status:
+            records = [r for r in records if r.status == status]
+        rows = [summary_row(r) for r in records]
         # 要再確認を先に（目立たせる）、次に下書き、承認済み
         order = {"recheck": 0, "draft": 1, "approved": 2}
         return sorted(rows, key=lambda x: (order.get(x["status"], 3), x["id"]))
@@ -83,8 +90,15 @@ class ProcedurePanel:
             return None
         d = record_to_dict(r)
         d["status_label"] = STATUS_LABELS.get(r.status, r.status)
+        d["provisional"] = r.provisional
         d["bring_lines"] = [b.item + (" | " + "、".join(b.when) if b.when else "") for b in r.bring]
         return d
+
+    def approve(self, rid: str, by: str) -> None:
+        """職員の承認（仮承認のものを押し直すと、職員の名前の通常の承認に置き換わる）。"""
+        if not by.strip() or by.strip() == PROVISIONAL_BY:
+            raise ValueError("承認する人の名前が要ります")
+        self.book.approve(rid, by.strip())
 
     def edit(self, rid: str, fields: dict[str, Any], by: str) -> dict[str, Any]:
         r = self.book.get(rid)
