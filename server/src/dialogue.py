@@ -1441,13 +1441,10 @@ class Dialogue:
                 logger.info("発話の名詞が題名・本文の先頭に無い資料を %d 件外しました", len(refs) - len(kept))
             refs = kept
         if scope.distinct_pages:
-            seen: set[str] = set()
-            distinct: list[Reference] = []
-            for r in refs:
-                if r.source_url not in seen:
-                    seen.add(r.source_url)
-                    distinct.append(r)
-            refs = distinct
+            # 上位 top_k ページまで。そのページのチャンクは全部渡す（2 チャンク目だけに担当の課が書いてあるページがある:
+            # 「住民異動に関する届出」の 1 チャンク目は後期高齢者医療・介護保険の段で、高齢介護課と言った）
+            pages = list(dict.fromkeys(r.source_url for r in refs))[: scope.top_k]
+            return [r for r in refs if r.source_url in pages]
         return refs[: scope.top_k]
 
     def _expand_dates(self, text: str) -> str:

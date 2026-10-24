@@ -645,8 +645,8 @@ class IntentScope:
     need_noun: bool = False
     news: bool = False
     only_without_approved: bool = False
-    # 同じページのチャンクは 1 件と数える（手続きの上位 2 件が「イノシシに注意」の 2 チャンクで埋まり、
-    # 担当の課の載ったページが落ちた。WP13 C の手続き 100 問の 96 番）
+    # 件数をページで数える（そのページのチャンクは全部渡す）。手続きの上位 2 件が「イノシシに注意」の 2 チャンクで埋まり、
+    # 担当の課の載ったページが落ちた（WP13 C の手続き 100 問の 96 番）
     distinct_pages: bool = False
 
 

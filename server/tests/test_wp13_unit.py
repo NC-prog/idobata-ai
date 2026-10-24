@@ -269,7 +269,8 @@ async def test_approved_procedure_reply_gets_department_when_missing() -> None:
 
 
 async def test_procedure_without_approved_counts_pages_not_chunks() -> None:
-    # 承認済みが無い手続きの上位 2 件は、ページで 2 件（同じページの 2 チャンクで埋めない。手続き 100 問の 96 番）
+    # 承認済みが無い手続きの上位 2 件は、ページで 2 件（同じページの 2 チャンクで埋めない。手続き 100 問の 96 番）。
+    # そのページのチャンクは全部渡す（17 番: 2 チャンク目にだけ担当の課）
     from src.dialogue import Dialogue
 
     a1 = Reference("イノシシに注意", "u/a", "イノシシの被害が多発しています。", 0.9, 1.0)
@@ -278,7 +279,7 @@ async def test_procedure_without_approved_counts_pages_not_chunks() -> None:
     d = Dialogue(_LLM("そうですか。"), DialogueConfig(), knowledge=_KB([a1, a2, b]))
     await _say(d, "イノシシの補助金の申請をしたい")
     assert d.last_intent == "procedure"
-    assert [r.source_url for r in d.last_references] == ["u/a", "u/b"]
+    assert [r.source_url for r in d.last_references] == ["u/a", "u/a", "u/b"]  # 上位 2 ページの、チャンクは全部
 
 
 async def test_procedure_without_approved_needs_nouns() -> None:
