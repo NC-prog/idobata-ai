@@ -361,3 +361,18 @@ async def test_rule_department_sentence_without_approved() -> None:
                  procedures=seeded_procedures(), facility=fac)
     said = await _say(d, "子どもの学校かわるんじゃけど何すりゃええ？")
     assert said[-1].startswith("担当は学校教育課")
+
+
+async def test_draft_all_dropped_says_department_line(tmp_path: Path) -> None:
+    # 下書きの手続きで応答の文を全部捨てた: 穴埋め（「そうですか。」）ではなく「担当の課でご案内します」（手続き 100 問の 91 番）
+    from src.dialogue import Dialogue
+    from src.procedure_kb import ProcedureBook, ProcedureRecord
+    from src.site_context import load_facility
+
+    ProcedureBook(tmp_path).save(ProcedureRecord(id="furusato", name="ふるさと納税", status="draft"))
+    procs = load_procedures(SERVER_ROOT / "context", tmp_path)
+    fac = load_facility("etajima", SERVER_ROOT / "context")
+    d = Dialogue(_LLM("ふるさと納税は社会福祉課（2階）でご案内します。"), DialogueConfig(), knowledge=_KB([]),
+                 procedures=procs, facility=fac)
+    said = await _say(d, "ふるさと納税について聞きたいのですが")
+    assert said == ["手続きの詳しいことは、担当の課でご案内します。"]

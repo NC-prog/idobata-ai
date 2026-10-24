@@ -817,8 +817,14 @@ class Dialogue:
             yield _FALLBACK_REPLY.get(language, _FALLBACK_REPLY["ja"])  # LLM が何も返さなかった
             return
         if not sentences:
-            # 全部捨てた: 直前の来訪者の発話の種類で穴埋めの文を選ぶ（「おっしゃる通りですね」を言わない）
-            filler = self.empty_filler(text)
+            # 全部捨てた: 直前の来訪者の発話の種類で穴埋めの文を選ぶ（「おっしゃる通りですね」を言わない）。
+            # 下書き・規則で課が決まらない手続きの問いなら、穴埋めの代わりに「担当の課でご案内します」（手続き 100 問の 91 番）
+            guessed = unruled and any(d["reason"] == "規則で決まらない課の推測" for d in self.last_dropped)
+            if draft_dept is not None or guessed:
+                filler = self._proc_cfg.draft_sentence.format(
+                    department=draft_dept or self._proc_cfg.draft_department_fallback)
+            else:
+                filler = self.empty_filler(text)
             logger.info("応答の文を全部捨てたので、穴埋めの文を言います")
             sentences.append(filler)
             yield filler
