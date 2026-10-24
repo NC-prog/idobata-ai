@@ -33,6 +33,8 @@
   足元に QR）。職員は承認待ちにせず、職員パネルの「お知らせ」タブ（`/staff/news/`）で止める・優先・画像を出さない・要約を直す。結果は `docs/WP11_result.md`
 - WP12（現在）: 来訪者の発話区間の音声を文字記録と並べて 7 日保存し（`transcripts.AudioStore`。行に `id`・`asr_status`・`audio`）、
   管理者ページで行ごと・セッションごとに再生する。「録音してる？」の答えと掲示文言の案も「文字と音声の記録を 7 日、管理者だけ」に。結果は `docs/WP12_result.md`
+- WP13（現在）: 会話で使う知識の絞り込み（パックの用途 use、発話の型ごとの検索範囲、名詞の足切り）。10/24 の実機の脱線（国保税・求人・協調学習・道の駅）を
+  `server/tests/eval/cases_regression_1024.yaml`（`uv run python -m tests.eval.run_regression`）に残した。結果は `docs/WP13_result.md`
 - 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
 
 ## 実行環境（重要）
@@ -64,6 +66,12 @@
 - 拠点（`IDOBATA_SITE=etajima|akiota`）で `server/context/<site>.yaml` を選ぶ。語彙（ASR バイアシング・VOICEVOX 辞書）と
   `facility`（施設名・開庁時間・課と担当と階・緊急連絡先。**市町の公式サイトで確認したものだけ**）を持つ
 - 知識パックは `~/idobata-data/kb/<site>/`（`kb/build.py` で作る）
+- 集めるのは広く、会話で使うのは狭く（WP13）: パックのページは用途 `use` を持つ（`dialogue` 会話の参考資料 / `lookup`「調べる」と夜回しのときだけ /
+  `exclude` 集めない）。区画の `use`・URL の `use_rules`（`kb/sources/<site>.yaml`）と題名の語（`kb/scope_rules.yaml`。exclude の語・dialogue への引き上げ語）で決める。
+  毎ターンの検索は来訪者の発話の型（規則。`server/context/intents.yaml`、procedure > facility > event > tourism > weather > other > smalltalk）で範囲を変える
+  （`KnowledgeConfig.scope_by_intent`）。**承認済みの手続きナレッジが当たればパックを渡さない**（固定事実と承認済みだけ。課の名前を言わなければ担当の課の一文を足す）。
+  承認済みが無い手続きは dialogue の上位 2。場所・設備・天気・観光・雑談はパックを渡さない（観光は「調べる」の提案）。
+  行事は dialogue の上位 3 とお知らせ、ほかの問いは dialogue の上位 3 で、どちらも題名か本文の先頭 200 字に発話の名詞が無い資料は渡さない（名詞の足切り）。「調べる」は dialogue と lookup の両方を探す。古い形式のパックは全部 dialogue
 - ネットワーク: **窓口機から許可ドメインへの取得は可。会話・音声・映像は送らない**（2026-10-21 改定）。
   外に出るのは知識パックの取得と、「調べる」（WP04）の検索語だけ。許可ドメインは `kb/sources/<site>.yaml`。
   一般のウェブ検索（`IDOBATA_LOOKUP_WEB_SEARCH`）は既定オフ

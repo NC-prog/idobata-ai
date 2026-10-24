@@ -18,6 +18,8 @@ CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --we
 - フロント（`server/`）は `manifest.json` の変化を 60 秒ごとに見て、再起動なしで新しい版に切り替える。天気（`weather.json`）は更新されたら読み直す
 - `kb/pack/<site>` はそこへのリンク（git 管理外）
 - `--from-cache`: 取得し直さず、今のパックのページをキャッシュから作り直す（チャンク分け・人名除去の規則を変えたとき）
+- `--from-cache-pack <版のディレクトリ>`（複数可）: `--from-cache` で、今のパックに加えてその版のページも組み直す
+  （区画や use の規則を変えて、今の版から落ちたページを前の版から戻すとき。WP13）
 - `--daily`: `daily: true` の seed（お知らせ・イベント・広報・防災・休館日）だけを**深さ 1** で取り、今の版に差分で足す
   - 取ったページの本文ハッシュ（`page_hash`）が前の版と同じなら、そのチャンクとベクトルをそのまま使う
   - 変わったページ・新しいページだけを作り直す。取らなかったページはそのまま残る（消えたページは毎週の全体で落ちる）
@@ -28,8 +30,8 @@ CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --we
 
 | ファイル | 中身 |
 |---|---|
-| `manifest.json` | 生成日時、ページ数・チャンク数、埋め込みモデル名とプレフィックス、取得の統計、ソース |
-| `chunks.parquet` | `id, source_url, title, fetched_at, text`（出典の提示に使う） |
+| `manifest.json` | 形式（`format: 2` から `use` を持つ）、生成日時、ページ数・チャンク数・用途ごとのページ数（`use_counts`）、埋め込みモデル名とプレフィックス、取得の統計、ソース |
+| `chunks.parquet` | `id, source_url, title, fetched_at, text, trust, label, page_hash, use`（出典の提示と、会話で使う範囲の絞り込みに使う） |
 | `index.lancedb/` | 埋め込みベクトル（LanceDB。サーバプロセスは立てない） |
 | `weather.json` | 気象庁の府県天気予報（今日・明日の天気と降水確率。文言は気象庁のまま）と、アメダス最寄り観測点の気温の実況 |
 
@@ -44,6 +46,23 @@ CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --we
   - `max_fetches`: その seed での取得の上限
   - `recheck_days`: キャッシュがこの日数より新しければ取り直さない（大きなサイトを数日かけて回す）
   - `daily: true`: 更新の速い区画。毎朝の `--daily` ではこの seed だけを深さ 1 で取る
+- `use`（seed ごと）: そのページを会話で使うか（WP13。「集めるのは広く、会話で使うのは狭く」）。書かなければ `dialogue`
+  - `dialogue`: 毎ターンの検索で会話の参考資料にしてよい（暮らしのガイド・課の窓口・防災・時刻表など）
+  - `lookup`: 「調べる」（来訪者が同意したとき）と夜回しのときだけ検索する（観光・広報・お知らせの混在区画・事業者向け）
+  - `exclude`: 集めない（パックに入れない）
+  - `why`: その use にした理由（分類表に載る）
+- `use_rules`（seed ごと・拠点ごと）: URL の正規表現でページごとに use を変える。`{pattern, use, why, final}` の並び。
+  seed の規則 → 拠点の規則の順に見て、最初に当たったものを使う
+  - `final: true` の規則はその use で**確定**（題名の規則より先。手続きナレッジの出典・求人の一覧・サイトの管理ページ）
+  - `final` でない規則は「既定」を差し替えるだけ（課の区画を lookup にしても、題名の引き上げ語の記事は dialogue に戻る）
+- `kb/scope_rules.yaml`（全拠点に効く、題名の語での use の規則）:
+  - `exclude_title_words`: 題名に当たれば exclude（求人情報・入札・議会・例規・統計・人事・公告・予算・決算・監査・パブリックコメント）
+  - `dialogue_title_words`: 既定が lookup の題名に当たれば dialogue に引き上げる（防災・ごみ・休館・バス・断水・支所・予防接種など）
+  - 語は正規表現として当てる（「協議会」「審議会」を議会にしないために `(?<![協審評])議会` と書く）
+  - 決め方の順: URL の規則（final）→ 題名の exclude → 題名の dialogue 引き上げ → 既定（final でない URL の規則 → seed の use）。
+    exclude と dialogue の語が同時に当たれば exclude
+- 古い形式のパック（`use` 列が無い）は、全部 `dialogue` として読む（フロントも差分の組み直しも）
+- 「調べる」の夜回しで足したページは `lookup`
 - `exclude_breadcrumb_keywords` / `exclude_title_keywords`: **個人名を含みうるページ（議会・会議録・入札・人事・職員採用・首長の部屋・選挙）を外す**。知識パックに人名を入れない
 - `weather`: 気象庁の府県予報区（`area_code`）・一次細分区域（`area_sub_code`）と、気温を取るアメダスの観測点（`amedas`）
   - 観測点の ID は気象庁のアメダス地点一覧（`https://www.jma.go.jp/bosai/amedas/const/amedastable.json`）で確かめて書く
