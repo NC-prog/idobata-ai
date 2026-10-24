@@ -272,6 +272,25 @@ def resolve_month_day(month: int, day: int, published: date) -> date | None:
         return None
 
 
+_ZERO_MIN_RE = re.compile(r"([0-9０-９]{1,2})時[0０]{2}分")
+FETCH_STATUS_FILE = ".fetch_status.json"
+
+
+def tidy_summary(text: str) -> str:
+    """要約の後処理（読み上げ・字幕とも）: 「10時00分」を「10時」に。"""
+    return _ZERO_MIN_RE.sub(r"\1時", text)
+
+
+def read_fetch_status(directory: Path) -> dict[str, Any] | None:
+    """夜の収集の最後の結果（kb/news_collect.py が書く）。無ければ None。"""
+    path = directory / FETCH_STATUS_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def qr_data_url(url: str) -> str:
     """記事の URL の QR コード（PNG の data URL。誤り訂正 M。segno、BSD-3）。"""
     import segno

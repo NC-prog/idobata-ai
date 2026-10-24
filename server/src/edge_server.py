@@ -379,7 +379,8 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
     async def list_news(status: str | None = None, category: str | None = None,
                         skip: bool = False) -> dict[str, Any]:
         n = news()
-        return {"rows": n.rows(status or None, category or None, skip), "counts": n.counts()}
+        return {"rows": n.rows(status or None, category or None, skip), "counts": n.counts(),
+                "fetch": n.fetch_status()}
 
     @app.get("/staff/api/news/{rid}", dependencies=auth)
     async def get_news(rid: str) -> dict[str, Any]:

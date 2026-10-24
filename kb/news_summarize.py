@@ -39,6 +39,7 @@ from src.news import (
     refresh_status,
     save_record,
     summary_problems,
+    tidy_summary,
 )
 from src.persona import load_persona
 from src.site_context import load_facility
@@ -117,7 +118,7 @@ def clean_summary(text: str, cfg: NewsConfig) -> str:
     text = re.sub(r"^\s*(要約|お知らせ)\s*[:：]\s*", "", text.strip())
     text = re.sub(r"\s*\n\s*", "", text.strip("「」『』\"' \n"))
     drop = re.compile(cfg.summary_drop_pattern)
-    return "".join(x for x in re.split(r"(?<=[。！？!?])", text) if x.strip() and not drop.search(x))
+    return tidy_summary("".join(x for x in re.split(r"(?<=[。！？!?])", text) if x.strip() and not drop.search(x)))
 
 
 def target_chars(summary: str, sec: float, cfg: NewsConfig) -> int:
@@ -228,8 +229,13 @@ def summarize(store: Path, site: str, llm: NightLLM, meter: SpeechMeter | None, 
     cfg = cfg or config.news
     at = now or datetime.now(JST)
     checker = make_checker(site, at)
-    stats = {"summarized": 0, "ok": 0, "held": 0, "pending": 0, "staff": 0, "expired": 0}
+    stats = {"summarized": 0, "ok": 0, "held": 0, "pending": 0, "staff": 0, "expired": 0, "tidied": 0}
     for r in load_records(store):
+        tidy = tidy_summary(r.summary)
+        if tidy != r.summary:  # 前に保存した要約にも後処理を当てる（「10時00分」→「10時」）
+            r.summary = tidy
+            save_record(store, r)
+            stats["tidied"] += 1
         if r.relevance != "introduce":
             continue
         if r.expired(at.date()):

@@ -89,6 +89,11 @@ asr_fixes:
   - {surface: 後期好礼, correct: 後期高齢}
   - {surface: 後期高例, correct: 後期高齢}
   - {surface: 伊豆ちゃん, correct: いどちゃん}   # アバターの呼び名（IDOBATA_AVATAR_NAME の初期値）
+  # 「児童」が「自動」になる（2026-10-24 の実機確認。語彙の先頭近くに「児童手当」があっても負ける）。長い表記から当てる
+  - {surface: 自動手当店, correct: 児童手当}
+  - {surface: 自動手当て, correct: 児童手当}
+  - {surface: 自動手当, correct: 児童手当}
+  - {surface: 自動扶養手当, correct: 児童扶養手当}   # 特別自動扶養手当 → 特別児童扶養手当 もこれで直る
 
 readings:
   - {surface: 国保, reading: コクホ, accent: 1}

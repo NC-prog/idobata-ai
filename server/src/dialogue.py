@@ -347,6 +347,8 @@ class Dialogue:
         self._agree_context_re = re.compile(self._cfg.agree_context_pattern)
         self._negative_re = re.compile(self._cfg.negative_reply_pattern)
         self._dept_business_re = re.compile(self._cfg.department_business_pattern)
+        self._job_ref_re = re.compile(self._cfg.job_ref_pattern)
+        self._job_amount_re = re.compile(self._cfg.job_amount_pattern)
         # (user, assistant) の組を直近 history_turns 件だけ保持する
         self._history: deque[tuple[str, str]] = deque(maxlen=self._cfg.history_turns)
         self._question_re = re.compile(self._cfg.question_sentence_pattern)
@@ -543,6 +545,12 @@ class Dialogue:
             yield self._cfg.foreign_reply
             return
 
+        if re.match(self._cfg.filler_only_pattern, text):
+            # 「えっと」「あの」だけ: 話を作らず、待つ一言（WP11 の後始末）
+            self._push(labeled(text, speaker), self._cfg.filler_reply)
+            yield self._cfg.filler_reply
+            return
+
         asked = self._asked_unknown_facility(text)
         if asked is not None:
             # 登録の無い館内の設備の場所・有無は、場所を作らせないよう決まった文で答える
@@ -553,6 +561,14 @@ class Dialogue:
             return
 
         refs = list(extra_refs) if extra_refs is not None else await self._search(text)
+        other_terms = self._other_confusable(text)
+        if other_terms:
+            # 来訪者が言っていない、名前の似た別の手続きの資料は外す（「児童手当」に「児童扶養手当」のページ）
+            kept = [r for r in refs if not any(t in r.title for t in other_terms)]
+            if len(kept) < len(refs):
+                logger.info("名前の似た別の手続きの資料を %d 件外しました", len(refs) - len(kept))
+                refs = kept
+                self.last_references = refs
         if extra_refs is not None:
             self.last_references, self.last_search_ms = refs, None
         # 手続きナレッジ（WP09）: 承認済みのものだけ【市の案内（承認済み）】として参考資料より前に置く。
@@ -596,6 +612,8 @@ class Dialogue:
         # 読点で早めに切った 1 文目の頭（「納期限は、」）が期限・金額に触れていたら、続きと合わせてから根拠を見る
         # （先に読み上げると、続きを捨てたときに「納期限は、詳しい期限や金額は…」とつながってしまう）
         held = ""
+        # 求人のページを資料に使うターン: 給与・手当などの金額は読まず、最後に案内の一文（WP11 の後始末）
+        job = any(self._job_ref_re.search(r.title) for r in refs)
         try:
             async for delta in self._stream(messages):
                 for raw in splitter.feed(think.feed(delta)):
@@ -635,6 +653,12 @@ class Dialogue:
                     if not sentences and proc_refs:
                         sentence = self._procedure_name_first(sentence, text)
                     if self._invented_department_business(sentence, refs, expected_dept):
+                        continue
+                    if other_terms and self._names_other(sentence, other_terms):
+                        continue
+                    if job and self._job_amount_re.search(sentence):
+                        logger.info("求人の金額を言う文を読み上げずに捨てました")
+                        self.note_drop("求人の金額", sentence)
                         continue
                     if self._must_drop(sentence) or self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
@@ -680,6 +704,11 @@ class Dialogue:
                 tail = self._procedure_name_first(tail, text)
             if tail and self._invented_department_business(tail, refs, expected_dept):
                 tail = ""
+            if tail and other_terms and self._names_other(tail, other_terms):
+                tail = ""
+            if tail and job and self._job_amount_re.search(tail):
+                self.note_drop("求人の金額", tail)
+                tail = ""
             if tail and not self._must_drop(tail) and not self._drop(tail, text, sentences, previous):
                 tail = self._attribute(tail, proc_refs, sentences, cited)
                 sentences.append(tail)
@@ -689,7 +718,12 @@ class Dialogue:
         # 出典の一言は、応答が資料の中身を実際に使ったときだけ（雑談に関係の薄い資料の番号が付いても足さない）。
         # 手続きナレッジは「市の案内では、」を添えたので、ホームページの一言には数えない
         page_cited = [r for r in self.last_cited if r.trust != PROCEDURE_TRUST]
-        if page_cited and not already and draft_dept is None and self._uses_references(sentences, page_cited):
+        if job:
+            line = self._job_info_line()
+            if line not in sentences:
+                sentences.append(line)
+                yield line
+        elif page_cited and not already and draft_dept is None and self._uses_references(sentences, page_cited):
             # 出典の一言は、使った資料の出どころから決めて足す（「観光協会のホームページ」など）。
             # 応答がすでに「〇〇のホームページに載っています」と言っていれば重ねない
             line = self._cfg.source_sentence.format(
@@ -1032,7 +1066,16 @@ class Dialogue:
         return m.group("place").strip("、。 ") or "そちら"
 
     def _contradicts_persona(self, sentence: str) -> bool:
-        return self._persona is not None and any(c in sentence for c in self._persona.contradictions)
+        """人物像と食い違う言い方か。3 字以下の語（「おけ」「りょ」）は前後がひらがなのときは当たらない（「しておけば」）。"""
+        if self._persona is None:
+            return False
+        for c in self._persona.contradictions:
+            if len(c) <= 3:
+                if re.search(rf"(?<![ぁ-ゖ]){re.escape(c)}(?![ぁ-ゖー])", sentence):
+                    return True
+            elif c in sentence:
+                return True
+        return False
 
     def _unasked_self_intro(self, sentence: str, user_text: str) -> bool:
         name = self._avatar_name
@@ -1085,7 +1128,7 @@ class Dialogue:
             logger.info("1 回の応答で 2 つ目以降の問いを読み上げずに捨てました")
             self.note_drop("2 つ目以降の問い", sentence)
             return True
-        if self._extra_help_offer(sentence, text):
+        if self._extra_help_offer(sentence, text, said):
             logger.info("「お困りのことは」「お変わりありませんか」の類を重ねない（1 会話 1 回・尋ねられた直後は言わない）")
             self.note_drop("お困りのことは・お変わりの重ね", sentence)
             return True
@@ -1217,11 +1260,60 @@ class Dialogue:
             return False
         return sum(1 for x in said if self.is_question(x)) >= self._cfg.max_questions_per_reply
 
-    def _extra_help_offer(self, sentence: str, user_text: str) -> bool:
-        """「お困りのことはありませんか」「お変わりありませんか」の類を言わない場面か（もう言った、または尋ねられた直後）。"""
+    def _other_confusable(self, text: str) -> set[str]:
+        """来訪者が言った手続きと名前の似た、言っていない方の手続きの名前（長い名前から見る）。"""
+        out: set[str] = set()
+        for group in self._cfg.confusable_terms:
+            rest, said = text, []
+            for term in sorted(group, key=len, reverse=True):
+                if term in rest:
+                    said.append(term)
+                    rest = rest.replace(term, "＿")
+            if said:
+                out |= {t for t in group if t not in said}
+        return out
+
+    def _names_other(self, sentence: str, other_terms: set[str]) -> bool:
+        """来訪者が言っていない、名前の似た別の手続きの名前を言う文か（読み上げない）。"""
+        rest = sentence
+        for term in sorted(other_terms | {t for g in self._cfg.confusable_terms for t in g}, key=len, reverse=True):
+            if term in rest:
+                if term in other_terms:
+                    logger.info("来訪者が言っていない、名前の似た別の手続き（%s）を言う文を読み上げずに捨てました", term)
+                    self.note_drop("名前の似た別の手続き", sentence)
+                    return True
+                rest = rest.replace(term, "＿")
+        return False
+
+    def _job_info_line(self) -> str:
+        """求人の案内の一文（求人・職業相談を受け持つ課。無ければ「担当の課」）。"""
+        keys = self._cfg.job_department_keywords
+        dept = next((d.name for d in (self._facility.departments if self._facility else ())
+                     if any(k in h for h in d.handles for k in keys)), "担当の課")
+        return self._cfg.job_info_sentence.format(org=organization_word(self._facility), department=dept)
+
+    def _business_turn(self, user_text: str) -> bool:
+        """来訪者の発話に手続きの語（別名表・手続きナレッジ）か質問があるか。"""
+        if re.search(self._cfg.visitor_question_pattern, user_text.strip()) or self.last_procedures:
+            return True
+        return self._procedures is not None and bool(self._procedures.mentioned(user_text, self._facility))
+
+    def _extra_help_offer(self, sentence: str, user_text: str, said: list[str] | None = None) -> bool:
+        """「お困りのことはありませんか」「お変わりありませんか」の類を言わない場面か（もう言った、または尋ねられた直後）。
+
+        「お変わりありませんか」の類は、挨拶・雑談のターンの切り出しにだけ許す（手続きの語・質問のあるターンでは言わない）。
+        答えの後ろに付け足す一般論（「お住まいの近くで…必要なときもありますよね」）も、そのターンでは言わない。
+        """
+        said = said or []
+        if re.search(self._cfg.generic_addon_pattern, sentence) and self._business_turn(user_text):
+            return True
         for kind, pat in self._offer_res:
             if not pat.search(sentence):
                 continue
+            if kind == "checkin" and self._business_turn(user_text):
+                return True
+            if any(p.search(x) for x in said for _, p in self._offer_res):
+                return True  # 1 回の応答で 1 つまで（「お困りのことは」と「お変わりありませんか」を重ねない）
             if re.search(self._cfg.visitor_question_pattern, user_text.strip()):
                 return True
             return kind in self._offers_said
