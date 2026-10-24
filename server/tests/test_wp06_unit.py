@@ -232,7 +232,7 @@ class _KB:
     def __init__(self, refs: list[Reference]) -> None:
         self.refs = refs
 
-    def search(self, query: str) -> SearchResult:
+    def search(self, query: str, uses: Any = None) -> SearchResult:
         return SearchResult(list(self.refs), 1.0)
 
 
@@ -242,10 +242,13 @@ async def test_smalltalk_raises_reference_threshold() -> None:
     strong = Reference("国保の加入・脱退時の届出", "https://x/2", "国保", 0.891, 3.0, chunk_id="c2")
     d = Dialogue(StubLLM(["ありがとうございます。"]), DialogueConfig(), knowledge=_KB([weak, strong]))
     await _collect(d, "日本語うまいですね")
-    assert d.last_references == [strong] and d.last_search_query == "日本語うまいですね"
+    # WP13: 雑談の型には資料を渡さない（検索もしない）。しきい値を上げる規則より前に、型で止まる
+    assert d.last_references == [] and d.last_search_query is None
     d2 = Dialogue(StubLLM(["保健医療課です。"]), DialogueConfig(), knowledge=_KB([weak, strong]))
     await _collect(d2, "国保の切り替えで聞きたいことがあって")
-    assert d2.last_references == [weak, strong]  # 手続きの質問はふだんのしきい値（知識パック側）のまま
+    # 手続きの質問はふだんのしきい値（知識パック側）のまま。WP13 から、発話の名詞（国保・切り替え）が題名・本文の先頭に無い
+    # 資料（防災ガイドブック）は渡さない（このテストの Dialogue は別名表を持たないので「その他」の型で、名詞の足切りが効く）
+    assert d2.last_references == [strong]
 
 
 async def test_fragment_heard_during_save_is_ignored_even_after_long_readback(tmp_path: Path) -> None:

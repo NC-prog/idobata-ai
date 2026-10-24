@@ -75,3 +75,165 @@ def test_search_filters_by_use(tmp_path: Path) -> None:
     assert "道の駅の観光" not in talk and "住民票の写し" in talk
     look = [r.title for r in kb.search("道の駅の観光", frozenset({"lookup"})).references]
     assert look == ["道の駅の観光"]
+
+
+# ------------------------------------------------------------------
+# B: 発話の型と、型ごとの検索の範囲
+# ------------------------------------------------------------------
+
+import re
+
+import pytest
+
+from src.config import SERVER_ROOT, DialogueConfig
+from src.intents import classify_intent, load_intent_rules, nouns
+from src.knowledge import Reference, SearchResult
+from src.procedures import load_procedures
+from tests.procedure_helpers import seeded_procedures
+
+RULES = load_intent_rules(SERVER_ROOT / "context" / "intents.yaml")
+PROCS = load_procedures(SERVER_ROOT / "context")
+QRE = re.compile(KnowledgeConfig().intent_question_pattern)
+
+
+@pytest.mark.parametrize(("text", "intent"), [
+    # procedure（別名表・手続きの語）
+    ("国保のことで聞きに来ました", "procedure"), ("住民票を取りたいんですが", "procedure"),
+    ("児童手当について", "procedure"), ("ごみの出し方を教えて", "procedure"), ("印鑑登録の手続きはどこ", "procedure"),
+    # facility
+    ("トイレはどこですか", "facility"), ("駐車場ありますか", "facility"), ("何時まで開いてますか", "facility"),
+    ("エレベーターは", "facility"), ("授乳室はありますか", "facility"),
+    # event
+    ("今週末なにかありますか", "event"), ("秋祭りはいつですか", "event"), ("料理教室ってある？", "event"),
+    ("イベントの予定は", "event"), ("花火大会はありますか", "event"),
+    # tourism
+    ("おすすめの観光地は", "tourism"), ("近くに温泉ある？", "tourism"), ("道の駅はどんなところ", "tourism"),
+    ("お昼ご飯を食べるところは", "tourism"), ("お土産を買いたい", "tourism"),
+    # weather
+    ("今日は雨が降りますか", "weather"), ("いい天気ですね", "weather"), ("暑いですね", "weather"),
+    ("傘いりますか", "weather"), ("明日の天気は", "weather"),
+    # smalltalk（短い返事・報告・相槌）
+    ("わかりました", "smalltalk"), ("うん", "smalltalk"), ("うんまだ知ってないです", "smalltalk"),
+    ("孫が今度遊びに来るんです", "smalltalk"), ("ありがとう、助かりました", "smalltalk"),
+    # other（どれでもない問い・名詞だけの短い発話）
+    ("あなたはロボットですか", "other"), ("町からの何か案内ってありますか", "other"), ("印鑑登録", "procedure"),
+    ("協調学習ってなに", "other"), ("江田島の人口は", "other"),
+])
+def test_classify_intent(text: str, intent: str) -> None:
+    assert classify_intent(text, RULES, PROCS, None, QRE) == intent
+
+
+def test_intent_priority() -> None:
+    # 手続き ＞ 場所 ＞ 行事 ＞ 観光 ＞ 天気
+    assert classify_intent("国保の窓口は何階ですか", RULES, PROCS, None, QRE) == "procedure"
+    assert classify_intent("イベントの日の駐車場は", RULES, PROCS, None, QRE) == "facility"
+    assert classify_intent("道の駅のイベントは", RULES, PROCS, None, QRE) == "event"
+    assert classify_intent("雨の日のおすすめの観光地", RULES, PROCS, None, QRE) == "tourism"
+
+
+def test_nouns() -> None:
+    assert nouns("お祭りはありますか") == ["祭り"]
+    assert nouns("町からの何か案内ってありますか") == ["案内"]
+    assert nouns("わかりました") == []
+
+
+class _KB:
+    def __init__(self, refs: list[Reference]) -> None:
+        self.refs, self.calls = refs, []  # type: ignore[var-annotated]
+
+    def search(self, query: str, uses: Any = None) -> SearchResult:
+        self.calls.append(uses)
+        return SearchResult(list(self.refs), 5.0)
+
+
+class _LLM:
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+
+    def chat(self, *a: Any, **k: Any) -> str:
+        return ""
+
+    def chat_stream(self, *a: Any, **k: Any) -> Any:
+        yield self.reply
+
+
+TAX = Reference("国民健康保険税のQ&A", "u1", "国保税の額は所得で決まります。", 0.9, 1.0)
+EVENT = Reference("秋祭り", "u2", "秋祭りは10月25日です。", 0.9, 1.0)
+JOB = Reference("町内求人情報", "u3", "通勤手当あり。", 0.9, 1.0)
+
+
+async def _say(d: Any, text: str) -> list[str]:
+    return [s async for s in d.respond(text)]
+
+
+async def test_approved_procedure_turn_gets_no_pack(caplog: Any) -> None:
+    from src.dialogue import Dialogue
+
+    caplog.set_level("INFO")
+    kb = _KB([TAX])
+    d = Dialogue(_LLM("保健医療課で手続きできます。"), DialogueConfig(), knowledge=kb, procedures=seeded_procedures())
+    await _say(d, "国保のことで聞きに来ました")
+    assert d.last_intent == "procedure" and kb.calls == []  # 承認済み（国保の加入）に当たった: パックを引かない
+    assert all(r.trust == "procedure" for r in d.last_references)
+    assert any("型: procedure / 渡した資料: 承認済み 1・パック 0・お知らせ 0" in r.message for r in caplog.records)
+
+
+async def test_smalltalk_facility_tourism_get_no_refs() -> None:
+    from src.dialogue import Dialogue
+
+    for text in ("わかりました", "トイレはどこですか", "おすすめの観光地は", "いい天気ですね"):
+        kb = _KB([TAX, EVENT, JOB])
+        d = Dialogue(_LLM("そうですか。"), DialogueConfig(), knowledge=kb)
+        await _say(d, text)
+        assert kb.calls == [] and d.last_references == [], text
+
+
+async def test_other_and_event_need_nouns_and_use_dialogue() -> None:
+    from src.dialogue import Dialogue
+
+    kb = _KB([TAX, EVENT, JOB])
+    d = Dialogue(_LLM("秋祭りは10月25日です。"), DialogueConfig(), knowledge=kb)
+    await _say(d, "秋祭りはいつですか")
+    assert kb.calls == [frozenset({"dialogue"})] and [r.title for r in d.last_references] == ["秋祭り"]
+    kb2 = _KB([TAX, EVENT, JOB])
+    d2 = Dialogue(_LLM("ありません。"), DialogueConfig(), knowledge=kb2)
+    await _say(d2, "町からの何か案内ってありますか")
+    assert d2.last_references == []  # 「案内」は資料の題名・本文の先頭に無い（道の駅のブログを本題にしない）
+
+
+async def test_event_includes_news_articles() -> None:
+    from src.dialogue import Dialogue
+
+    d = Dialogue(_LLM("秋祭りは10月25日です。"), DialogueConfig(), knowledge=_KB([]))
+    d.news_refs = lambda q: [Reference("江田島湾海上花火大会", "n1", "花火大会は10月31日です。", 1.0, 0.0, "news")]
+    await _say(d, "花火大会はありますか")
+    assert [r.title for r in d.last_references] == ["江田島湾海上花火大会"]
+
+
+async def test_tourism_proposes_lookup(tmp_path: Path) -> None:
+    from src.lookup import LookupResult
+    from tests.test_actions_unit import StubLLM, StubLookup, _conv
+
+    c = _conv(StubLLM([["温泉はいくつかありますよ。"]]), tmp_path, StubLookup(LookupResult(found=False)))
+    out = [s async for s in c.respond("近くに温泉ある？")]
+    assert c.dialogue.last_intent == "tourism" and c.turn_info["proposed"] == "lookup"
+    assert out[-1] == "よければ、ちょっと調べてみましょうか？"
+
+
+async def test_lookup_searches_pack_dialogue_and_lookup_first(tmp_path: Path) -> None:
+    from src.config import LookupConfig
+    from src.lookup import Lookup
+
+    asked: list[str] = []
+    onsen = Reference("温井ダムと温泉", "https://cs-akiota.or.jp/x/", "温泉の案内です。", 0.9, 1.0, "semi", "あきおおたから")
+
+    def pack(q: str) -> list[Reference]:
+        asked.append(q)
+        return [onsen, Reference("協調学習", "u", "学校の取り組み", 0.9, 1.0)]
+
+    async def make_query(t: str) -> str:
+        return "温泉"
+
+    lk = Lookup(LookupConfig(sources_dir=tmp_path), "akiota", tmp_path, make_query, pack=pack)
+    result = await lk.run("近くに温泉ある？")
+    assert result.found and [r.title for r in result.references] == ["温井ダムと温泉"] and asked == ["温泉"]

@@ -588,6 +588,10 @@ class Conversation:
             # 健康・物忘れ・介護の不安は、雑談や調べるにせず専門の窓口につなぐ
             logger.info("健康・物忘れ・介護の不安の打ち明けなので refer を提案します")
             return "refer"
+        if kind is None and self.dialogue.last_intent == "tourism" and self._available("lookup"):
+            # 観光の問い（WP13 B）: 毎ターンの検索では資料を渡さないので、「調べてみましょうか？」を優先する
+            logger.info("観光の問いなので lookup を提案します")
+            return "lookup"
         if kind is not None:
             return kind
         if procedure and re.search(self._cfg.refer_fallback_cue, text) and self._available("refer"):

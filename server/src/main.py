@@ -172,6 +172,8 @@ class VoiceLoop:
             NewsBook(news_dir(config.data_dir, config.site, config.news), config.news,
                      load_news_rules(config.news.rules_path))
             if config.news.enabled else None)
+        if self._news is not None:
+            self._dialogue.news_refs = self._news.as_references  # 行事の問いの資料にお知らせの記事も（WP13 B）
         self._news_reply_task: asyncio.Task[None] | None = None
         # 同意付きの行為（調べる・つなぐ）と来訪記録（WP04）
         self._referrals = ReferralStore(config.data_dir, config.site, config.referral.retention_days,
@@ -184,7 +186,8 @@ class VoiceLoop:
         # 来訪者の発話区間の音声（WP12。既定 7 日、IDOBATA_AUDIO_RETENTION_DAYS=0 で保存しない。管理者だけが聞く）
         self._audio = AudioStore(self._transcripts, config.audio)
         self._last_lookup_query: str | None = None
-        self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query)
+        self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query,
+                              pack=lambda q: self._knowledge.search(q, frozenset({"dialogue", "lookup"})).references)
         # セッション限りの話者の区別（WP02 B。埋め込みはメモリだけ。会話が区切れたら捨てる）
         self._speakers = SpeakerClusters(config.speaker)
         self._embedder: SpeakerEmbedder | None = None
@@ -1067,6 +1070,7 @@ class VoiceLoop:
             references=[{"id": r.chunk_id, "title": r.title, "url": r.source_url} for r in d.last_references],
             cited=[r.chunk_id or r.source_url for r in d.last_cited], dropped=dropped,
             procedures=[{"id": r.id, "status": r.status} for r in d.last_procedures] or None,
+            intent=d.last_intent or None,
             timing=timing.as_record() if timing is not None else None, trigger=trigger,
         )
 

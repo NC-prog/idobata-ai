@@ -251,11 +251,12 @@ async def test_source_marker_is_stripped_and_cited() -> None:
     from src.knowledge import Reference
 
     refs = [Reference("資料1", "https://example.jp/1", "秋祭りは土曜日です。", 0.9, 1.0, "official", "市のホームページ"),
-            Reference("資料2", "https://example.jp/2", "本文", 0.9, 1.0, "semi", "観光協会のホームページ"),
-            Reference("資料3", "https://example.jp/3", "本文", 0.9, 1.0, "semi", "観光協会のホームページ")]
+            Reference("資料2", "https://example.jp/2", "祭りの本文", 0.9, 1.0, "semi", "観光協会のホームページ"),
+            Reference("資料3", "https://example.jp/3", "祭りの本文", 0.9, 1.0, "semi", "観光協会のホームページ")]
+    # （WP13: 行事の問いでは、発話の名詞「祭り」が題名か本文の先頭に無い資料は渡さない。仕組みを試すので本文に入れた）
 
     class FakeKB:
-        def search(self, text: str) -> Any:
+        def search(self, text: str, uses: Any = None) -> Any:
             from src.knowledge import SearchResult
 
             return SearchResult(refs, 12.0)
@@ -392,11 +393,12 @@ async def test_past_event_refs_dropped_for_date_questions() -> None:
     from src.knowledge import JST, Reference, SearchResult
 
     past = Reference("街の防災活動", "u1", "とんど祭り 令和8年1月25日（日）", 0.9, 1.0)
-    future = Reference("美術展", "u2", "令和8年10月31日から11月1日", 0.9, 1.0)
-    undated = Reference("図書館", "u3", "毎週火曜日は休館", 0.9, 1.0)
+    future = Reference("美術展", "u2", "祭りと美術展 令和8年10月31日から11月1日", 0.9, 1.0)
+    undated = Reference("図書館", "u3", "図書館の祭り 毎週火曜日は休館", 0.9, 1.0)
+    # （WP13: 行事の問いは発話の名詞が資料にあるものだけ。過ぎた日付の除外を試すので「祭り」を本文に入れた）
 
     class KB:
-        def search(self, q: str) -> SearchResult:
+        def search(self, q: str, uses: Any = None) -> SearchResult:
             return SearchResult([past, future, undated], 5.0)
 
     d = Dialogue(StubLLM(), DialogueConfig(), knowledge=KB(),
@@ -413,7 +415,7 @@ async def test_bracketless_source_marker_is_stripped() -> None:
     ref = Reference("印鑑登録の手続き", "u", "登録する印鑑が要ります。", 0.9, 1.0, "official", "市のホームページ")
 
     class KB:
-        def search(self, q: str) -> SearchResult:
+        def search(self, q: str, uses: Any = None) -> SearchResult:
             return SearchResult([ref], 5.0)
 
     d = Dialogue(StubLLM(["登録する印鑑が要ります。出典:1"]), DialogueConfig(), knowledge=KB())
@@ -482,7 +484,7 @@ async def test_source_sentence_only_when_reply_uses_reference() -> None:
     ref = Reference("おはなしむら", "u", "絵本の読み聞かせを図書館で行います。", 0.81, 1.0, "official", "市のホームページ")
 
     class KB:
-        def search(self, query: str) -> Any:
+        def search(self, query: str, uses: Any = None) -> Any:
             from src.knowledge import SearchResult
             return SearchResult([ref], 1.0)
 

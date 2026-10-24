@@ -370,6 +370,13 @@ class NewsBook:
         path = self.directory / r.image
         return path if path.is_file() and path.parent == self.directory else None
 
+    def as_references(self, query: str) -> list[Reference]:
+        """紹介する記事を、行事の問いの資料にする（WP13 B。名詞の足切りは呼び出し側）。"""
+        del query
+        self.reload()
+        return [Reference(r.title, r.url, tidy_summary(r.summary) or r.body[:300], 1.0, 0.0, "news", r.label)
+                for r in self.candidates()]
+
     def layout_message(self, r: NewsRecord) -> dict[str, Any]:
         """エッジへ送る紹介の構図（C-3 の 2）。"""
         image = f"/edge/news/{r.id}.jpg" if self.image_path(r.id) is not None else None

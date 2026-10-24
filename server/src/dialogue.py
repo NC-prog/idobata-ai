@@ -20,7 +20,8 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 
-from .config import DialogueConfig, ProcedureConfig, config
+from .config import DialogueConfig, IntentScope, ProcedureConfig, config
+from .intents import classify_intent, load_intent_rules, nouns
 from .knowledge import JST, Reference, SearchResult, Weather
 from .persona import (
     Persona,
@@ -107,8 +108,8 @@ class ChatBackend(Protocol):
 class Searcher(Protocol):
     """知識パックの検索（KnowledgeBase / KnowledgeStore）。"""
 
-    def search(self, query: str) -> SearchResult:
-        """発話で参考資料を探す。"""
+    def search(self, query: str, uses: frozenset[str] | None = None) -> SearchResult:
+        """発話で参考資料を探す（uses で用途を絞る。WP13）。"""
         ...
 
 
@@ -298,6 +299,12 @@ class Dialogue:
             *((f"cannot_{k}", p) for k, p in c.cannot_patterns),
             ("opinion", c.opinion_pattern), ("ai", c.ai_question_pattern),
             ("privacy", c.privacy_question_pattern), ("complaint", c.complaint_pattern))]
+        # 発話の型（WP13 B）と、型ごとの検索の範囲・お知らせの記事を資料にする関数（main が NewsBook から渡す）
+        self.last_intent: str = ""
+        self._kcfg = config.knowledge
+        self._intent_rules = load_intent_rules(self._kcfg.intents_path)
+        self._question_re_visitor = re.compile(self._kcfg.intent_question_pattern)
+        self.news_refs: Callable[[str], list[Reference]] | None = None
         # このターンで当たった手続きナレッジ（承認済み・下書き。文字記録用）
         self.last_procedures: list[ProcedureRecord] = []
         # この会話で「詳しいことは〇〇課でご案内します」を足した手続き（同じ手続きで繰り返さない）
@@ -560,7 +567,19 @@ class Dialogue:
             yield reply
             return
 
-        refs = list(extra_refs) if extra_refs is not None else await self._search(text)
+        # 発話の型（WP13 B）。型ごとに、毎ターンの検索で渡してよい範囲が決まる
+        self.last_intent = classify_intent(text, self._intent_rules, self._procedures, self._facility,
+                                           self._question_re_visitor)
+        scope = self._kcfg.scope_by_intent.get(self.last_intent)
+        # 手続きナレッジ（WP09）を先に引く（承認済みに当たれば、手続きの型ではパックを渡さない。WP13 B-1）
+        proc_refs, draft_dept = self._procedure_refs(text) if extra_refs is None else ([], None)
+        if extra_refs is not None:
+            refs = list(extra_refs)
+        elif scope is not None and scope.only_without_approved and proc_refs:
+            refs = []
+            self.last_references, self.last_search_ms = [], None
+        else:
+            refs = await self._search(text, scope)
         other_terms = self._other_confusable(text)
         if other_terms:
             # 来訪者が言っていない、名前の似た別の手続きの資料は外す（「児童手当」に「児童扶養手当」のページ）
@@ -573,7 +592,9 @@ class Dialogue:
             self.last_references, self.last_search_ms = refs, None
         # 手続きナレッジ（WP09）: 承認済みのものだけ【市の案内（承認済み）】として参考資料より前に置く。
         # 下書きだけに当たったら、資料には入れず、最後に「詳しいことは〇〇課でご案内します」を足す
-        proc_refs, draft_dept = self._procedure_refs(text) if extra_refs is None else ([], None)
+        news_n = sum(1 for r in refs if r.trust == "news")
+        logger.info("型: %s / 渡した資料: 承認済み %d・パック %d・お知らせ %d", self.last_intent, len(proc_refs),
+                    len(refs) - news_n, news_n)
         if proc_refs:
             refs = proc_refs + refs
             self.last_references = refs
@@ -1344,14 +1365,23 @@ class Dialogue:
             return False
         return len(s) >= 4 or u.startswith(s)
 
-    async def _search(self, text: str) -> list[Reference]:
-        """知識パックを検索する（CPU で数十 ms。イベントループを止めないよう別スレッド）。"""
+    async def _search(self, text: str, scope: IntentScope | None = None) -> list[Reference]:
+        """知識パックを検索する（CPU で数十 ms。イベントループを止めないよう別スレッド）。
+
+        scope は発話の型ごとの範囲（WP13 B）。渡さない型（件数 0）は検索しない。用途（dialogue）で絞り、
+        need_noun なら発話の名詞が資料の題名か本文の先頭にあるものだけ、news ならお知らせの紹介する記事も候補に。
+        """
         self.last_references, self.last_cited, self.last_search_ms = [], [], None
-        if self._kb is None:
+        if scope is not None and scope.top_k <= 0:
             return []
+        news = self.news_refs(text) if scope is not None and scope.news and self.news_refs is not None else []
+        if self._kb is None:
+            return self._scoped(text, news, scope)
         query = self._expand_dates(text)
         try:
-            result = await asyncio.to_thread(self._kb.search, query)
+            uses = frozenset(scope.uses) if scope is not None else None
+            result = await asyncio.to_thread(self._kb.search, query, uses) if uses is not None \
+                else await asyncio.to_thread(self._kb.search, query)
         except Exception:
             logger.exception("知識パックの検索に失敗しました（参考資料なしで続けます）")
             return []
@@ -1359,6 +1389,7 @@ class Dialogue:
         self.last_search_query = query
         refs = result.references
         if self._smalltalk_re.search(text) or len(_ECHO_IGNORE_RE.sub("", text)) <= self._cfg.short_reply_max_chars:
+            # （WP13 で、雑談・短い返事の型は資料を渡さないことにした。ここは型が other などになった雑談寄りの発話の残りの網）
             # 雑談寄り（挨拶・天気・人物像への質問）と短い返事（「わかりました」）は関係の薄い資料が付きやすいので、しきい値を上げる
             # （WP11 の実機確認で「わかりました」に「協調学習の取組」が付き、8B がその話を始めた）
             # （「日本語うまいですね」に防災ガイドブックが付いた）
@@ -1374,11 +1405,26 @@ class Dialogue:
             if past:
                 logger.info("日付の過ぎた資料を %d 件外しました", len(past))
                 refs = [r for r in refs if r not in past]
+        refs = self._scoped(text, refs + news, scope)
         self.last_references = refs
         logger.info("知識パック検索: %d 件, %.0f ms", len(refs), result.elapsed_ms)
         for r in refs:
             logger.debug("  参考資料 %.3f %s", r.vector_score, r.title)
         return refs
+
+    def _scoped(self, text: str, refs: list[Reference], scope: IntentScope | None) -> list[Reference]:
+        """型の範囲で資料を絞る（名詞の足切りと件数。WP13 B-2）。"""
+        if scope is None:
+            return refs
+        if scope.need_noun:
+            # 発話の名詞と、「今週末」などを具体的な日付にした語（行事の資料は日付で書かれている）
+            ns = nouns(text) + self._expand_dates(text)[len(text):].split()
+            head = self._kcfg.noun_head_chars
+            kept = [r for r in refs if any(n in r.title or n in r.text[:head] for n in ns)]
+            if len(kept) < len(refs):
+                logger.info("発話の名詞が題名・本文の先頭に無い資料を %d 件外しました", len(refs) - len(kept))
+            refs = kept
+        return refs[: scope.top_k]
 
     def _expand_dates(self, text: str) -> str:
         """「今週末」「来週末」「今日」「明日」を具体的な日付にして検索語に足す（行事の資料は日付で書かれている）。"""

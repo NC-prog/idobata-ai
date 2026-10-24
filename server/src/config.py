@@ -637,6 +637,17 @@ class DialogueConfig:
 
 
 @dataclass(frozen=True)
+class IntentScope:
+    """発話の型ごとの、毎ターンの検索の範囲（WP13 B）。"""
+
+    uses: tuple[str, ...]
+    top_k: int
+    need_noun: bool = False
+    news: bool = False
+    only_without_approved: bool = False
+
+
+@dataclass(frozen=True)
 class KnowledgeConfig:
     """知識パック（kb/build.py の成果物）の検索の設定。"""
 
@@ -666,6 +677,26 @@ class KnowledgeConfig:
     embed_threads: int = 4
     # 用途（WP13）で絞って検索するとき、候補を何倍取ってから落とすか
     use_filter_widen: int = 4
+    # 発話の型（WP13 B、server/context/intents.yaml）ごとに、毎ターンの検索で渡してよい範囲。
+    # uses: パックの用途 / top_k: 渡す件数（0 で渡さない） / need_noun: 発話の名詞が資料の題名か本文の先頭にあるものだけ /
+    # news: お知らせ（WP11 の紹介する記事）も候補に / only_without_approved: 承認済みの手続きナレッジに当たらなかったときだけ
+    scope_by_intent: dict[str, IntentScope] = field(default_factory=lambda: {
+        "procedure": IntentScope(("dialogue",), 2, need_noun=False, only_without_approved=True),
+        "facility": IntentScope((), 0),
+        "event": IntentScope(("dialogue",), 3, need_noun=True, news=True),
+        "tourism": IntentScope((), 0),
+        "weather": IntentScope((), 0),
+        "smalltalk": IntentScope((), 0),
+        "other": IntentScope(("dialogue",), 3, need_noun=True),
+    })
+    intents_path: Path = SERVER_ROOT / "context" / "intents.yaml"
+    # 型分けで「問い」とみなす形（DialogueConfig.visitor_question_pattern に、「いくら」「〜は」で終わる問いなどを足したもの）
+    intent_question_pattern: str = (
+        r"[か？?][。]?$|ますか|ですか|どこ|いつ|何|なに|どう|教えて|いくら|どれ|どなた|誰|ある[？?。]?$|あるん|"
+        r"(は|って)[？?。]?$|知りたい|聞きたい"
+    )
+    # 名詞の足切り（B-2）で見る本文の先頭の字数
+    noun_head_chars: int = 200
 
 
 @dataclass(frozen=True)

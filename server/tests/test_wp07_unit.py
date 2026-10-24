@@ -135,7 +135,7 @@ class _KB:
     def __init__(self, refs: list[Reference]) -> None:
         self.refs = refs
 
-    def search(self, query: str) -> SearchResult:
+    def search(self, query: str, uses: Any = None) -> SearchResult:
         return SearchResult(list(self.refs), 1.0)
 
 

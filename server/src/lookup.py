@@ -31,6 +31,7 @@ import httpx
 import yaml
 
 from .config import LookupConfig
+from .intents import nouns
 from .knowledge import _BM25, JST, Reference, bigrams
 
 logger = logging.getLogger(__name__)
@@ -127,8 +128,11 @@ class Lookup:
     """許可ドメインを、その場で見に行く。"""
 
     def __init__(self, cfg: LookupConfig, site: str, data_dir: Path,
-                 make_query: Callable[[str], Awaitable[str | None]]) -> None:
+                 make_query: Callable[[str], Awaitable[str | None]],
+                 pack: Callable[[str], list[Reference]] | None = None) -> None:
         self._cfg = cfg
+        # 知識パックを dialogue と lookup の両方で引く（WP13 B。会話の毎ターンの検索に出さない lookup の区画も、調べるでは使う）
+        self._pack = pack
         self._site = site
         # 版のディレクトリ（kb/<site> はリンクで、作り直すと付け替わる）の外に置く
         self._queue_path = data_dir / "kb" / f"{site}.seed_queue.jsonl"
@@ -140,6 +144,17 @@ class Lookup:
         query = await self._make_query(user_text)
         if not query:
             return LookupResult(found=False)
+        if self._pack is not None:
+            ns = nouns(query)
+            try:
+                refs = [r for r in await asyncio.to_thread(self._pack, query)
+                        if any(n in r.title or n in r.text[:200] for n in ns)]
+            except Exception:
+                logger.warning("調べる: 知識パックを引けません（サイトを見に行きます）", exc_info=True)
+                refs = []
+            if refs:
+                logger.info("調べる: 知識パックで %d 件見つかりました", len(refs))
+                return LookupResult(found=True, references=refs[: self._cfg.max_pages])
         try:
             result = await asyncio.wait_for(self._search(query), self._cfg.timeout_sec)
         except TimeoutError:
