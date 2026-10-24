@@ -108,6 +108,10 @@
   WP09 C の評価で足した安全装置: 規則で課が決まらない下書きの手続きで LLM が言う課を捨てる（WP13 で、手続きの型なのに
   手続きナレッジに当たらず規則でも課が決まらないときにも広げた）、拠点に無い課の名前、課の階・場所の作り話、
   資料に無い書類（持ち物）・日付、過ぎた日付をこれからと言う、ト書きの漏れ
+- 英字の安全装置（WP13。応答とお知らせの要約で同じ）: 大文字だけの略語（英字 2〜5 字。PDF・QR・LINE・ATM…）は 1 応答・1 要約に 3 語まで
+  （VOICEVOX は字ごとに読む）。小文字・混在の英単語は言い直し→捨てる。読みを決めたい語（Wi-Fi・Web・km・kg・cm・℃）は
+  `server/context/allowed_terms.yaml` に置き、数えずに VOICEVOX のユーザー辞書へ（辞書が効かない「℃」は合成の直前に「度」）。
+  英字が 4 語以上・ピリオドで終わる英字の並び（英文）は従来どおり。拠点 YAML の `allow_ascii`（江田島の LINE・JR）は数に入れない
 - 案内役の人物像は `server/context/persona.yaml`（WP05。肩書 `role_title` は `IDOBATA_ROLE_TITLE` で差し替え可）。
   人物像は【話し方の決まり】の後ろに置き、事実・出典・設備と課の安全装置・日本語のみの規則が優先。
   人物像と食い違う言い方（contradictions）は読み上げない。資料の無い地区の様子は作らず教えてもらう
@@ -123,7 +127,7 @@
   パックの各版に `news` のリンクがあり `kb/<site>/news/` で読める（版を差し替えても残る）。`kb/build.py` の `--daily`・全体の両方で
   収集（`sources/<site>.yaml` の `news`。江田島 Atom 3 本・安芸太田 RSS 1.0 3 本）→ 分類（`server/context/news.yaml` の語、決まらなければ LLM の二択）→
   要約（110〜140 字、本文から規則で抜いた日付の一覧を渡す。保存の前に `Dialogue.fixed_text_problems` と `news.summary_problems` の安全装置、
-  VOICEVOX で 15〜22 秒。外れたら held で紹介しない）。夜だけ別の LLM は `IDOBATA_NIGHT_LLM_URL` / `IDOBATA_NIGHT_LLM_MODEL`（空なら 7560）。
+  VOICEVOX で 15〜22 秒。外れたら held で紹介しない。英字だけが理由の保留は夜に掛け直す）。夜だけ別の LLM は `IDOBATA_NIGHT_LLM_URL` / `IDOBATA_NIGHT_LLM_MODEL`（空なら 7560）。
   画像は許可ドメイン内・記事と同じホストのものだけ（外部サイトの画像は取らない）。状態は auto / stopped / priority / held。
   紹介の順番は 優先 → 分類の重み（通行止め・ライフライン・防災 ＞ 施設・ごみ ＞ その他）→ 掲載日の新しい順 → 紹介した回数の少ない順。
   出さない: 紹介状の聞き取りの途中・深刻な打ち明けや迷子の定型に入った会話・急いでいる語・既に 1 件提案した会話・候補 0 件。
