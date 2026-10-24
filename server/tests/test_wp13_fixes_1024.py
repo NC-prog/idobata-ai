@@ -114,7 +114,7 @@ async def test_clarify_on_questions_and_requests(tmp_path: Path, text: str) -> N
     assert c._pending is not None and c._pending.action == "clarify", text
 
 
-def StubLLMs() -> Any:  # noqa: N802  （テストの中で読む偽の LLM）
+def StubLLMs() -> Any:
     from tests.test_actions_unit import StubLLM
 
     return StubLLM([["そうなんですね。"]])
