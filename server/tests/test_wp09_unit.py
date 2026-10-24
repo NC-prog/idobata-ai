@@ -387,7 +387,8 @@ async def test_fixed_replies_for_other_person_opinion_ai_privacy_and_cannot() ->
     out = await _collect(d, "選挙は誰に入れたらいいと思う？")
     assert d.last_safety == "opinion" and "選挙管理委員会事務局（3階）" in out[-1]
     assert "AI" in (await _collect(d, "いどちゃんはAIなの？"))[0]
-    assert (await _collect(d, "録音してる？"))[0] == "声は録音していません。"
+    privacy = await _collect(d, "録音してる？")  # WP12 から声も 7 日残す（既定）。録音していないとは言わない
+    assert "文字と声の記録を7日間" in privacy[0] and not any("録音していません" in x for x in privacy)
     out = await _collect(d, "お金貸してくれん？")
     assert d.last_safety == "cannot_money" and "社会福祉課（2階）" in out[-1]
     await _collect(d, "代わりに申請しといてよ")

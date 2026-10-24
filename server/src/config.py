@@ -561,7 +561,14 @@ class DialogueConfig:
         r"録音|録画|(撮って|撮影して|写して)(る|い|ます)|カメラ(で|は|って|に)?[^。]{0,6}(撮|映|見|写)|"
         r"(会話|話|声|内容)(は|を|って|も)?[^。]{0,4}(記録|保存|残)(して|され|る|す)|記録(して|され)(る|い|ます)"
     )
+    # 発話区間の音声も残す設定（WP12、既定）のとき。掲示文言の案（docs/市への確認事項.md の 5）どおり
     privacy_lines: tuple[str, ...] = (
+        "お話は、文字と声の記録を{days}日間、庁内に残し、品質の確認のために決まった管理者だけが確かめて、その後消します。",
+        "声や映像が建物の外に出ることはありません。",
+        "カメラは、前に人がいるかを見るためだけに使っていて、映像は残しません。",
+    )
+    # 音声を残さない設定（IDOBATA_AUDIO_RETENTION_DAYS=0）のとき（WP06 の文言）
+    privacy_lines_no_audio: tuple[str, ...] = (
         "声は録音していません。",
         "お話の内容は、間違いを直すために文字だけを{days}日間、庁内に残し、決まった職員だけが読みます。",
         "カメラは、前に人がいるかを見るためだけに使っていて、映像は残しません。",
@@ -944,10 +951,31 @@ class AdminConfig:
 
 @dataclass(frozen=True)
 class TranscriptConfig:
-    """会話の文字記録（$DATA/transcripts/<site>/<date>.jsonl、WP06）。音声・映像は残さない。"""
+    """会話の文字記録（$DATA/transcripts/<site>/<date>.jsonl、WP06）。来訪者の発話区間の音声は WP12（AudioRetentionConfig）。"""
 
-    # 保持日数（起動時に古い日を消す。保全したセッションは残す）。環境変数 IDOBATA_TRANSCRIPT_RETENTION_DAYS
+    # 保持日数（起動時と毎日 cleanup_hour 時に古い日を消す。保全したセッションは残す）。環境変数 IDOBATA_TRANSCRIPT_RETENTION_DAYS
     retention_days: int = 7
+    # 1 日 1 回の掃除の時刻（JST の時。窓口機は何日も起動したままなので、起動時だけでは消えない。WP12）
+    cleanup_hour: int = 4
+
+
+@dataclass(frozen=True)
+class AudioRetentionConfig:
+    """来訪者の発話区間の音声（WP12）。$DATA/transcripts/<site>/<date>/audio/<utterance_id>.wav。
+
+    VAD で切って ASR に渡した区間だけ（案内役の応答は VOICEVOX で再合成できるので残さない）。輪が無くて ASR に渡さなかった
+    音声・輪の外の話者の音声は残さない。読むのは管理者ロール（/admin/transcripts/）だけで、誤り探しの素材には入れない。
+    """
+
+    # 保持日数。環境変数 IDOBATA_AUDIO_RETENTION_DAYS（0 で保存しない）
+    retention_days: int = 7
+    sample_rate: int = 16000
+    format: str = "wav"
+    # 紹介状の聞き取り（氏名・地区・電話番号）の区間も残すか（文字記録は従来どおり伏せる）。テスト運用の方針（2026-10-24）
+    include_intake: bool = True
+    # ディスクの空きがこれを切ったら保存を止める（WARNING を 1 回）
+    min_free_bytes: int = 1024 ** 3
+    subdir: str = "audio"
 
 
 @dataclass(frozen=True)
@@ -1167,6 +1195,7 @@ class AppConfig:
     staff: StaffConfig = field(default_factory=StaffConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
     transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
+    audio: AudioRetentionConfig = field(default_factory=AudioRetentionConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     party: PartyConfig = field(default_factory=PartyConfig)
     speaker: SpeakerConfig = field(default_factory=SpeakerConfig)
@@ -1255,6 +1284,8 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         staff=staff,
         admin=admin,
         transcript=transcript,
+        audio=AudioRetentionConfig(retention_days=int(_parse_float(
+            env, "IDOBATA_AUDIO_RETENTION_DAYS", AudioRetentionConfig.retention_days))),
         camera=camera,
         persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
         procedure=ProcedureConfig(recheck_keep_using=env.get("IDOBATA_PROCEDURE_RECHECK_USE", "1").strip().lower()

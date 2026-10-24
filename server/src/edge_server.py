@@ -40,7 +40,7 @@ from .procedure_panel import ProcedurePanel
 from .procedures import AsrFixes
 from .referrals import ReferralStore, TidbitStore, VisitLog, today_stats
 from .themes import ThemeSelector, safe_name
-from .transcripts import TranscriptStore
+from .transcripts import AudioStore, TranscriptStore
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +135,12 @@ class StaffPanel:
 
 
 class AdminPanel:
-    """管理者ページの中身（会話の文字記録）。"""
+    """管理者ページの中身（会話の文字記録と、来訪者の発話区間の音声。WP12）。"""
 
-    def __init__(self, transcripts: TranscriptStore, cfg: AdminConfig) -> None:
+    def __init__(self, transcripts: TranscriptStore, cfg: AdminConfig, audio: AudioStore | None = None) -> None:
         self.transcripts = transcripts
         self.cfg = cfg
+        self.audio = audio
 
 
 def _is_lan(host: str | None) -> bool:
@@ -184,7 +185,8 @@ def _add_admin_routes(app: FastAPI, panel: AdminPanel) -> None:
     @app.get("/admin/transcripts/", include_in_schema=False, dependencies=auth)
     async def transcripts_page() -> HTMLResponse:
         html = _ADMIN_HTML.read_text(encoding="utf-8").replace(
-            "__RETENTION_DAYS__", str(panel.transcripts.retention_days))
+            "__RETENTION_DAYS__", str(panel.transcripts.retention_days)).replace(
+            "__AUDIO_DAYS__", str(panel.audio.cfg.retention_days if panel.audio is not None else 0))
         return HTMLResponse(html)
 
     @app.get("/admin/api/transcripts/days", dependencies=auth)
@@ -193,7 +195,27 @@ def _add_admin_routes(app: FastAPI, panel: AdminPanel) -> None:
 
     @app.get("/admin/api/transcripts", dependencies=auth)
     async def transcript_sessions(day: str | None = None) -> list[dict[str, Any]]:
-        return panel.transcripts.sessions(_parse_day(day))
+        d = _parse_day(day)
+        sessions = panel.transcripts.sessions(d)
+        with_audio = {str(r.get("session_id")) for r in panel.transcripts.read(d) if r.get("audio")}
+        for x in sessions:
+            x["has_audio"] = x["session_id"] in with_audio
+        return sessions
+
+    @app.get("/admin/api/transcripts/audio_size", dependencies=auth)
+    async def transcript_audio_size(day: str | None = None) -> dict[str, Any]:
+        d = _parse_day(day).isoformat()
+        files, size = panel.audio.day_size(d) if panel.audio is not None else (0, 0)
+        return {"day": d, "files": files, "bytes": size,
+                "retention_days": panel.audio.cfg.retention_days if panel.audio is not None else 0}
+
+    @app.get("/admin/transcripts/audio/{day}/{uid}", include_in_schema=False, dependencies=auth)
+    async def transcript_audio(day: str, uid: str) -> FileResponse:
+        path = panel.audio.file(day, uid.removesuffix(".wav")) if panel.audio is not None else None
+        if path is None:
+            raise HTTPException(404, "音声がありません")
+        # Range 対応（FileResponse）。ブラウザ・途中のどこにも残さない
+        return FileResponse(path, media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     @app.get("/admin/api/transcripts/{day}/{session_id}", dependencies=auth)
     async def transcript_session(day: str, session_id: str) -> list[dict[str, Any]]:

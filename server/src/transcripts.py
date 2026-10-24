@@ -1,7 +1,7 @@
 """会話の文字記録（WP06）。
 
 ``$DATA/transcripts/<site>/<date>.jsonl`` に 1 発話 1 行で書く（話者 user / assistant / backchannel）。
-音声・映像は残さない。保持は transcript.retention_days（既定 7 日、IDOBATA_TRANSCRIPT_RETENTION_DAYS）で、
+来訪者の発話区間の音声は WP12 から ``<date>/audio/<id>.wav`` に並べて残す（AudioStore。映像は残さない）。保持は transcript.retention_days（既定 7 日、IDOBATA_TRANSCRIPT_RETENTION_DAYS）で、
 起動時に期限を過ぎた日のファイルを消す。セッション単位の「保全」（holds.json）が付いた会話は、
 期限を過ぎてもその行だけ残す（保全を外すと次の起動で消える）。
 
@@ -14,11 +14,17 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
+import shutil
 import threading
+import wave as wave_mod
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from .config import AudioRetentionConfig
 from .knowledge import JST
 
 logger = logging.getLogger(__name__)
@@ -145,4 +151,120 @@ class TranscriptStore:
                     path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept), encoding="utf-8")
                 else:
                     path.unlink(missing_ok=True)
+        return removed
+
+
+# ---- 来訪者の発話区間の音声（WP12） ------------------------------------------
+
+_UID_RE = re.compile(r"^[0-9A-Za-z_-]{6,40}$")
+_DAY_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def new_utterance_id(now: datetime | None = None) -> str:
+    """発話の id（文字記録の行の id と音声のファイル名に使う）。"""
+    t = now or datetime.now(JST)
+    return f"{t:%H%M%S}-{secrets.token_hex(3)}"
+
+
+class AudioStore:
+    """来訪者の発話区間の音声（$DATA/transcripts/<site>/<date>/audio/<id>.wav、16kHz モノラル 16bit）。
+
+    書き込みは呼び出し側が別スレッドで行う（ターンを止めない）。空きが min_free_bytes を切ったら保存を止める。
+    期限（retention_days）を過ぎた日の音声は掃除で消す。保全したセッションの音声は文字記録と同じく残す。
+    """
+
+    def __init__(self, transcripts: TranscriptStore, cfg: AudioRetentionConfig) -> None:
+        self.transcripts = transcripts
+        self.cfg = cfg
+        self._warned_disk = False
+
+    @property
+    def enabled(self) -> bool:
+        return self.cfg.retention_days > 0
+
+    def relpath(self, day: str, uid: str) -> str:
+        """文字記録の行の audio の値（transcripts/<site>/ からの相対パス）。"""
+        return f"{day}/{self.cfg.subdir}/{uid}.{self.cfg.format}"
+
+    def _dir(self, day: str) -> Path:
+        return self.transcripts.root / day / self.cfg.subdir
+
+    def file(self, day: str, uid: str) -> Path | None:
+        """配信してよい音声のファイル（日付と id の形を確かめる。無ければ None）。"""
+        if not (_DAY_DIR_RE.match(day) and _UID_RE.match(uid)):
+            return None
+        path = self._dir(day) / f"{uid}.{self.cfg.format}"
+        return path if path.is_file() else None
+
+    def disk_ok(self) -> bool:
+        """空きが足りるか（足りなければ WARNING を 1 回だけ出して保存を止める）。"""
+        probe = self.transcripts.root if self.transcripts.root.exists() else self.transcripts.root.parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        free = shutil.disk_usage(probe).free
+        if free >= self.cfg.min_free_bytes:
+            self._warned_disk = False
+            return True
+        if not self._warned_disk:
+            logger.warning("ディスクの空きが %.1f GB を切ったので、発話の音声の保存を止めます（空き %.2f GB）",
+                           self.cfg.min_free_bytes / 1024 ** 3, free / 1024 ** 3)
+            self._warned_disk = True
+        return False
+
+    def save(self, day: str, uid: str, wave: np.ndarray) -> bool:
+        """1 区間を WAV で書く（float32 の -1〜1 を 16bit に）。書けなければ False（会話は止めない）。"""
+        if not self.enabled or not self.disk_ok():
+            return False
+        pcm = (np.clip(np.asarray(wave, dtype=np.float32), -1.0, 1.0) * 32767).astype("<i2")
+        path = self._dir(day) / f"{uid}.{self.cfg.format}"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            with wave_mod.open(str(tmp), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(self.cfg.sample_rate)
+                w.writeframes(pcm.tobytes())
+            tmp.replace(path)
+        except OSError:
+            logger.warning("発話の音声を書けません", exc_info=True)
+            return False
+        return True
+
+    def day_size(self, day: str) -> tuple[int, int]:
+        """その日の音声の (ファイル数, 合計バイト)。"""
+        d = self._dir(day)
+        if not _DAY_DIR_RE.match(day) or not d.is_dir():
+            return 0, 0
+        files = list(d.glob(f"*.{self.cfg.format}"))
+        return len(files), sum(f.stat().st_size for f in files)
+
+    def cleanup(self, today: date | None = None) -> int:
+        """保持期間を過ぎた日の音声を消す（保全したセッションの行の音声だけ残す）。消したファイル数を返す。
+
+        保持日数が 0（保存しない設定）なら、残っている音声もすべて期限切れとして消す。
+        """
+        today = today or datetime.now(JST).date()
+        keep_from = today - timedelta(days=self.cfg.retention_days)
+        holds = self.transcripts.holds()
+        removed = 0
+        root = self.transcripts.root
+        if not root.is_dir():
+            return 0
+        for day_dir in sorted(p for p in root.iterdir() if p.is_dir() and _DAY_DIR_RE.match(p.name)):
+            if self.enabled and date.fromisoformat(day_dir.name) >= keep_from:
+                continue
+            held = {str(r.get("id")) for r in self.transcripts.read(date.fromisoformat(day_dir.name))
+                    if r.get("session_id") in holds and r.get("id")}
+            audio_dir = day_dir / self.cfg.subdir
+            for f in list(audio_dir.glob("*")) if audio_dir.is_dir() else []:
+                if f.stem in held:
+                    continue
+                f.unlink(missing_ok=True)
+                removed += 1
+            for d in (audio_dir, day_dir):
+                try:
+                    d.rmdir()  # 空になったら消す（残りがあれば OSError）
+                except OSError:
+                    pass
         return removed

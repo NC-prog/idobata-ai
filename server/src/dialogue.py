@@ -766,7 +766,9 @@ class Dialogue:
             role = self._persona.role_title if self._persona else "案内役"
             lines = [x.format(role_title=role) for x in cfg.ai_lines]
         else:
-            lines = [x.format(days=config.transcript.retention_days) for x in cfg.privacy_lines]
+            audio_days = config.audio.retention_days  # 音声を残す設定なら、文字と声の記録の文言（WP12）
+            src = cfg.privacy_lines if audio_days > 0 else cfg.privacy_lines_no_audio
+            lines = [x.format(days=max(config.transcript.retention_days, audio_days)) for x in src]
         if kind in ("crisis", "lost_child"):
             logger.warning("定型に切り替えました（%s）", kind)
         else:
