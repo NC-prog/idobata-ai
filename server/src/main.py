@@ -52,7 +52,13 @@ from .procedure_panel import ProcedurePanel, approved_view
 from .procedures import AsrFixes, load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
 from .roles import Roles, publicity_role, reception_role
-from .site_context import Facility, load_facility, load_site_words, referral_csv_enabled
+from .site_context import (
+    Facility,
+    load_allowed_terms,
+    load_facility,
+    load_site_words,
+    referral_csv_enabled,
+)
 from .speaker import SpeakerClusters, SpeakerEmbedder
 from .speech_gate import SpeechGate
 from .speech_output import (
@@ -306,8 +312,10 @@ class VoiceLoop:
     async def run(self) -> None:
         """モードに応じたループを実行する。"""
         # 固有名詞の読みを先に登録する（プリウォームの合成より前に）
+        # 英字のまま出してよい語（allowed_terms.yaml の Wi-Fi・km など。WP13）の読みも同じ経路で登録する
         await self._tts.sync_user_dict(load_site_words(config.site, config.asr.site_context_dir,
-                                                       config.actions.avatar_name, config.actions.avatar_accent))
+                                                       config.actions.avatar_name, config.actions.avatar_accent)
+                                       + load_allowed_terms(config.dialogue.allowed_terms_path))
         await self._tts.prewarm()
         if self._backchannels is not None:
             await self._backchannels.prepare(self._tts, config.actions.backchannel_prepare_budget_sec)

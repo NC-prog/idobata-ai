@@ -252,8 +252,14 @@ class DialogueConfig:
     presence_penalty: float = 0.3
     # 応答の文に英字の連なり（この文字数以上）があれば、その文だけ日本語で言い直させる
     ascii_run_min: int = 3
-    # どの拠点でも英字のまま言ってよい語（拠点 YAML の allow_ascii に足される）
+    # どの拠点でも英字のまま言ってよい語（拠点 YAML の allow_ascii に足される。数に入れない）
     allow_ascii_common: tuple[str, ...] = ("AED",)
+    # 大文字だけの略語（英字 2〜5 字。PDF・QR・LINE）は 1 応答（お知らせの要約なら 1 本）につきこの数まで（WP13）
+    abbrev_max_per_reply: int = 3
+    # 1 文の英字の語がこの数以上なら英文とみなす（略語・allowed_terms.yaml の語でも言い直し→捨てる）
+    english_words_min: int = 4
+    # 英字のまま出してよい語と読み（数えず、VOICEVOX のユーザー辞書に登録する）
+    allowed_terms_path: Path = SERVER_ROOT / "context" / "allowed_terms.yaml"
     rephrase_max_tokens: int = 128
     rephrase_prompt: str = (
         "次の文を、意味を変えずに日本語だけで言い直してください。英単語は日本語かカタカナにし、"

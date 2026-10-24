@@ -176,6 +176,22 @@ def load_facility(site: str, context_dir: Path) -> Facility | None:
     )
 
 
+def load_allowed_terms(path: Path) -> list[SiteWord]:
+    """英字のまま出してよい語と読み（context/allowed_terms.yaml。WP13）。VOICEVOX の辞書だけに入れる（ASR には渡さない）。"""
+    try:
+        data: Any = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        logger.warning("allowed_terms.yaml を読めません: %s", path, exc_info=True)
+        return []
+    out: list[SiteWord] = []
+    for t in data.get("terms") or []:
+        if isinstance(t, dict) and t.get("surface"):
+            accent = t.get("accent")
+            out.append(SiteWord(str(t["surface"]), str(t.get("reading") or "") or None,
+                                int(accent) if accent is not None else None, asr=False))
+    return out
+
+
 def load_site_words(site: str, context_dir: Path, avatar_name: str = "",
                     avatar_accent: int | None = None) -> list[SiteWord]:
     """拠点の YAML から語を読む（表記の重複は先勝ち）。

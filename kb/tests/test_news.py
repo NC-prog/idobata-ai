@@ -310,3 +310,27 @@ def test_fetch_status_and_tidy_existing_summary(tmp_path: Path) -> None:
     save_record(tmp_path, r)
     stats = news_summarize.summarize(tmp_path, "akiota", _LLM([]), None, CFG, now=NOW)  # type: ignore[arg-type]
     assert stats["tidied"] == 1 and load_records(tmp_path)[0].summary == "11月10日10時から通行止めです。"
+
+
+def test_english_only_hold_is_rejudged_without_rewriting(tmp_path: Path) -> None:
+    # 英字だけが理由で保留になった要約（前の規則の「英単語」）は、次の夜に書き直さず今の規則で掛け直す（WP13）
+    summary = "町道津浪巡回線は、11月10日から11月14日まで終日全面通行止めです。地図はPDFでご覧いただけます。"
+    r = _record(title="通行止めのお知らせ", body=BODY + "地図はPDFで公開しています。", relevance="introduce",
+                summary=summary, summarized_hash="h1", content_hash="h1", status="held",
+                summary_checks={"result": "held", "reasons": ["英単語"], "speech_sec": 18.0})
+    save_record(tmp_path, r)
+    llm = _LLM([])  # 書き直さない（呼ばれたら落ちる）
+    stats = news_summarize.summarize(tmp_path, "akiota", llm, None, CFG, now=NOW)  # type: ignore[arg-type]
+    got = load_records(tmp_path)[0]
+    assert stats["rejudged"] == 1 and not llm.calls
+    assert got.summary == summary and got.summary_checks["result"] == "ok" and got.status != "held"
+    assert got.summary_checks["speech_sec"] == 18.0
+
+
+def test_staff_edited_english_hold_is_not_touched(tmp_path: Path) -> None:
+    r = _record(title="通行止めのお知らせ", body=BODY, relevance="introduce", summary="PDFで。", edited_by_staff=True,
+                summarized_hash="h1", content_hash="h1", status="held",
+                summary_checks={"result": "held", "reasons": ["英単語"]})
+    save_record(tmp_path, r)
+    stats = news_summarize.summarize(tmp_path, "akiota", _LLM([]), None, CFG, now=NOW)  # type: ignore[arg-type]
+    assert stats["rejudged"] == 0 and load_records(tmp_path)[0].summary_checks["reasons"] == ["英単語"]

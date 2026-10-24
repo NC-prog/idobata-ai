@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import unicodedata
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import date, datetime, timedelta
@@ -35,7 +36,7 @@ from .persona import (
 from .procedure_kb import PROCEDURE_TRUST, ProcedureRecord
 from .procedures import Procedures
 from .roles import Role
-from .site_context import Facility
+from .site_context import Facility, load_allowed_terms
 from .timeofday import fix_greeting, greeting_for
 
 logger = logging.getLogger(__name__)
@@ -244,6 +245,43 @@ def _short_name(name: str) -> str:
     return re.split(r"[（(]", name, maxsplit=1)[0].strip()
 
 
+_ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
+_ABBREV_RE = re.compile(r"[A-Z]{2,5}")
+# 英文: ピリオドで終わる、2 語以上の英字の並び（「Thank you.」）
+_ENGLISH_SENTENCE_RE = re.compile(r"[A-Za-z]+(?:[ ,'\-]+[A-Za-z]+)+\s*\.(?:\s|$)")
+ABBREV_REASON = "（大文字の略語は 3 語まで、ほかは allowed_terms.yaml）"
+
+
+def foreign_tokens(sentence: str, used: set[str], *, allowed_terms: tuple[str, ...], allow_ascii: set[str],
+                   abbrev_max: int, run_min: int, english_words_min: int) -> list[str]:
+    """読み上げてはいけない英字の語（WP13）。空なら通る。used はこの応答で使った大文字の略語（ここで足す）。
+
+    - allowed_terms（Wi-Fi・km など）と allow_ascii（拠点の JR・AED）は数えない
+    - 大文字だけの略語（2〜5 字）は 1 応答に abbrev_max 語まで。それを超えた語から
+    - 小文字・混在の英単語は run_min 字以上なら
+    - 英字の語が english_words_min 語以上、またはピリオドで終わる英字の並び（英文）は、全部の語
+    """
+    s = unicodedata.normalize("NFKC", sentence)
+    for t in sorted(allowed_terms, key=len, reverse=True):
+        s = s.replace(t, "＿")
+    words = _ASCII_WORD_RE.findall(s)
+    if not words:
+        return []
+    if len(words) >= english_words_min or _ENGLISH_SENTENCE_RE.search(s):
+        return words
+    out: list[str] = []
+    for w in words:
+        if w.lower() in allow_ascii:
+            continue
+        if _ABBREV_RE.fullmatch(w):
+            used.add(w)
+            if len(used) > abbrev_max:
+                out.append(w)
+        elif len(w) >= run_min:
+            out.append(w)
+    return out
+
+
 def speech_text(sentence: str) -> str:
     """読み上げる文（括弧書きは字幕だけに残し、読み上げない）。"""
     return re.sub(r"\s+", " ", _PAREN_RE.sub("", sentence)).strip()
@@ -315,7 +353,9 @@ class Dialogue:
         # 直近の応答が出した行為の提案（<propose:…>）。無ければ None
         self.last_proposal: str | None = None
         self._now = now
-        self._ascii_re = re.compile(rf"[A-Za-zＡ-Ｚａ-ｚ]{{{self._cfg.ascii_run_min},}}")
+        # 英字のまま出してよい語（allowed_terms.yaml）と、この応答で使った大文字の略語（1 応答に 3 語まで。WP13）
+        self._allowed_terms = tuple(w.surface for w in load_allowed_terms(self._cfg.allowed_terms_path))
+        self._abbrev_used: set[str] = set()
         self._allow_ascii = {a.lower() for a in (
             (facility.allow_ascii if facility else ()) + self._cfg.allow_ascii_common)}
         self._banned = tuple(self._cfg.banned_phrases) + (facility.outside_places if facility else ())
@@ -434,6 +474,7 @@ class Dialogue:
         self.last_safety = None
         self.last_procedures = []
         self._forced = None
+        self._abbrev_used = set()
         self.last_dropped = []
         self.last_search_query = None
         self.last_search_ms = None
@@ -1293,8 +1334,9 @@ class Dialogue:
                 self.note_drop("指示文の漏れ", s)
             if any(p in s for p in self._banned):
                 self.note_drop("言わない言い回し", s)
-            if self._has_foreign_word(s):
-                self.note_drop("英単語", s)
+            bad = self.foreign_tokens(s)
+            if bad:
+                self.note_drop(f"英字: {'・'.join(dict.fromkeys(bad))}{ABBREV_REASON}", s)
             if self._fix_unknown_department(s, None) is not None and (
                     self._fix_department_floor(s) != s or self._fix_floor_of_last_department(s, said) != s):
                 self.note_drop("課の階・場所の作り話", s)
@@ -1630,13 +1672,21 @@ class Dialogue:
         """LLM が作った検索語の安全装置（英字・言わない言い回し・長すぎるものは使わない）。"""
         q = re.sub(r"[「」『』、。,.!?！？\n]", " ", (raw or "")).strip()
         q = re.sub(r"\s+", " ", q)[:40]
-        if not q or self._has_foreign_word(q) or any(p in q for p in self._banned):
+        if not q or self._has_foreign_word(q, count=False) or any(p in q for p in self._banned):
             return None
         return q
 
-    def _has_foreign_word(self, sentence: str) -> bool:
-        """英字の連なり（許可語以外）か、日本語の文字集合に無い漢字（中国語の簡体字など）があるか。"""
-        if any(m.lower() not in self._allow_ascii for m in self._ascii_re.findall(sentence)):
+    def foreign_tokens(self, sentence: str, count: bool = True) -> list[str]:
+        """読み上げてはいけない英字の語（foreign_tokens）。count=False なら略語の数に足さない（検索語の検査）。"""
+        used = self._abbrev_used if count else set(self._abbrev_used)
+        cfg = self._cfg
+        return foreign_tokens(sentence, used, allowed_terms=self._allowed_terms, allow_ascii=self._allow_ascii,
+                              abbrev_max=cfg.abbrev_max_per_reply, run_min=cfg.ascii_run_min,
+                              english_words_min=cfg.english_words_min)
+
+    def _has_foreign_word(self, sentence: str, count: bool = True) -> bool:
+        """読み上げてはいけない英字の語（略語の数・英単語・英文）か、日本語の文字集合に無い漢字（中国語の簡体字など）があるか。"""
+        if self.foreign_tokens(sentence, count):
             return True
         return any(_is_non_japanese_kanji(ch) for ch in sentence)
 

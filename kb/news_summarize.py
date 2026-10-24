@@ -224,12 +224,27 @@ def recheck_staff_summary(r: NewsRecord, checker: Dialogue, today: date) -> None
     refresh_status(r)
 
 
+def english_only_hold(r: NewsRecord) -> bool:
+    """英字だけが理由で保留になった要約か（WP13 で英字の規則を「大文字の略語は 3 語まで」に緩めた。前の理由は「英単語」）。"""
+    reasons = [str(x) for x in (r.summary_checks or {}).get("reasons") or []]
+    return (bool(r.summary) and (r.summary_checks or {}).get("result") == "held" and bool(reasons)
+            and all(x == "英単語" or x.startswith("英字") for x in reasons))
+
+
+def recheck_english_hold(r: NewsRecord, checker: Dialogue, today: date) -> None:
+    """英字だけで保留の要約を、書き直さずに今の規則で掛け直す（読み上げの長さは前に測ったまま）。"""
+    problems = checks_for(r.summary, r, checker, today)
+    r.summary_checks = {**r.summary_checks, "result": "held" if problems else "ok", "reasons": problems,
+                        "checked_at": datetime.now(JST).isoformat(timespec="seconds"), "by": "night"}
+    refresh_status(r)
+
+
 def summarize(store: Path, site: str, llm: NightLLM, meter: SpeechMeter | None, cfg: NewsConfig | None = None,
               force: bool = False, now: datetime | None = None) -> dict[str, int]:
     cfg = cfg or config.news
     at = now or datetime.now(JST)
     checker = make_checker(site, at)
-    stats = {"summarized": 0, "ok": 0, "held": 0, "pending": 0, "staff": 0, "expired": 0, "tidied": 0}
+    stats = {"summarized": 0, "ok": 0, "held": 0, "pending": 0, "staff": 0, "expired": 0, "tidied": 0, "rejudged": 0}
     for r in load_records(store):
         tidy = tidy_summary(r.summary)
         if tidy != r.summary:  # 前に保存した要約にも後処理を当てる（「10時00分」→「10時」）
@@ -246,6 +261,11 @@ def summarize(store: Path, site: str, llm: NightLLM, meter: SpeechMeter | None, 
                 recheck_staff_summary(r, checker, at.date())
                 save_record(store, r)
             stats["staff"] += 1
+        elif not force and r.summarized_hash == r.content_hash and english_only_hold(r):
+            # 英字だけが理由の保留（職員が直したものは上で触らない）: 今の規則で掛け直す
+            recheck_english_hold(r, checker, at.date())
+            save_record(store, r)
+            stats["rejudged"] += 1
         elif force or r.summarized_hash != r.content_hash or not r.summary:
             if not summarize_record(r, llm, meter, checker, cfg, at.date()):
                 stats["pending"] += 1

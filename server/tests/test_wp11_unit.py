@@ -116,7 +116,7 @@ def test_panel_stop_priority_and_summary_guard(tmp_path: Path) -> None:
     # 要約: 本文に無い日付・英単語・今日などの言い方は保存しない
     for bad, reason in (("町道の津浪巡回線は、11月20日に通行止めです。", "本文に無い数・日付・支払方法"),
                         ("町道の津浪巡回線は、今日から通行止めです。迂回路をご利用ください。", "今日・明日などの言い方（読む日でずれる）"),
-                        ("町道の津浪巡回線が road closed です。", "英単語")):
+                        ("町道の津浪巡回線が road closed です。", "英字: road・closed（大文字の略語は 3 語まで、ほかは allowed_terms.yaml）")):
         try:
             panel.edit_summary("a", bad, "staff")
         except SummaryRejected as e:
