@@ -99,6 +99,17 @@ seeds:
     depth: 3
     include: ["/soshiki/", "/life/", "/site/kosodate/"]
     exclude: *akiota_exclude
+# ---- お知らせ（WP11 A-1）。町のトップページの「新着情報」「重要なお知らせ」「トピックス」の RSS 1.0（2026-10-24 確認。
+# 各記事に dc:date（掲載日）があり、行事は nc:event_sdate / nc:event_edate に期間が入る）。入札（list8）・空き家バンク（list5）・
+# 町内求人（list7）は入れない。行事も新着情報に載る（森のアドベンチャーサイクルフェスなど）
+news:
+  label: 町のホームページ
+  feeds:
+    - {url: "https://www.akiota.jp/rss/10/list1.xml", type: rss}
+    - {url: "https://www.akiota.jp/rss/10/list3.xml", type: rss}
+    - {url: "https://www.akiota.jp/rss/10/list6.xml", type: rss}
+  include: ['^https://www\.akiota\.jp/(soshiki|site|life)/.+\.html$']
+  exclude: ["/site/gikai/", "/site/saiyou/", "/site/chocho-shitsu/", "/site/furusatonouzei/", "/soshiki/2/", "/soshiki/23/"]
 exclude_breadcrumb_keywords: [議会, 会議録, 入札, 職員採用, 人事, 町長の部屋, 選挙]
 exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]
 weather:

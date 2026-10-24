@@ -64,6 +64,24 @@ CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --we
 5. 検索（`server/src/knowledge.py`）: ベクトル検索と文字 2-gram の BM25 を RRF で融合し、
    ベクトルの類似度がしきい値未満のものを落として上位 5 件・合計 1,500 字まで
 
+## お知らせ（WP11）
+
+`sources/<site>.yaml` の `news`（新着・お知らせ・イベントの Atom / RSS）から、住民に広く関係する記事を集めて夜のうちに分類と要約を作る。
+フロントは来訪者の同意を取って 1 会話 1 件紹介する（`docs/WP11_result.md`）。
+
+```bash
+CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site akiota --news-only       # お知らせだけ（収集 → 分類 → 要約）
+uv run --project kb python kb/news_classify.py --site akiota --force                         # 分類だけやり直す（news.yaml の語を変えたとき）
+uv run --project kb python kb/news_summarize.py --site akiota --force                        # 要約だけ作り直す（職員が直したものは除く）
+```
+
+- `--daily` と全体の作り直しの両方で、知識パックの取得の前に動く（`--no-news` で外す）。失敗してもパックの更新は続ける
+- 記事は `$IDOBATA_DATA_DIR/kb/<site>.news/<id>.json`（と画像 `<id>.jpg`）。パックの各版に `news` というリンクを置く（版を差し替えても残る）
+- 分類の語と分類 9 つ・重みは `server/context/news.yaml`。規則で決まらないものだけ LLM（7560 の Qwen3-8B）。要約は LLM と VOICEVOX を使い、
+  保存の前に読み上げ前の安全装置（server の dialogue.py / news.py）に通す。kb の環境から `server/` を import する
+- 画像は記事と同じホスト（許可ドメイン内）の og:image か本文の最初の画像で、幅 400px 以上のものだけ。長辺 1280 に縮める
+- 取れないとき（市のサイトのメンテナンスなど）は前回取った内容で続ける
+
 ## 自動更新（既定で有効）
 
 systemd の user タイマー（sudo 不要）で更新する:

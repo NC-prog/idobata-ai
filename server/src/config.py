@@ -1002,6 +1002,115 @@ class ProcedureConfig:
 
 
 @dataclass(frozen=True)
+class NewsConfig:
+    """お知らせの紹介（広報、WP11）。記事は夜のパック更新で集め、分類と要約も夜に作る（会話中に要約しない）。
+
+    記事は ``$DATA/kb/<site>/news/<id>.json``（実体は ``$DATA/kb/<site>.news/``。パックの版を差し替えても残る）。
+    職員は承認待ちにせず、自動で出す・職員パネルで止められる。
+    """
+
+    # 環境変数 IDOBATA_NEWS（既定 1）。0 で提案しない
+    enabled: bool = True
+    # 1 会話で紹介する件数
+    max_per_session: int = 1
+    # 要約（LLM に頼む字数。長さの判定は読み上げの秒数で行う）
+    summary_min_chars: int = 90
+    summary_max_chars: int = 120
+    # 合成した読み上げの長さ（秒）。外れたら 1 回だけ書き直させ、それでも外れたら保留（held）
+    speech_min_sec: float = 15.0
+    speech_max_sec: float = 22.0
+    # 期限が本文にも一覧にも無い記事は、取得から何日で候補から外すか
+    default_ttl_days: int = 14
+    # 期限切れの記事のファイルを消すまでの日数（取得から）
+    keep_days: int = 30
+    # 紹介のきっかけ: 用件の後 / 雑談で話題が切れたとき
+    propose_after_business: bool = True
+    propose_in_smalltalk: bool = True
+    # 雑談が何ターン続いたら提案するか
+    smalltalk_turns: int = 2
+    # 画像（市町のサイトの記事の画像だけ。許可ドメイン内・記事と同じホスト・幅 min_width 以上）
+    image_max_edge: int = 1280
+    image_min_width: int = 400
+    image_jpeg_quality: int = 85
+    # フロントが記事を読み直す間隔（秒。職員パネルの変更と夜の更新を拾う）
+    reload_sec: float = 60.0
+    # 分類の規則（語）・分類の重み
+    rules_path: Path = SERVER_ROOT / "context" / "news.yaml"
+    subdir: str = "news"
+    # 分類で LLM に渡す本文の先頭の字数
+    classify_body_chars: int = 600
+    # 要約で LLM に渡す本文の字数
+    summarize_body_chars: int = 1500
+    # 一覧のフィード 1 つから取る記事の数
+    max_items_per_feed: int = 40
+    # 紹介の定型（{org} は 市 / 町）
+    propose_sentence: str = "ところで、{org}からのお知らせを一つご紹介してもいいですか？"
+    intro_sentence: str = "それでは、{when}のお知らせです。"
+    closing_sentence: str = "くわしくは、画面の QR コードから{org}のページをご覧ください。ほかに何かあれば、どうぞ。"
+    declined_sentence: str = "わかりました。"
+    # 履歴に残す定型の一言（WP07 の「定型の一言を履歴に」と同じ）
+    history_user_placeholder: str = "（お知らせの紹介を聞きました）"
+    # 読み終えてから構図を戻すまで（秒）。締めの文を言い終えるまで QR を残す
+    after_summary_pause_sec: float = 2.0
+    # 返事を待つ秒数（無言はいいえ）
+    reply_timeout_sec: float = 5.0
+    # 相手が急いでいる語（その会話では提案しない）
+    hurry_pattern: str = r"急いで|急ぎ|時間がない|時間が無い|時間あらへん|時間ない|バタバタ|急ぐ"
+    # 「ほかに何かありますか」への「ない」に当たる返事
+    nothing_else_pattern: str = (
+        r"^(?:いや|いえ|いいえ|ううん|大丈夫|だいじょうぶ|ない|ないです|ありません|特に|とくに|それだけ|以上|もういい|"
+        r"もう大丈夫|結構|けっこう)"
+    )
+    # 応答が「ほかに何か」と尋ねたか
+    anything_else_pattern: str = r"ほかに|他に|何か(ほか|他)"
+    # 要約の書き方（persona の話し方の決まりを後ろに足す）
+    summarize_prompt: str = (
+        "あなたは役所のロビーの案内役です。下の【記事】を、ロビーに来た方へ口で伝える短いお知らせにしてください。\n"
+        "決まり:\n"
+        "- {min_chars}〜{max_chars}字、2〜3文の話し言葉（です・ます）。\n"
+        "- 1文目は「何が・いつ・どこで」。2文目は聞いた方がすること（申し込み・迂回・持ち物など）。\n"
+        "- 日付・時刻・金額・数は【記事】の本文にそのまま書いてあるものだけ。書いていなければ日付を言わない。足さない。\n"
+        "- 課の名前・電話番号・URL・建物の階・資料のファイルの話は書かない。「くわしくはホームページで」も書かない（画面に出します）。\n"
+        "- 英単語・アルファベット・記号（■《》など）は使わない。曜日の括弧書きは付けない。「来訪者」という言葉は使わない。\n"
+        "- 今日は{today}です（今日の日付は、記事の日付の前後を判断するためだけに使い、要約には書かない）。今日より前に始まって続いていることは「〜から始まっています」「〜から行っています」と言い、"
+        "「始まります」とは言わない。今日より前に終わったことは書かない。「今日」「明日」「今月」とは書かない（読む日がずれるので、日付で言う）。\n"
+        "- 前置き（「お知らせです」など）や締めの挨拶は書かない。お知らせの文だけを返す。\n"
+        "【話し方】\n{speaking}"
+    )
+    # 読み上げの長さが外れたときの書き直し（{chars} は 1 回目の読み上げの速さから見積もった字数）
+    summarize_retry_short: str = "読み上げると{sec}秒で長すぎました。同じ決まりで、{chars}字くらいに短く書き直してください。"
+    summarize_retry_long: str = "読み上げると{sec}秒で短すぎました。同じ決まりで、{chars}字くらいに書き足してください（記事に書いてあることだけ）。"
+    # 掲載から何日たった記事を「新着ではない」として紹介しないか（期間の終わりがこれから先なら紹介する）
+    max_age_days: int = 90
+    # 過ぎた日付と一緒に言うと「これから」のことになる言い方（お知らせの要約。「開始しています」「始まりました」は含まない）
+    summary_future_pattern: str = (
+        r"(?:始まり|始め|開始し|開始され|開催し|開催され|行われ|行い|実施し|実施され|受け付け|受付し|設置し|"
+        r"配布し|運行し|オープンし|再開し)ます(?!し)|予定です|予定しています|になります|これから"
+    )
+    # 要約から落とす文（画面に出すので言わない「くわしくはホームページで」の類）
+    summary_drop_pattern: str = r"ホームページ|詳しくは|くわしくは|お問い?合わせ先"
+    # 本文から落とす行（PDF の閲覧ソフトの案内など、どの記事にも付く決まり文句）
+    body_noise_pattern: str = (
+        r"Adobe|Acrobat|PDF形式のファイル|PDFファイル.{0,10}(ご覧|閲覧)|バナーのリンク先|＜外部リンク＞|<外部リンク>|"
+        r"^本文$|^このページの先頭へ|^\\?\[PDFファイル"
+    )
+    summarize_max_tokens: int = 300
+    classify_prompt: str = (
+        "役所のロビーで来訪者に紹介するお知らせを選んでいます。下の記事が「住民に広く関係する案内」"
+        "（通行止め・断水・休館・行事・募集・健康・防災・ごみ収集の変更など、多くの住民が知って得をするもの）なら introduce、"
+        "そうでなければ（入札・人事・議会・統計・事業者向け・一部の人だけの手続き・終わった行事の報告など）skip と答えてください。\n"
+        "1行目に introduce か skip だけ、2行目に理由を日本語で1文。"
+    )
+    classify_max_tokens: int = 80
+    # 夜の LLM・VOICEVOX 呼び出し
+    llm_timeout_sec: float = 60.0
+    llm_retries: int = 2
+    # 掲載日の言い方（今日・昨日・N月N日）
+    today_word: str = "今日"
+    yesterday_word: str = "昨日"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """アプリケーション全体の設定。"""
 
@@ -1032,6 +1141,7 @@ class AppConfig:
     edge: EdgeConfig = field(default_factory=EdgeConfig)
     theme: ThemeConfig = field(default_factory=ThemeConfig)
     procedure: ProcedureConfig = field(default_factory=ProcedureConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
 
 
 def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
@@ -1116,6 +1226,7 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
         procedure=ProcedureConfig(recheck_keep_using=env.get("IDOBATA_PROCEDURE_RECHECK_USE", "1").strip().lower()
                                   not in ("0", "false", "no", "off")),
+        news=NewsConfig(enabled=env.get("IDOBATA_NEWS", "1").strip().lower() not in ("0", "false", "no", "off")),
     )
 
 

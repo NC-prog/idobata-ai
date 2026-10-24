@@ -1061,6 +1061,40 @@ class Dialogue:
         self.note_drop("医療・法律の判断", sentence)
         return True
 
+    def fixed_text_problems(self, text: str, refs: list[Reference], stale_future: bool = True) -> list[str]:
+        """LLM の応答の外で作った読み上げ文（夜に作るお知らせの要約。WP11）を、読み上げ前の安全装置に通す。
+
+        応答と違って文を直さない（直すと記事と食い違うので、呼び出し側が保留にする）。引っかかった理由
+        （note_drop と同じ言い方）を返す。空なら通った。stale_future=False なら「過ぎた日付をこれからと言う」は
+        呼び出し側で見る（お知らせは年の無い日付と「〜から開始しています」を別の規則で見る）。
+        """
+        self.begin_turn()
+        said: list[str] = []
+        for raw in re.split(r"(?<=[。！？!?])", text):
+            s = raw.strip()
+            if not s:
+                continue
+            if self._meta_leak_re.search(s):
+                self.note_drop("指示文の漏れ", s)
+            if any(p in s for p in self._banned):
+                self.note_drop("言わない言い回し", s)
+            if self._has_foreign_word(s):
+                self.note_drop("英単語", s)
+            if self._fix_unknown_department(s, None) is not None and (
+                    self._fix_department_floor(s) != s or self._fix_floor_of_last_department(s, said) != s):
+                self.note_drop("課の階・場所の作り話", s)
+            if self._invented_building_place(s) is not None or self._unknown_facility_location(s) is not None:
+                self.note_drop("館内の設備・場所の作り話", s)
+            if self._department_directions(s):
+                self.note_drop("館内の道順", s)
+            if stale_future:
+                self._stale_future(s)
+            self._ungrounded_claim(s, refs)
+            self._ungrounded_bring(s, refs)
+            self._must_drop(s)
+            said.append(s)
+        return list(dict.fromkeys(d["reason"] for d in self.last_dropped))
+
     def note_drop(self, reason: str, sentence: str) -> None:
         """安全装置で読み上げなかった文を、このターンの記録に残す（文字記録と誤り探しの素材に使う）。"""
         self.last_dropped.append({"reason": reason, "text": sentence})

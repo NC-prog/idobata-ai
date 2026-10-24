@@ -42,6 +42,9 @@ from .edge_server import AdminPanel, EdgeServer, StaffPanel
 from .knowledge import JST, KnowledgeStore, Weather
 from .llm_client import LLMClient
 from .lookup import Lookup, close_browser
+from .news import NewsBook, news_dir
+from .news import load_rules as load_news_rules
+from .news_panel import NewsPanel
 from .openers import all_lines, load_openers, opener_lines
 from .persona import load_persona
 from .procedure_kb import PROCEDURE_TRUST, ProcedureRecord, procedures_dir
@@ -207,6 +210,11 @@ class VoiceLoop:
         self._openers = load_openers(SERVER_ROOT / "context" / "openers.yaml")
         # テーマ（WP08。拠点×季節のアバター・背景・季節の一言。暦で自動、職員パネルから手動でも）
         self._themes = ThemeSelector(load_themes(config.theme.path, config.site))
+        # お知らせ（WP11。夜のパック更新で集めた記事。職員パネルの変更と夜の更新は reload_sec ごとに読み直す）
+        self._news: NewsBook | None = (
+            NewsBook(news_dir(config.data_dir, config.site, config.news), config.news,
+                     load_news_rules(config.news.rules_path))
+            if config.news.enabled else None)
         # 輪が NONE になってからの、会話を区切るタイマーと、別れの一言を言ったか
         self._bye_task: asyncio.Task[None] | None = None
         self._farewell_said = False
@@ -226,13 +234,15 @@ class VoiceLoop:
                 config.edge.http_host, config.edge.http_port, config.edge.static_dir,
                 staff=StaffPanel(self._referrals, self._visits, config.staff, self._tidbits,
                                  tuple(d.name for d in (facility.departments if facility else ())),
-                                 self._asr_fixes, self._themes, self._procedure_panel(llm, facility)),
+                                 self._asr_fixes, self._themes, self._procedure_panel(llm, facility),
+                                 self._news_panel(llm, facility)),
                 admin=AdminPanel(self._transcripts, config.admin),
                 debug_frame=(lambda: self._camera.debug_jpeg if self._camera else None) if camera_debug else None,
                 debug_state=self._camera_state,
                 edge_allow=config.edge.allow,
                 avatars_dir=config.data_dir / config.theme.avatars_subdir,
                 backgrounds_dir=config.data_dir / config.theme.backgrounds_subdir,
+                news=self._news,
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）
@@ -243,6 +253,17 @@ class VoiceLoop:
         self._phone_timer: asyncio.Task[None] | None = None
         # 来訪者の発話区間の途中か、区間を聞き取っている途中か（聞き直しを相手の発話に重ねない）
         self._hearing = False
+
+    def _news_panel(self, llm: LLMClient, facility: Facility | None) -> NewsPanel | None:
+        """職員パネルの「お知らせ」タブ（WP11）。要約の編集は、夜と同じ安全装置（Dialogue）に通す。"""
+        if self._news is None:
+            return None
+
+        def checker() -> Dialogue:
+            return Dialogue(llm, facility=facility, avatar_name=config.actions.avatar_name,
+                            persona=load_persona(config.persona))
+
+        return NewsPanel(self._news, checker, config.dialogue, config.news)
 
     def _procedure_panel(self, llm: LLMClient, facility: Facility | None) -> ProcedurePanel | None:
         """職員パネルの「手続き」タブ（WP09）。想定問答は、その手続きだけを承認済みにした対話に通す。"""
