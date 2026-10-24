@@ -8,7 +8,7 @@
 - 点: 候補を見分ける語（name を「の・・」で分けた語、別名、when、cues。鍵そのものは数えない）が発話にいくつあるか
 - 1 位と 2 位の点差が margin 未満で、同点の上位が min〜max 件なら聞く（「国保に入りたい」は加入が 1 点で、聞かない）
 
-返事の判定: 順序の語（最初・二つ目・最後…）→「ほか」→ 見分ける語の点（1 位が 1 つだけなら決まり）。
+返事の判定: 見分ける語の点（1 位が 1 つだけなら決まり）→ 順序の語（最初・二つ目・二番・最後…）→「ほか」。
 """
 
 from __future__ import annotations
@@ -216,6 +216,11 @@ class Clarifier:
         """返事で決まった候補（「ほか」なら OTHER、決まらなければ None）。"""
         t = reply.strip()
         n = len(c.candidates) + (1 if c.more else 0)
+        # 見分ける語で 1 つに決まれば、それを先に（「一番困ってるのは税金で」の「一番」は順序ではない）
+        scores = [self.score(r, t, c.keys) for r in c.candidates]
+        top = max(scores)
+        if top > 0 and scores.count(top) == 1:
+            return c.candidates[scores.index(top)]
         for idx, words in self._rules.ordinals.items():
             if any(w in t for w in words):
                 i = idx if idx >= 0 else n + idx
@@ -225,8 +230,4 @@ class Clarifier:
                     return OTHER
         if any(w in t for w in self._rules.other_words):
             return OTHER
-        scores = [self.score(r, t, c.keys) for r in c.candidates]
-        top = max(scores)
-        if top > 0 and scores.count(top) == 1:
-            return c.candidates[scores.index(top)]
         return None

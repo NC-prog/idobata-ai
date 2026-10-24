@@ -254,6 +254,8 @@ class Conversation:
         # 用件の聞き分け（WP13 E）と、聞き分けで決まった手続き（紹介状の課・聞き取りに使う。会話の区切りで消す）
         self._clarifier = Clarifier(self._procedures, load_clarify_rules(cfg.templates_path), dialogue._proc_cfg)
         self._clarified: ProcedureRecord | None = None
+        # 聞き分けの前の来訪者の発話と、聞き分けへの返事（紹介状の要約に返事の語「二番」を入れないため）
+        self._clarify_turn: tuple[str, str] | None = None
         self._pending: Pending | None = None
         self._session: Session | None = None
         # 直前のターンで行為が終わったか（次の短い相づちを決まった文で受ける）
@@ -351,11 +353,12 @@ class Conversation:
             logger.info("聞き取りの途中で会話が区切られたので、伺えたところまでで紹介状を作ります")
             async for _ in self._finish_referral(p):
                 pass
-        session, history = self._session, self.dialogue.history
+        session, history, clarified = self._session, self.dialogue.history, self._clarified
         self._session, self._pending = None, None
         self._saved_at, self._history_note = None, None
         self._saved_referral = None
         self._clarified = None
+        self._clarify_turn = None
         self._news_closing, self._news_history, self._business_done = None, None, False
         self._turns = []
         self._private_values = set()
@@ -363,6 +366,9 @@ class Conversation:
         if session is None or self._visits is None or not session.turns:
             return
         tags = await self._tag_conversation(history)
+        if clarified is not None:
+            # 聞き分けで決まった手続きのタグを先に（返事の「二番」だけでは LLM がタグを選べない）
+            tags = pick_tags([*self._procedure_tags(clarified), *tags], self._tags)
         record = {
             "started_at": session.started_at,
             "ended_at": datetime.now(JST).isoformat(timespec="seconds"),
@@ -640,6 +646,7 @@ class Conversation:
             self._pending = None
             self._clarify_done(c, got.id)
             self._clarified = got
+            self._clarify_turn = (p.user_text, text)
             self.dialogue.forced_procedure = got
             # 短い返事（「二つ目」「やめるほう」）は、LLM には決まった手続きの名前で渡す（おうむ返しで「二つ目ですね」と言った）
             short = len(re.sub(r"[\s、。！？!?]", "", text)) <= self._cfg.reply_max_chars
@@ -1426,14 +1433,32 @@ class Conversation:
         # 案内役のメモ・要約は、聞き取り間違いの対応表を当てた文から作る（「国宝」のまま職員に渡さない）
         visitor = [self._fix(u) for u, _ in history if u and not self._is_bare_reply(u)]
         assistant = [self._fix(a) for _, a in history if a]
-        body = ("【来訪者の言葉】\n" + "\n".join(visitor or [p.user_text])
+        # 要約の範囲に聞き分けの返事のターンが入っているときだけ（後の別の話の紹介状に古い発話を混ぜない）
+        clarified = (self._clarified if self._clarify_turn is not None and not p.unspecified
+                     and any(u == self._clarify_turn[1] for u, _ in history) else None)
+        reply_word = ""
+        user_text = p.user_text
+        if clarified is not None and self._clarify_turn is not None:
+            # 聞き分けで決まった（WP13 E）: 返事（「二番」「やめるほう」）は要約に入れず、聞き分けの前の発話と手続きの名前から作る
+            origin, reply_word = self._clarify_turn
+            visitor = [u for u in visitor if u != self._fix(reply_word)]
+            if self._fix(origin) not in visitor:
+                visitor.insert(0, self._fix(origin))
+            name = _PAREN_RE.sub("", clarified.name).strip()
+            visitor.append(f"（用件: {name}）")
+            user_text = f"{name}のこと（{origin.strip().rstrip('。')}）"
+        body = ("【来訪者の言葉】\n" + "\n".join(visitor or [user_text])
                 + "\n【案内役が言ったこと】\n" + ("\n".join(assistant) or "なし"))
         data = await self._chat_json(prompt, body, self._ref_cfg.summary_max_tokens) or {}
-        summary = self._fix(self._visitor_only(str(data.get("summary") or ""), "\n".join(visitor))
-                            or p.user_text)
+        summary = self._visitor_only(str(data.get("summary") or ""), "\n".join(visitor))
+        if reply_word:
+            summary = self._drop_reply_word(summary, reply_word)
+        summary = self._fix(summary or user_text)
         note = self._fix(str(data.get("assistant_note") or "").strip().replace("\n", " "))
         # タグは、手続きが規則で分かれば procedures.yaml の手続き→タグだけ。分からないときだけ LLM の選んだタグ
-        proc_tags = pick_tags(self._procedures.tags_for("\n".join(visitor) or p.user_text, self._facility), self._tags)
+        proc_tags = pick_tags(
+            ([*self._procedure_tags(clarified)] if clarified is not None else [])
+            + self._procedures.tags_for("\n".join(visitor) or p.user_text, self._facility), self._tags)
         tags = proc_tags or pick_tags(data.get("tags"), self._tags)
         return {
             "department": p.department or UNSPECIFIED_DEPARTMENT,
@@ -1450,6 +1475,22 @@ class Conversation:
             "address_area": p.address_area,
             "assistant_note": note[: self._ref_cfg.assistant_note_max_chars],
         }
+
+    def _procedure_tags(self, r: ProcedureRecord) -> list[str]:
+        """手続きのタグ（手続きナレッジのタグ、無ければ名前と別名で別名表から）。"""
+        if r.tags:
+            return list(r.tags)
+        words = {r.name, *r.aliases, *r.surfaces}
+        return list(dict.fromkeys(t for x in self._procedures.items if x.term in words or set(x.aliases) & words
+                                  for t in x.tags))
+
+    def _drop_reply_word(self, summary: str, reply: str) -> str:
+        """要約から、聞き分けへの返事の語（「二番」「やめるほう」）を言う文を落とす。"""
+        word = re.sub(r"[\s、。！？!?]|です$|ですね$", "", reply.strip())
+        if len(word) < 2:
+            return summary
+        kept = [x for x in re.split(r"(?<=[。！？!?])", summary) if x.strip() and word not in x]
+        return "".join(kept)
 
     def _fix(self, text: str) -> str:
         return self._asr_fixes.apply(text) if self._asr_fixes is not None and text else text

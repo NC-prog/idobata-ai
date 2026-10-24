@@ -27,6 +27,10 @@
 - {ask: ごみのことで, reply: タンスを捨てたい, expected: sodai_gomi}
 - {ask: ごみのことで, reply: 曜日を知りたい, expected: gomi}
 - {ask: ごみのことで, reply: どれでもないです, expected: other}
+# 実機（2026-10-24）で出た返事「二番」（番号の字幕を見て言う）と、順序でない「一番」
+- {ask: 手当のことで, reply: 二番, expected: "term:児童扶養手当"}
+- {ask: 国保のことで, reply: 3番です, expected: "term:国民健康保険税"}
+- {ask: 国保のことで, reply: 一番困ってるのは税金で, expected: "term:国民健康保険税"}
 # --- ここから下は、上の例で語を足した後に、語を足さずに試した例（手直しなしの成績を見る。held_out） ---
 - {ask: 国保のことで, reply: 定年でこれから国保になるんです, expected: kokuho_switch, held_out: true}
 - {ask: 国保のことで, reply: 社保になったけえ, expected: kokuho_withdraw, held_out: true}

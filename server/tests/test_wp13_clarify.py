@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from src.actions import Conversation
 from src.clarify import Clarifier, load_clarify_rules
@@ -81,6 +82,8 @@ def test_pick_reply_by_words_order_and_other(tmp_path: Path) -> None:
     assert pick("保険証のことで") == "kokuho_withdraw"
     assert pick("税金のほう") == "term:国民健康保険税"
     assert pick("二つ目") == "kokuho_withdraw"
+    assert pick("二番") == "kokuho_withdraw"  # 実機の返事（番号の字幕を見て言う）
+    assert pick("一番困ってるのは税金で") == "term:国民健康保険税"  # 見分ける語が先（「一番」は順序ではない）
     assert pick("最後の") == "term:国民健康保険税"
     assert pick("ほかのことです") == "other"
     assert pick("うーん") is None
@@ -195,3 +198,52 @@ async def test_place_question_with_one_department_is_answered(tmp_path: Path) ->
     c3 = _conv(tmp_path / "c", StubLLM([]))
     said = await _say(c3, "手当の窓口はどこですか")
     assert said[0].startswith("手当のことですね。")
+
+
+class _ChatLLM(StubLLM):
+    """構造化（chat）に渡した本文を覚える。"""
+
+    def __init__(self, replies: list[list[str]], chat_reply: str | list[str]) -> None:
+        super().__init__(replies, chat_reply)
+        self.chat_bodies: list[str] = []
+
+    def chat(self, model: str, messages: list[dict[str, Any]], **kw: Any) -> str:
+        self.chat_bodies.append(messages[-1]["content"])
+        return super().chat(model, messages, **kw)
+
+
+async def _referral_after_clarify(tmp_path: Path, chat_reply: str) -> tuple[Conversation, _ChatLLM, dict[str, Any]]:
+    llm = _ChatLLM([["児童扶養手当は子育て支援課（にこ♡にこハウス）でご案内します。<propose:refer>"]], chat_reply)
+    c = _conv(tmp_path, llm)
+    await _say(c, "手当のことで")
+    said = await _say(c, "二番")
+    assert said[-1] == "このこと、担当の課に伝えておきましょうか？"
+    await _say(c, "お願いします")
+    p = c._pending
+    assert p is not None and p.action == "refer"
+    return c, llm, await c._structure_referral(c._refer_window(p), p)
+
+
+async def test_referral_summary_uses_procedure_name_not_reply(tmp_path: Path) -> None:
+    # 聞き分けの返事（「二番」）は要約に入れず、聞き分けの前の発話（「手当のことで」）と決まった手続きの名前から作る
+    _, llm, fields = await _referral_after_clarify(tmp_path, "{}")
+    assert fields["summary"] == "児童扶養手当のこと（手当のことで）"  # LLM が要約を返さなかったときの形
+    body = next(b for b in llm.chat_bodies if "【来訪者の言葉】" in b)
+    visitor = body.split("【案内役が言ったこと】")[0]
+    assert "手当のことで" in visitor and "児童扶養手当" in visitor and "二番" not in visitor
+    assert "子育て" in fields["tags"]
+
+
+async def test_referral_summary_drops_sentence_with_reply_word(tmp_path: Path) -> None:
+    reply = json.dumps({"summary": "二番について相談したい。児童扶養手当の手続きを知りたい。"}, ensure_ascii=False)
+    _, _, fields = await _referral_after_clarify(tmp_path, reply)
+    assert fields["summary"] == "児童扶養手当の手続きを知りたい。"
+
+
+async def test_visit_tags_include_clarified_procedure(tmp_path: Path) -> None:
+    c = _conv(tmp_path, StubLLM([["子育て支援課でご案内します。"]], chat_reply="{}"))
+    await _say(c, "手当のことで")
+    await _say(c, "一つ目")
+    await c.end_session()
+    visit = json.loads(next((tmp_path / "visits").rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0])
+    assert "子育て" in visit["tags"]
