@@ -467,20 +467,24 @@ def collect(src: Sources, crawler: Crawler, store: Path, cfg: NewsConfig | None 
         rec.published = published
         rec.period = find_period(item, title, body, date.fromisoformat(published[:10]), rules)
         rec.expires_at = expires_on(rec.period, first_seen, cfg)
-        if old is not None and old.content_hash == chash:
-            stats["unchanged"] += 1
-        else:
+        changed = old is None or old.content_hash != chash
+        if changed:
             stats["changed" if old is not None else "new"] += 1
             rec.title, rec.body, rec.content_hash, rec.updated_at = title, body, chash, stamp
+        else:
+            stats["unchanged"] += 1
+        # 画像は、本文が変わったとき・まだ記事のページそのものから探していないとき（サイトが止まっていて
+        # キャッシュの本文で作った記事は、戻った最初の夜に探す）
+        if html is not None and (changed or not rec.image_checked):
             img_path = store / f"{rid}.jpg"
-            if html is not None:
-                src_url = fetch_image(crawler, html, url, img_path, cfg)
-                if src_url is not None:
-                    rec.image, rec.image_src = img_path.name, src_url
-                    stats["images"] += 1
-                elif rec.image:
-                    img_path.unlink(missing_ok=True)
-                    rec.image, rec.image_src = None, None
+            src_url = fetch_image(crawler, html, url, img_path, cfg)
+            rec.image_checked = True
+            if src_url is not None:
+                rec.image, rec.image_src = img_path.name, src_url
+                stats["images"] += 1
+            elif rec.image:
+                img_path.unlink(missing_ok=True)
+                rec.image, rec.image_src = None, None
         save_record(store, rec)
     stats["removed"] = prune(store, today, cfg)
     logger.info("お知らせの収集: %s", stats)

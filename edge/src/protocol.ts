@@ -74,7 +74,24 @@ export interface PartyMessage {
   facing: boolean;
 }
 
+/** 画面の構図（WP11）。news はお知らせの紹介（左に記事の画像、右にアバター、足元に QR）、normal は元の構図 */
+export interface LayoutMessage {
+  type: "layout";
+  mode: "normal" | "news";
+  id?: string;
+  title?: string;
+  /** 記事の画像（/edge/news/<id>.jpg）。画像が無い・職員が止めたときは null（題名だけの板） */
+  image?: string | null;
+  /** 記事の URL の QR コード（PNG の data URL） */
+  qr?: string;
+  url?: string;
+  category?: string;
+  /** QR の下の小さな文字（「市のホームページ」など） */
+  label?: string;
+}
+
 export type DownMessage =
+  | LayoutMessage
   | StateMessage
   | CaptionMessage
   | SpeakMessage

@@ -22,6 +22,7 @@ from src.news import (
     spoken_date,
 )
 from src.news_panel import NewsPanel, SummaryRejected
+from src.referrals import VisitLog
 from src.site_context import load_facility
 from tests.test_dialogue_unit import StubLLM
 
@@ -199,3 +200,153 @@ def test_spoken_date_and_qr_decodes() -> None:
     img = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
     got, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
     assert got == url
+
+
+# ------------------------------------------------------------------
+# C: 会話への組み込み（役・提案と同意・紹介の流れ）
+# ------------------------------------------------------------------
+
+from tests.test_actions_unit import (
+    FAC as ACT_FAC,
+)
+from tests.test_actions_unit import (
+    PHRASED,
+    TEMPLATES,
+    FakeClock,
+    _conv,
+    _refer_json,
+    _say,
+)
+from tests.test_actions_unit import StubLLM as ActLLM
+
+N = TEMPLATES["news"]
+PROPOSE = N["propose"].format(org="市")
+
+
+def _news_conv(tmp_path: Path, llm: ActLLM, layouts: list[dict[str, Any]] | None = None,
+               book_dir: Path | None = None) -> tuple[Any, NewsBook]:
+    news_dir = book_dir or (tmp_path / "news")
+    news_dir.mkdir(exist_ok=True)
+    book = _book(news_dir, _rec("a", title="津浪巡回線の通行止め", category="通行止め", published="2026-10-21"))
+    clock = FakeClock()
+    c = _conv(llm, tmp_path, clock=clock)
+    c._news, c._news_cfg = book, NewsConfig()
+
+    async def on_layout(msg: dict[str, Any]) -> None:
+        if layouts is not None:
+            layouts.append(msg)
+
+    c._on_layout = on_layout
+    c._clock_for_test = clock
+    return c, book
+
+
+async def _refer_until_saved(c: Any) -> list[str]:
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    await _say(c, "お願い")
+    for t in ("分からない", "いいから", "言いたくない", "言わなくていいでしょ", "いいです"):
+        await _say(c, t)
+    return await _say(c, "後日また来ます")
+
+
+async def test_news_after_referral_saved_then_presented(tmp_path: Path) -> None:
+    layouts: list[dict[str, Any]] = []
+    llm = ActLLM([["国保ですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()])
+    c, book = _news_conv(tmp_path, llm, layouts)
+    out = await _refer_until_saved(c)
+    assert out[-1] == PROPOSE and c.pending_action == "news"  # 保存と持ち物の案内の後に提案
+    assert c.turn_info["proposed"] == "news"
+    c._clock_for_test.t += 11  # 保存直後の断片の無視が明けてから
+    shown = await _say(c, "はい")
+    assert shown[0] == N["intro"].format(when="今日")  # 会話の日（10/21）が掲載日
+    assert "".join(shown[1:]) == OK_SUMMARY
+    assert layouts and layouts[0]["mode"] == "news" and layouts[0]["id"] == "a"
+    assert c.take_news_closing() == N["closing"].format(org="市") and c.take_news_closing() is None
+    assert book.get("a").shown_count == 1  # type: ignore[union-attr]
+    # 履歴には要約の本文ではなく定型の一言
+    last = c.dialogue.history[-1][1]
+    assert "津浪巡回線の通行止め" in last and OK_SUMMARY not in last
+    # 1 会話 1 件: もう提案しない
+    assert not c._news_available()
+    await c.end_session()
+    visits = VisitLog(tmp_path, "etajima").read(datetime.now(JST).date())
+    news = [p for v in visits for p in v["proposals"] if p["action"] == "news"]
+    assert news == [{"action": "news", "outcome": "shown", "trigger": "紹介状の保存の後", "news_id": "a"}]
+
+
+async def test_news_not_proposed_when_in_hurry(tmp_path: Path) -> None:
+    llm = ActLLM([["国保ですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()])
+    c, _ = _news_conv(tmp_path, llm)
+    await _say(c, "急いでるんですけど")
+    out = await _refer_until_saved(c)
+    assert PROPOSE not in out and c.pending_action is None
+
+
+async def test_news_not_proposed_during_referral_intake(tmp_path: Path) -> None:
+    llm = ActLLM([["国保ですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()])
+    c, _ = _news_conv(tmp_path, llm)
+    await _say(c, "国保の切り替えで聞きたいことがあって")
+    await _say(c, "お願い")
+    for t in ("今日は暖かいですね", "いい天気ですね"):  # 聞き取りの途中の雑談（答えとして扱われる）
+        assert PROPOSE not in await _say(c, t)
+    assert c.pending_action == "refer"
+
+
+async def test_news_not_proposed_after_crisis(tmp_path: Path) -> None:
+    c, _ = _news_conv(tmp_path, ActLLM([["そうですね。"], ["そうですね。"], ["そうですね。"]]))
+    await _say(c, "もう死にたいくらいつらいんです")
+    for t in ("今日は暖かいですね", "いい天気ですね", "寒くなりましたね"):
+        assert PROPOSE not in await _say(c, t)
+    assert c.pending_action is None
+
+
+async def test_news_in_smalltalk_declined_is_not_proposed_again(tmp_path: Path) -> None:
+    c, book = _news_conv(tmp_path, ActLLM([["本当ですね。"], ["お散歩日和ですね。どちらまで行かれましたか？"],
+                                            ["そうですね。"], ["そうですね。"]]))
+    assert PROPOSE not in await _say(c, "今日は暖かいですね")
+    out = await _say(c, "いい天気ですね")
+    # 雑談が 2 ターン続いた: LLM の問いは落として、提案文だけを問いにする
+    assert out == ["お散歩日和ですね。", PROPOSE]
+    assert await _say(c, "いいえ") == [N["declined"]]
+    for t in ("寒くなりましたね", "いい天気ですね"):
+        assert PROPOSE not in await _say(c, t)
+    assert book.get("a").shown_count == 0  # type: ignore[union-attr]
+
+
+async def test_news_after_nothing_else_and_silence_timeout(tmp_path: Path) -> None:
+    c, _ = _news_conv(tmp_path, ActLLM([["住民票は市民課です。ほかに何かありますか？"]]))
+    await _say(c, "住民票はどこで取れますか")
+    assert await _say(c, "いや、ないです") == [PROPOSE]
+    assert [s async for s in c.news_timeout()] == [N["declined"]]
+    assert c.pending_action is None and not c._news_available()
+
+
+async def test_news_not_proposed_without_candidates(tmp_path: Path) -> None:
+    c, book = _news_conv(tmp_path, ActLLM([["住民票は市民課です。ほかに何かありますか？"]]))
+    rec = book.get("a")
+    assert rec is not None
+    rec.status = "stopped"
+    book.save(rec)
+    await _say(c, "住民票はどこで取れますか")
+    assert PROPOSE not in await _say(c, "いや、ないです")
+
+
+def test_reception_role_keeps_the_prompt_and_select_role() -> None:
+    from src.config import PersonaConfig
+    from src.persona import build_system_prompt, load_persona
+    from src.roles import PUBLICITY, RECEPTION, Roles, publicity_role, reception_role, select_role
+
+    persona = load_persona(PersonaConfig())
+    cfg = DialogueConfig()
+    before = build_system_prompt(cfg, FAC, TODAY, [], "いどちゃん", ("lookup",), "こんにちは", persona)
+    role = reception_role(persona, FAC.name if FAC else "市役所", ("lookup",))
+    after = build_system_prompt(cfg, FAC, TODAY, [], "いどちゃん", ("lookup",), "こんにちは", persona, role.prompt_block)
+    assert before == after  # 案内役の決まりを reception に移しただけ（文言は同じ）
+    roles = Roles(role, publicity_role())
+    assert select_role(roles.state, roles).name == RECEPTION
+    roles.state.presenting_news = True
+    r, changed = roles.select()
+    assert (r.name, r.layout, changed) == (PUBLICITY, "news", True)
+    roles.state.presenting_news = False
+    assert roles.select() == (roles.reception, True)
+    assert ACT_FAC.name

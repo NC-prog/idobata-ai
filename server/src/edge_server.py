@@ -473,7 +473,8 @@ def _add_debug_routes(app: FastAPI, frame: DebugFrame, state: DebugState) -> Non
 
 
 def _add_media_routes(app: FastAPI, static_dir: Path, avatars_dir: Path | None,
-                      backgrounds_dir: Path | None, news: NewsBook | None = None) -> None:
+                      backgrounds_dir: Path | None, news: NewsBook | None = None,
+                      theme_message: Callable[[], dict[str, Any]] | None = None) -> None:
     """アバター（VRM）と背景を ~/idobata-data から配信する（WP08。モデルは git にもビルドにも入れない）。
 
     /edge/avatars/<name> は avatars_dir だけ。/edge/backgrounds/<name> は backgrounds_dir（実写）にあればそれ、
@@ -500,7 +501,7 @@ def _add_media_routes(app: FastAPI, static_dir: Path, avatars_dir: Path | None,
         r = news.get(rid) if news is not None else None
         if r is None or news is None:
             raise HTTPException(404, "ありません")
-        return news.layout_message(r)
+        return {**news.layout_message(r), "theme": theme_message() if theme_message is not None else None}
 
     @app.get("/edge/news/{name}", include_in_schema=False)
     async def news_image(name: str) -> FileResponse:
@@ -513,7 +514,8 @@ def _add_media_routes(app: FastAPI, static_dir: Path, avatars_dir: Path | None,
 def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPanel | None = None,
                debug_frame: DebugFrame | None = None, debug_state: DebugState | None = None,
                edge_allow: tuple[str, ...] | None = None, avatars_dir: Path | None = None,
-               backgrounds_dir: Path | None = None, news: NewsBook | None = None) -> FastAPI:
+               backgrounds_dir: Path | None = None, news: NewsBook | None = None,
+               theme_message: Callable[[], dict[str, Any]] | None = None) -> FastAPI:
     """エッジページ（と職員パネル・管理者ページ・カメラのデバッグ表示）を配信する FastAPI アプリ。
 
     edge_allow を渡すと、/edge/ と / はこの機体自身と edge_allow の相手からだけ開ける（IDOBATA_EDGE_ALLOW。WP02 D）。
@@ -531,7 +533,7 @@ def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPa
             return await call_next(request)
     if debug_frame is not None:
         _add_debug_routes(app, debug_frame, debug_state or (dict))  # /edge の静的配信より先に置く
-    _add_media_routes(app, static_dir, avatars_dir, backgrounds_dir, news)  # /edge の静的配信より先に置く
+    _add_media_routes(app, static_dir, avatars_dir, backgrounds_dir, news, theme_message)  # /edge の静的配信より先に置く
     if staff is not None:
         _add_staff_routes(app, staff)
     if admin is not None:
@@ -560,10 +562,10 @@ class EdgeServer:
                  admin: AdminPanel | None = None, debug_frame: DebugFrame | None = None,
                  debug_state: DebugState | None = None, edge_allow: tuple[str, ...] | None = None,
                  avatars_dir: Path | None = None, backgrounds_dir: Path | None = None,
-                 news: NewsBook | None = None) -> None:
+                 news: NewsBook | None = None, theme_message: Callable[[], dict[str, Any]] | None = None) -> None:
         cfg = uvicorn.Config(
             create_app(static_dir, staff, admin, debug_frame, debug_state, edge_allow, avatars_dir, backgrounds_dir,
-                       news),
+                       news, theme_message),
             host=host, port=port, log_level="warning", lifespan="off",
         )
         self._server = uvicorn.Server(cfg)

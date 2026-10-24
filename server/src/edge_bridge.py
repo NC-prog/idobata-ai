@@ -48,6 +48,13 @@ REPLACED_CLOSE_CODE = 4001
 FORBIDDEN_CLOSE_CODE = 4003
 
 
+def theme_payload(site: str, name: str, avatar: str, background: str, credit: str = "",
+                  anchor: str = "center") -> dict[str, Any]:
+    """テーマのメッセージ（WP08・WP10）。お知らせのプレビュー（WP11）でも同じものを返す。"""
+    return {"type": "theme", "site": site, "season": name, "name": name, "avatar": avatar, "background": background,
+            "background_credit": credit, "background_anchor": anchor}
+
+
 def allowed_peer(host: str | None, allow: tuple[str, ...]) -> bool:
     """エッジとしてつないでよい相手か（この機体自身、または allow の IP・CIDR に入る）。"""
     try:
@@ -259,9 +266,7 @@ class EdgeBridge:
 
         background_credit は背景写真のクレジット（空なら出さない）、background_anchor は縦置きで見せる横の位置（WP10）。
         """
-        await self.send_json({"type": "theme", "site": site, "season": name, "name": name,
-                              "avatar": avatar, "background": background,
-                              "background_credit": credit, "background_anchor": anchor})
+        await self.send_json(theme_payload(site, name, avatar, background, credit, anchor))
 
     async def send_speak(self, header: dict[str, Any], wav: bytes) -> None:
         """1 文ぶんの ``speak`` と WAV を、間に他の送信が挟まらないよう続けて送る。"""

@@ -33,10 +33,12 @@ from typing import Any
 import yaml
 
 from .asr_client import ngram_overlap
-from .config import ActionsConfig, ReferralConfig, TidbitConfig
+from .config import ActionsConfig, NewsConfig, ReferralConfig, TidbitConfig
 from .dialogue import ChatBackend, Dialogue
 from .knowledge import JST
 from .lookup import Lookup
+from .news import NewsBook, spoken_date
+from .persona import organization_word
 from .procedures import AsrFixes, IntakeSet, Procedures
 from .referrals import (
     CATEGORIES,
@@ -148,9 +150,15 @@ class Session:
     # 小ネタ: この会話で紹介したか（1 会話 1 つまで）、この会話で預かったもの（本人には返さない）
     tidbit_used: bool = False
     own_tidbits: list[str] = field(default_factory=list)
+    # お知らせ（WP11）: 提案した回数、この会話では提案しない理由（深刻な打ち明け・急いでいる）、続いた雑談のターン
+    news_proposed: int = 0
+    news_blocked: str | None = None
+    smalltalk_streak: int = 0
 
 
 StateHook = Callable[[str], Awaitable[None]]
+# 構図を変える通知（WP11。お知らせの layout メッセージ）
+LayoutHook = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class Conversation:
@@ -177,6 +185,9 @@ class Conversation:
         clock: Callable[[], float] = time.monotonic,
         asr_fixes: AsrFixes | None = None,
         speaker_count: Callable[[], int] | None = None,
+        news: NewsBook | None = None,
+        news_cfg: NewsConfig | None = None,
+        on_layout: LayoutHook | None = None,
     ) -> None:
         self.dialogue = dialogue
         self._llm = llm
@@ -220,6 +231,19 @@ class Conversation:
         self._after_action = False
         # 直近の紹介状の受付番号（字幕・表示用）
         self.last_receipt: str | None = None
+        # お知らせ（WP11）: 記事、設定、構図を変える通知（進行役＝main.py が役を選び、エッジへ送る）、
+        # 「市」「町」、このターンで用件が済んだか、紹介した後に main が言う締めの文と履歴の 1 行
+        self._news = news
+        self._news_cfg = news_cfg or NewsConfig(enabled=False)
+        self._on_layout = on_layout
+        self._org = organization_word(facility)
+        self._business_done = False
+        self._news_closing: str | None = None
+        self._news_history: str | None = None
+        self._hurry_re = re.compile(self._news_cfg.hurry_pattern)
+        self._nothing_else_re = re.compile(self._news_cfg.nothing_else_pattern)
+        self._anything_else_re = re.compile(self._news_cfg.anything_else_pattern)
+        self._smalltalk_re = re.compile(self.dialogue._cfg.smalltalk_pattern)
 
     # ------------------------------------------------------------------
     # 会話の区切り
@@ -297,6 +321,7 @@ class Conversation:
         self._session, self._pending = None, None
         self._saved_at, self._history_note = None, None
         self._saved_referral = None
+        self._news_closing, self._news_history, self._business_done = None, None, False
         self._turns = []
         self._private_values = set()
         self.dialogue.reset()
@@ -349,6 +374,8 @@ class Conversation:
             self._session.language = language
         self._session.turns += 1
         after_action, self._after_action = self._after_action, False
+        self._business_done = False
+        self._news_block_check(text)
         fixed = self.dialogue.safety_reply(text)
         # 不満・代わりの申請・市長に会わせての定型は、ご意見として伝える提案を付けるので、ふつうの流れ（dialogue.respond）で言う
         if fixed is not None and self.dialogue.last_safety in ("complaint", "cannot_apply", "cannot_meet") \
@@ -361,13 +388,21 @@ class Conversation:
                 self._outcome("declined")
                 self._pending = None
             self.dialogue.add_turn(text, "".join(fixed))
+            if self.dialogue.last_safety in ("crisis", "lost_child"):
+                self._session.news_blocked = "深刻な打ち明け・迷子"  # この会話では以後お知らせを提案しない
             for line in fixed:
                 yield line
             return
         self.dialogue.last_safety = None
         if (after_action and self._pending is None and classify_reply(text, self._words) != "unclear"
                 and len(re.sub(r"[\s、。！？!?]", "", text)) <= self._cfg.reply_max_chars):
-            # 行為が終わった直後の「うん」「ありがとう」は決まった文で受ける
+            # 行為が終わった直後の「うん」「ありがとう」は決まった文で受ける（お知らせを紹介できるなら、その提案）
+            if self._news_available() and self._news_cfg.propose_after_business:
+                line = self._t("news", "ack_prefix")
+                yield line
+                self.dialogue.add_turn(text, line)
+                yield self._propose_news(text, language, index, "行為の後")
+                return
             line = self._t("common", "ack")
             yield line
             self.dialogue.add_turn(text, line)
@@ -378,9 +413,22 @@ class Conversation:
             self._outcome("declined")
             self._pending = None
         if self._pending is not None:
+            self._session.smalltalk_streak = 0
             async for s in self._on_reply(text):
                 yield s
             self._after_action = self._pending is None
+            if self._business_done and self._news_available() and self._news_cfg.propose_after_business:
+                # 紹介状の保存と持ち物の案内の後: お知らせを一つ紹介してよいか尋ねる
+                yield self._propose_news(text, language, index, "紹介状の保存の後")
+                self._after_action = False
+            return
+        if (self._news_cfg.propose_after_business and self._turns
+                and self._anything_else_re.search(self._turns[-1][1]) and self._nothing_else_re.search(text.strip())
+                and self._news_available()):
+            # 「ほかに何かありますか」に「ないです」: 用件が済んだので、お知らせを一つ紹介してよいか尋ねる
+            self._session.smalltalk_streak = 0
+            self.dialogue.add_turn(text, "")
+            yield self._propose_news(text, language, index, "ほかに無い")
             return
         item = self._reopen_item(text)
         if item is not None and self._saved_referral is not None:
@@ -397,6 +445,9 @@ class Conversation:
             yield line
             return
 
+        smalltalk = (self._smalltalk_re.search(text) is not None or re.search(self._cfg.share_fallback_topic, text) is not None) \
+            and not re.search(self._ref_cfg.procedure_pattern, text)
+        self._session.smalltalk_streak = self._session.smalltalk_streak + 1 if smalltalk else 0
         reply: list[str] = []
         offered = self._tidbit_to_offer(text)
         hint = self._tidbit_cfg.offer_template.format(text=offered["text"]) if offered else ""
@@ -415,6 +466,9 @@ class Conversation:
         kind = (self.dialogue.last_proposal
                 if self.dialogue.last_safety in ("complaint", "cannot_apply", "cannot_meet")  # 定型が付けた「伝えましょうか」
                 else self._adjust_proposal(self.dialogue.last_proposal, text, "".join(reply)))
+        if (kind is None and self._news_cfg.propose_in_smalltalk
+                and self._session.smalltalk_streak >= self._news_cfg.smalltalk_turns):
+            kind = "news"  # 雑談が続いた: 締めの定型の代わりに、お知らせを一つ紹介してよいか尋ねる
         proposing = kind is not None and self._available(kind)
         spoken = reply[: len(reply) - len(held)]  # 預からずに読み上げた文（応答の頭）
         for s in held:
@@ -427,7 +481,9 @@ class Conversation:
         if len(spoken) < len(reply):
             # 読み上げなかった問いは履歴にも残さない
             self.dialogue.replace_last_reply(text.strip(), "".join(reply), "".join(spoken))
-        if kind is not None and proposing:
+        if kind == "news" and proposing:
+            yield self._propose_news(text, language, index, "雑談の区切り", extend=True)
+        elif kind is not None and proposing:
             line = self._t(kind, "propose")
             self.dialogue.extend_last_reply(line)
             self._pending = Pending(kind, text, language, turn_index=index, speaker=self._speaker,
@@ -521,6 +577,8 @@ class Conversation:
                 and not re.search(self._tidbit_cfg.banned_pattern, text))
 
     def _available(self, kind: str) -> bool:
+        if kind == "news":
+            return self._news_available()
         if kind not in self._cfg.enabled or kind not in self._templates:
             return False
         if kind == "lookup":
@@ -531,7 +589,7 @@ class Conversation:
 
     def _t(self, action: str, key: str, **kw: Any) -> str:
         # 定型文の {greeting} は応答・相槌と同じ時刻判定で埋める
-        return self._templates.get(action, {}).get(key, "").format(greeting=greeting_for(self._now()), **kw)
+        return self._templates.get(action, {}).get(key, "").format(greeting=greeting_for(self._now()), org=self._org, **kw)
 
     def _outcome(self, outcome: str) -> None:
         self.turn_info["outcome"] = outcome
@@ -610,6 +668,9 @@ class Conversation:
                 lines.append(s)
                 yield s
         user = self._private_text(p, text, label)
+        if p.action == "news" and self._news_history is not None:
+            # お知らせを紹介した: 履歴には要約の本文ではなく定型の一言（WP07 と同じ）
+            lines, self._news_history = [self._news_history], None
         self._add_turn(p, user, self.redact("".join(lines)))
 
     def _add_turn(self, p: Pending, user: str, assistant: str) -> None:
@@ -637,9 +698,12 @@ class Conversation:
             yield self._t(p.action, "acting")  # refer は「担当の方が準備できるように、少しだけ伺いますね」
             if self._on_state is not None:
                 await self._on_state("thinking")
-        elif self._on_state is not None:
+        elif self._on_state is not None and p.action != "news":
             await self._on_state("thinking")  # 書き直しの間（言葉は挟まない。すぐ確認の文が出る）
-        if p.action == "lookup":
+        if p.action == "news":
+            async for s in self._do_news(p):
+                yield s
+        elif p.action == "lookup":
             self._pending = None
             async for s in self._do_lookup(p):
                 yield s
@@ -649,6 +713,81 @@ class Conversation:
         elif p.action == "share":
             async for s in self._do_share(p):
                 yield s
+
+    # ---- お知らせ（WP11） --------------------------------------------------
+
+    def _news_block_check(self, text: str) -> None:
+        """この会話でお知らせを提案しない理由（相手が急いでいる語）を覚える。深刻な打ち明けは定型の側で。"""
+        if self._session is not None and self._session.news_blocked is None and self._hurry_re.search(text):
+            self._session.news_blocked = "急いでいる"
+            logger.info("相手が急いでいるので、この会話ではお知らせを提案しません")
+
+    def _news_available(self) -> bool:
+        """お知らせを提案してよいか（返事待ち・聞き取りの途中でない、止める理由が無い、1 会話の上限、候補がある）。"""
+        s = self._session
+        if (self._news is None or not self._news_cfg.enabled or s is None or self._pending is not None
+                or s.news_blocked is not None or s.news_proposed >= self._news_cfg.max_per_session):
+            return False
+        return self._news.next_candidate() is not None
+
+    def _propose_news(self, text: str, language: str, index: int, trigger: str, extend: bool = True) -> str:
+        """お知らせの提案（決まった文）。返事待ちにして、履歴の直前の応答の後ろに足す。"""
+        assert self._session is not None
+        line = self._t("news", "propose")
+        if extend:
+            self.dialogue.extend_last_reply(line)
+        self._pending = Pending("news", text, language, turn_index=index, speaker=self._speaker,
+                                history_before=self.dialogue.history)
+        self._session.news_proposed += 1
+        self._session.proposals.append({"action": "news", "outcome": None, "trigger": trigger})
+        self.turn_info["proposed"] = "news"
+        logger.info("お知らせの紹介を提案しました（%s）", trigger)
+        return line
+
+    @property
+    def pending_action(self) -> str | None:
+        """返事を待っている行為（無ければ None）。"""
+        return self._pending.action if self._pending is not None else None
+
+    async def news_timeout(self) -> AsyncIterator[str]:
+        """お知らせの提案に無言のまま reply_timeout_sec たった: 「わかりました。」と言って、そのまま（再提案しない）。"""
+        p = self._pending
+        if p is None or p.action != "news" or p.phase != "proposed":
+            return
+        self._pending = None
+        self._outcome("declined")
+        line = self._t("news", "declined")
+        self.dialogue.extend_last_reply(line)
+        logger.info("お知らせの提案に返事が無いので、紹介しません")
+        yield line
+
+    def take_news_closing(self) -> str | None:
+        """紹介の要約を読み終えた後に言う締めの文（main が 2 秒置いて言い、構図を戻す）。1 回だけ返す。"""
+        line, self._news_closing = self._news_closing, None
+        return line
+
+    async def _do_news(self, p: Pending) -> AsyncIterator[str]:
+        self._pending = None
+        rec = self._news.next_candidate() if self._news is not None else None
+        if rec is None:
+            self._outcome("none")
+            yield self._t("news", "none")
+            return
+        assert self._news is not None and self._session is not None
+        self._news.mark_shown(rec.id)
+        self._session.proposals[-1]["news_id"] = rec.id  # 来訪記録には記事の id だけ（本文は入れない）
+        self._outcome("shown")
+        logger.info("お知らせを紹介します: %s（%s）", rec.id, rec.category)
+        if self._on_layout is not None:
+            await self._on_layout(self._news.layout_message(rec))
+        intro = self._t("news", "intro", when=spoken_date(rec.published_date(), self._now().date(), self._news_cfg))
+        closing = self._t("news", "closing")
+        self._news_closing = closing
+        self._news_history = self._t("news", "history", intro=intro, title=rec.title, closing=closing)
+        yield intro
+        for sentence in re.split(r"(?<=[。！？!?])", rec.summary):
+            if sentence.strip():
+                yield sentence.strip()
 
     # ---- 調べる --------------------------------------------------------
 
@@ -941,6 +1080,7 @@ class Conversation:
         item = p.intake_set.bring_for(answers) if p.intake_set else None
         if item:
             line += self._t("refer", "bring", item=item)
+        self._business_done = True
         yield line
 
     async def _update_referral(self, p: Pending, prefix: str) -> AsyncIterator[str]:

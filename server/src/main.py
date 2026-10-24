@@ -37,7 +37,7 @@ from .backchannel import BackchannelBank, BackchannelClip, strip_leading_backcha
 from .camera import CameraClient, PartySnapshot, PartyState
 from .config import SERVER_ROOT, ConfigError, DeviceSpec, config, parse_device
 from .dialogue import Dialogue, speech_text
-from .edge_bridge import EdgeBridge
+from .edge_bridge import EdgeBridge, theme_payload
 from .edge_server import AdminPanel, EdgeServer, StaffPanel
 from .knowledge import JST, KnowledgeStore, Weather
 from .llm_client import LLMClient
@@ -51,6 +51,7 @@ from .procedure_kb import PROCEDURE_TRUST, ProcedureRecord, procedures_dir
 from .procedure_panel import ProcedurePanel, approved_view
 from .procedures import AsrFixes, load_procedures
 from .referrals import ReferralStore, TidbitStore, VisitLog, load_tags
+from .roles import Roles, publicity_role, reception_role
 from .site_context import Facility, load_facility, load_site_words, referral_csv_enabled
 from .speaker import SpeakerClusters, SpeakerEmbedder
 from .speech_gate import SpeechGate
@@ -152,15 +153,26 @@ class VoiceLoop:
         self._procedures = load_procedures(
             config.asr.site_context_dir, procedures_dir(config.data_dir, config.site, config.procedure.subdir),
             config.procedure.recheck_keep_using)
+        persona = load_persona(config.persona)
         self._dialogue = Dialogue(
             llm,
             facility=facility,
             weather=self._weather,
             avatar_name=config.actions.avatar_name,
             enabled_actions=config.actions.enabled,
-            persona=load_persona(config.persona),
+            persona=persona,
             procedures=self._procedures,
         )
+        # 役（WP11 C-1）。進行役はこのクラスで、役の選択は roles.select_role の 1 か所。今は総合受付 ⇄ 広報の 1 往復
+        self._roles = Roles(reception_role(persona, facility.name if facility else "市役所", config.actions.enabled),
+                            publicity_role())
+        self._dialogue.role = self._roles.current
+        # お知らせ（WP11。夜のパック更新で集めた記事。職員パネルの変更と夜の更新は reload_sec ごとに読み直す）
+        self._news: NewsBook | None = (
+            NewsBook(news_dir(config.data_dir, config.site, config.news), config.news,
+                     load_news_rules(config.news.rules_path))
+            if config.news.enabled else None)
+        self._news_reply_task: asyncio.Task[None] | None = None
         # 同意付きの行為（調べる・つなぐ）と来訪記録（WP04）
         self._referrals = ReferralStore(config.data_dir, config.site, config.referral.retention_days,
                                         csv_export=referral_csv_enabled(config.site))
@@ -184,6 +196,7 @@ class VoiceLoop:
             procedures=self._procedures,
             asr_fixes=self._asr_fixes,
             speaker_count=lambda: self._speakers.accepted_count,
+            news=self._news, news_cfg=config.news, on_layout=self._on_news_layout,
         )
         self._llm = llm
         self._backchannels = (BackchannelBank(config.actions.backchannel_path)
@@ -210,11 +223,6 @@ class VoiceLoop:
         self._openers = load_openers(SERVER_ROOT / "context" / "openers.yaml")
         # テーマ（WP08。拠点×季節のアバター・背景・季節の一言。暦で自動、職員パネルから手動でも）
         self._themes = ThemeSelector(load_themes(config.theme.path, config.site))
-        # お知らせ（WP11。夜のパック更新で集めた記事。職員パネルの変更と夜の更新は reload_sec ごとに読み直す）
-        self._news: NewsBook | None = (
-            NewsBook(news_dir(config.data_dir, config.site, config.news), config.news,
-                     load_news_rules(config.news.rules_path))
-            if config.news.enabled else None)
         # 輪が NONE になってからの、会話を区切るタイマーと、別れの一言を言ったか
         self._bye_task: asyncio.Task[None] | None = None
         self._farewell_said = False
@@ -243,6 +251,7 @@ class VoiceLoop:
                 avatars_dir=config.data_dir / config.theme.avatars_subdir,
                 backgrounds_dir=config.data_dir / config.theme.backgrounds_subdir,
                 news=self._news,
+                theme_message=lambda: self._theme_message(self._themes.applied),
             )
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # 知識パック（毎朝作り直され、再起動なしで差し替わる）
@@ -611,6 +620,8 @@ class VoiceLoop:
         self._farewell_said = self._opener_said = False
         self._silence_count = 0
         await self._conversation.end_session()
+        if self._roles.state.presenting_news:
+            await self._on_news_layout({"type": "layout", "mode": "normal"})  # 紹介の途中で区切れた: 元の構図へ
         self._speakers.reset()  # 話者の埋め込みも捨てる（メモリのみ）
         if self._asr is not None:
             self._asr.clear_rolling_context()
@@ -852,6 +863,9 @@ class VoiceLoop:
             self._call_staff_if_needed()
             self._last_activity = time.monotonic()  # 沈黙は、案内役が言い終えてから数える
         self._arm_phone_timer()
+        self._arm_news_reply_timer()
+        if trigger != "news_closing":
+            await self._finish_news()
 
     def _arm_phone_timer(self) -> None:
         """電話番号の断片を預かっていれば、続きを待つタイマーを動かす（1 つだけ）。"""
@@ -1032,13 +1046,10 @@ class VoiceLoop:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
-    async def _send_theme(self, theme: Theme | None) -> None:
-        """テーマをエッジに送る。アバターのファイルが ~/idobata-data/avatars/ に無ければ開発用のサンプル。"""
-        if self._edge is None:
-            return
+    def _theme_message(self, theme: Theme | None) -> dict[str, Any]:
+        """エッジへ送るテーマ（職員パネルのお知らせのプレビューにも使う）。アバターが無ければ開発用のサンプル。"""
         if theme is None:
-            await self._edge.send_theme(config.site, "", config.edge.default_avatar, "")
-            return
+            return theme_payload(config.site, "", config.edge.default_avatar, "")
         avatar = f"avatars/{theme.avatar}"
         if not (config.data_dir / config.theme.avatars_subdir / theme.avatar).is_file():
             logger.warning("アバターのファイルがありません（開発用のサンプルで表示します）: %s", theme.avatar)
@@ -1046,8 +1057,64 @@ class VoiceLoop:
         th = config.theme
         credit = background_credit(config.data_dir / th.backgrounds_subdir, theme.background, th.credits_file,
                                    th.credit_format)
-        await self._edge.send_theme(config.site, theme.name, avatar, f"backgrounds/{theme.background}",
-                                    credit.text, credit.anchor)
+        return theme_payload(config.site, theme.name, avatar, f"backgrounds/{theme.background}",
+                             credit.text, credit.anchor)
+
+    async def _send_theme(self, theme: Theme | None) -> None:
+        """テーマをエッジに送る。"""
+        if self._edge is None:
+            return
+        m = self._theme_message(theme)
+        await self._edge.send_theme(m["site"], m["name"], m["avatar"], m["background"], m["background_credit"],
+                                    m["background_anchor"])
+
+    # ------------------------------------------------------------------
+    # 進行役: 役と構図（WP11 C-1・C-3）
+    # ------------------------------------------------------------------
+
+    async def _on_news_layout(self, msg: dict[str, Any]) -> None:
+        """構図を変える（お知らせの紹介の始まり・終わり）。役を選び直し、エッジへ layout を送る。"""
+        self._roles.state.presenting_news = msg.get("mode") == "news"
+        role, changed = self._roles.select()
+        self._dialogue.role = role
+        if changed:
+            logger.info("役を切り替えました: %s（構図 %s）", role.name, role.layout)
+        logger.info("layout: %s%s", msg.get("mode"), f"（お知らせ {msg.get('id')}）" if msg.get("id") else "")
+        if self._edge is not None:
+            await self._edge.send_json(msg)
+
+    async def _finish_news(self) -> None:
+        """要約を読み終えたら 2 秒置いて締めの文を言い、構図を戻す。その間に話しかけられたら締めを言わずに戻す。"""
+        closing = self._conversation.take_news_closing()
+        if closing is None:
+            return
+        await asyncio.sleep(config.news.after_summary_pause_sec)
+        others = [t for t in self._turn_tasks if t is not asyncio.current_task()]
+        if not (self._hearing or others):
+            await self._respond_and_speak("", "ja", None, source=partial(_lines, closing), trigger="news_closing")
+        else:
+            logger.info("紹介の後に話しかけられたので、締めの文を言わずに構図を戻します")
+        await self._on_news_layout({"type": "layout", "mode": "normal"})
+
+    def _arm_news_reply_timer(self) -> None:
+        """お知らせの提案の返事待ち（音声のときだけ）。reply_timeout_sec 黙っていたら「わかりました。」"""
+        if self._mode != "voice" or self._conversation.pending_action != "news" or self._conversation.phase != "proposed":
+            return
+        if self._news_reply_task is None or self._news_reply_task.done():
+            self._news_reply_task = asyncio.create_task(self._watch_news_reply(), name="news-reply")
+            self._bg_tasks.add(self._news_reply_task)
+            self._news_reply_task.add_done_callback(self._bg_tasks.discard)
+
+    async def _watch_news_reply(self) -> None:
+        while self._conversation.pending_action == "news" and self._conversation.phase == "proposed":
+            # 言い終えて（ゲートが開いて）から数える。聞いている・話している途中は待つ
+            if (self._gate.is_muted or self._hearing or self._turn_tasks or self._turn_lock.locked()
+                    or time.monotonic() - self._last_activity < config.news.reply_timeout_sec):
+                await asyncio.sleep(_HEARING_POLL_SEC)
+                continue
+            await self._respond_and_speak("", "ja", None, source=self._conversation.news_timeout,
+                                          trigger="news_timeout")
+            return
 
     def _theme_switchable(self) -> bool:
         """テーマを切り替えてよいか（会話中でない。カメラがあれば輪が無い）。"""

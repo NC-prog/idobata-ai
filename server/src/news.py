@@ -80,6 +80,8 @@ class NewsRecord:
     expires_at: str = ""  # この日から候補にしない（YYYY-MM-DD）
     status: str = "auto"
     image_hidden: bool = False
+    # 記事のページそのものから画像を探したか（サイトが止まっていてキャッシュの本文で作ったときは False）
+    image_checked: bool = False
     fetched_at: str = ""  # 初めて取った日時
     updated_at: str = ""  # 最後に本文を取り直した日時
     content_hash: str = ""

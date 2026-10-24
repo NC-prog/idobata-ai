@@ -245,3 +245,52 @@ def test_staff_edited_summary_is_not_overwritten(tmp_path: Path) -> None:
     stats = news_summarize.summarize(tmp_path, "akiota", llm, None, CFG, now=NOW)  # type: ignore[arg-type]
     got = load_records(tmp_path)[0]
     assert got.summary == staff and got.summarized_hash == "new" and stats["staff"] == 1 and not llm.calls
+
+
+def test_collect_while_site_down_then_recovered(tmp_path: Path) -> None:
+    """市のサイトが止まっている間はキャッシュの本文で作り、戻った夜に一覧の掲載日と記事の画像が入る。"""
+    import json as _json
+
+    import build
+    import httpx
+
+    src = build.load_sources("etajima")
+    src.rate_limit_sec = 0.0
+    feed = "https://www.city.etajima.hiroshima.jp/cms/atom/news"
+    art = "https://www.city.etajima.hiroshima.jp/cms/articles/show/12426"
+    body = "<p>" + "11月10日から11月14日まで、町道の通行止めを行います。迂回路をご利用ください。" * 3 + "</p>"
+    html = (f"<html><head><title>通行止めのお知らせ</title><meta property='og:image' content='/img/news.jpg'></head>"
+            f"<body><h1>通行止めのお知らせ</h1><main>{body}</main></body></html>")
+    up = {"ok": False}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if not up["ok"] or req.url.path == "/robots.txt":
+            return httpx.Response(500 if up["ok"] is False else 404)
+        if str(req.url) == feed:
+            return httpx.Response(200, headers={"content-type": "application/atom+xml"}, text=(
+                f"<feed><entry><title>通行止めのお知らせ</title><link rel='alternate' href='{art}'/>"
+                "<published>2026-10-20T09:00:00+09:00</published></entry></feed>"))
+        if str(req.url) == art:
+            return httpx.Response(200, headers={"content-type": "text/html"}, text=html)
+        if req.url.path == "/img/news.jpg":
+            return httpx.Response(200, headers={"content-type": "image/png"}, content=_png(800, 600))
+        return httpx.Response(404)
+
+    crawler = build.Crawler(src, tmp_path / "cache")
+    crawler.client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    # 知識パックのキャッシュ（止まる前に取ったもの）: 一覧のリンクと、記事の抽出済みの本文
+    title, text = build.extract_html(html, art)
+    for url, links, t, x in ((feed, [art], "", ""), (art, [], title, text)):
+        crawler._cache_path(url).write_text(_json.dumps({
+            "url": url, "title": t, "text": x, "links": links, "breadcrumbs": [],
+            "fetched_at": "2026-10-21T17:29:02+09:00"}, ensure_ascii=False), encoding="utf-8")
+    store = tmp_path / "news"
+    news_collect.collect(src, crawler, store, CFG, now=datetime(2026, 10, 24, 6, 0, tzinfo=JST))
+    (rec,) = load_records(store)
+    assert rec.published == "2026-10-21" and rec.image is None and not rec.image_checked  # 掲載日は取得日・画像なし
+    up["ok"] = True
+    stats = news_collect.collect(src, crawler, store, CFG, now=datetime(2026, 10, 25, 6, 0, tzinfo=JST))
+    (rec,) = load_records(store)
+    assert stats["unchanged"] == 1  # 本文は同じ（分類・要約はやり直さない）
+    assert rec.published == "2026-10-20" and rec.image == f"{rec.id}.jpg" and rec.image_checked
+    assert (store / rec.image).is_file()

@@ -1044,13 +1044,7 @@ class NewsConfig:
     summarize_body_chars: int = 1500
     # 一覧のフィード 1 つから取る記事の数
     max_items_per_feed: int = 40
-    # 紹介の定型（{org} は 市 / 町）
-    propose_sentence: str = "ところで、{org}からのお知らせを一つご紹介してもいいですか？"
-    intro_sentence: str = "それでは、{when}のお知らせです。"
-    closing_sentence: str = "くわしくは、画面の QR コードから{org}のページをご覧ください。ほかに何かあれば、どうぞ。"
-    declined_sentence: str = "わかりました。"
-    # 履歴に残す定型の一言（WP07 の「定型の一言を履歴に」と同じ）
-    history_user_placeholder: str = "（お知らせの紹介を聞きました）"
+    # 紹介の定型の文は context/actions.yaml の news
     # 読み終えてから構図を戻すまで（秒）。締めの文を言い終えるまで QR を残す
     after_summary_pause_sec: float = 2.0
     # 返事を待つ秒数（無言はいいえ）

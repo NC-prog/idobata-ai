@@ -33,6 +33,7 @@ from .persona import (
 )
 from .procedure_kb import PROCEDURE_TRUST, ProcedureRecord
 from .procedures import Procedures
+from .roles import Role
 from .site_context import Facility
 from .timeofday import fix_greeting, greeting_for
 
@@ -283,6 +284,8 @@ class Dialogue:
         self._avatar_name = avatar_name
         self._enabled_actions = enabled_actions
         self._persona = persona
+        # いまの役（WP11 C-1。roles.py）。None なら人物像の段落をそのまま使う（総合受付と同じ）
+        self.role: Role | None = None
         self._procedures = procedures
         self._proc_cfg = procedure_cfg or config.procedure
         self._draft_covered_re = re.compile(self._proc_cfg.draft_covered_pattern)
@@ -368,7 +371,8 @@ class Dialogue:
         weather = self._weather.lines(now) if self._weather is not None else []
         system = build_system_prompt(self._cfg, self._facility, now.date(), weather,
                                      self._avatar_name, self._enabled_actions,
-                                     greeting_for(now, self._cfg), self._persona)
+                                     greeting_for(now, self._cfg), self._persona,
+                                     self.role.prompt_block if self.role is not None else None)
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for user, assistant in self._history:
             messages.append({"role": "user", "content": user})

@@ -28,6 +28,9 @@
 - WP10（現在）: 背景の実写（Wikimedia Commons の CC0・CC BY・CC BY-SA・PD。候補は `scripts/fetch_commons_backgrounds.py`、選ぶのは人間、
   適用は `scripts/apply_background.py` → `~/idobata-data/backgrounds/<site>_<season>.jpg` と `credits.json`。**git に入れない**）。
   CC BY / BY-SA は画面右下にクレジット（theme の `background_credit`）。結果は `docs/WP10_result.md`
+- WP11（現在）: 広報（お知らせの紹介）と「役」の骨組み。市町のサイトの新着・お知らせを夜に集めて分類・要約し（`kb/news_*.py`）、
+  用件の後・雑談で話題が切れたときに同意を取って 1 会話 1 件だけ紹介する。紹介の間は画面がニュース番組の構図（左に記事の画像、右にアバター、
+  足元に QR）。職員は承認待ちにせず、職員パネルの「お知らせ」タブ（`/staff/news/`）で止める・優先・画像を出さない・要約を直す。結果は `docs/WP11_result.md`
 - 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
 
 ## 実行環境（重要）
@@ -101,6 +104,18 @@
   **ultralytics（AGPL-3.0）は使わない**（WP02 で置き換えた）。`onnxruntime-gpu` を使い、CPU 版 `onnxruntime` は uv の override で外している。
   モデルの重みは `~/idobata-data/models/`（`rtmpose/` の ONNX、speechbrain の spkrec-ecapa-voxceleb）。実行時には取りに行かない。
   エッジのブラウザは GPU で描画させる（`chrome://gpu`）
+- お知らせ（WP11、`NewsConfig`。`IDOBATA_NEWS=0` で提案しない）: 記事は `~/idobata-data/kb/<site>.news/<id>.json`（と画像 `<id>.jpg`）。
+  パックの各版に `news` のリンクがあり `kb/<site>/news/` で読める（版を差し替えても残る）。`kb/build.py` の `--daily`・全体の両方で
+  収集（`sources/<site>.yaml` の `news`。江田島 Atom 3 本・安芸太田 RSS 1.0 3 本）→ 分類（`server/context/news.yaml` の語、決まらなければ LLM の二択）→
+  要約（110〜140 字、本文から規則で抜いた日付の一覧を渡す。保存の前に `Dialogue.fixed_text_problems` と `news.summary_problems` の安全装置、
+  VOICEVOX で 15〜22 秒。外れたら held で紹介しない）。夜だけ別の LLM は `IDOBATA_NIGHT_LLM_URL` / `IDOBATA_NIGHT_LLM_MODEL`（空なら 7560）。
+  画像は許可ドメイン内・記事と同じホストのものだけ（外部サイトの画像は取らない）。状態は auto / stopped / priority / held。
+  紹介の順番は 優先 → 分類の重み（通行止め・ライフライン・防災 ＞ 施設・ごみ ＞ その他）→ 掲載日の新しい順 → 紹介した回数の少ない順。
+  出さない: 紹介状の聞き取りの途中・深刻な打ち明けや迷子の定型に入った会話・急いでいる語・既に 1 件提案した会話・候補 0 件。
+  提案文・前置き・締めは `context/actions.yaml` の `news`。来訪記録には提案・紹介・断られたと記事の id だけ
+- 役（WP11、`server/src/roles.py`）: 総合受付 reception（今までの案内役。prompt_block は人物像の段落のまま）と広報 publicity（お知らせを読む係、
+  構図 news）。進行役は `main.py`（`_on_news_layout`）で、役の選択は `select_role` の 1 か所だけ。役が変わるとエッジへ `{type: "layout", mode}`。
+  エッジはアバターの canvas の位置と大きさだけを変える（口パク・視線・まばたきの処理は同じ）。職員パネルのプレビューは `/edge/?preview=<id>&orient=`
 - 挨拶は時間帯で変える（`src/timeofday.py`。5〜10 時 おはようございます、10〜17 時 こんにちは、17 時以降 こんばんは）。
   応答・相槌・定型文（`{greeting}`）・アナウンスで同じ判定を使い、LLM が別の時間帯の挨拶を言ったら読み上げ前に直すASR は返事待ちの間だけ言語を固定する
   （`deploy/standalone/asr/chat_template.jinja` の `force_language`）
@@ -146,6 +161,8 @@ uv run python -m src.main --mode voice --edge --camera-debug   # → http://loca
 #   IDOBATA_LOOKUP_WEB_SEARCH=0             一般のウェブ検索（既定オフ。評価では使わない）
 #   IDOBATA_ADMIN_PASSWORD=...              /admin/transcripts/ の Basic 認証（ユーザー admin。職員パネルとは別）（WP06）
 #   IDOBATA_TRANSCRIPT_RETENTION_DAYS=7     会話の文字記録の保存日数（起動時に古いものを消す。保全したものは残す）
+CUDA_VISIBLE_DEVICES= uv run --project ../kb python ../kb/build.py --site etajima --news-only   # お知らせだけ（WP11）
+uv run --project ../kb python ../kb/news_summarize.py --site etajima --force   # 要約だけ作り直す（職員が直したものは除く）
 uv run python ../scripts/export_review.py --date 2026-10-22   # 誤り探しの素材 → ~/idobata-data/review/<date>.jsonl
 uv run python -m src.main --mode voice --edge   # → 職員は http://<窓口機>:8080/staff/ （10 秒ごとに更新）
 
@@ -206,6 +223,9 @@ server/
 │   ├── camera.py         # カメラと「輪」（rtmlib の RTMDet＋RTMPose・簡易トラッカー。フレームはメモリのみ。WP02 A）
 │   ├── speaker.py        # セッション限りの話者の区別（ECAPA。A・B…。埋め込みはメモリのみ。WP02 B）
 │   ├── openers.py        # 切り出し・沈黙・別れの定型文（context/openers.yaml。WP02 C）
+│   ├── news.py           # お知らせの記事・選ぶ順番・要約の安全装置・QR（WP11）
+│   ├── news_panel.py     # 職員パネルの「お知らせ」タブ（WP11）
+│   ├── roles.py          # 役（reception / publicity）と select_role（WP11）
 │   ├── themes.py         # テーマ（context/themes.yaml。拠点×季節のアバター・背景・季節の一言。WP08）
 │   ├── transcripts.py    # 会話の文字記録（WP06）
 │   ├── caption_feed.py   # 字幕配信（WP03 で使用予定）
