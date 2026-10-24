@@ -195,10 +195,10 @@ def decide_use(url: str, title: str, seed: Seed | None, src: Sources) -> tuple[s
                 return rule["use"], f"URL の規則（確定） {rule['pattern']}"
             default, basis = rule["use"], f"URL の規則 {rule['pattern']}"
             break
-    hit = next((w for w in src.scope.exclude_title_words if w in title), None)
+    hit = next((w for w in src.scope.exclude_title_words if re.search(w, title)), None)
     if hit:
         return "exclude", f"題名に「{hit}」"
-    up = next((w for w in src.scope.dialogue_title_words if w in title), None)
+    up = next((w for w in src.scope.dialogue_title_words if re.search(w, title)), None)
     if up and default == "lookup":
         return "dialogue", f"題名に「{up}」（引き上げ。元は{basis}）"
     return default, basis
@@ -668,15 +668,26 @@ def seed_of(page: Page, crawler: Crawler, src: Sources) -> Seed | None:
             continue
         if seed.require_text and not any(k in page.text for k in seed.require_text):
             continue
+        if seed.depth <= 1 and not seed.sitemap and page.url != seed.url:
+            # 一覧（フィード・新着）の区画は、一覧に載っていたページだけを採用する（include の条件は広く書いてある）
+            listing = crawler._cache_path(seed.url)
+            links = json.loads(listing.read_text(encoding="utf-8")).get("links", []) if listing.is_file() else []
+            if page.url not in links:
+                continue
         return seed
     return None
 
 
-def pages_from_cache(pack: Path, crawler: Crawler, src: Sources) -> list[Page]:
-    """今のパックに入っているページを、取得し直さずにキャッシュから読む。"""
+def pages_from_cache(pack: Path, crawler: Crawler, src: Sources, extra: list[Path] | None = None) -> list[Page]:
+    """今のパック（と extra の版）に入っているページを、取得し直さずにキャッシュから読む。
+
+    extra は、用途の規則（WP13）を直したときに、前の規則で外したページも読み直すための前の版のディレクトリ。
+    """
     import pyarrow.parquet as pq
 
-    table = pq.read_table(pack / "chunks.parquet").to_pylist()
+    table = []
+    for p in [*(extra or []), pack]:
+        table += pq.read_table(p / "chunks.parquet").to_pylist()
     meta = {r["source_url"]: (r.get("trust", ""), r.get("label", "")) for r in table}
     urls = list(meta)
     pages: list[Page] = []
@@ -1163,6 +1174,8 @@ def main() -> int:
                     help="取得し直さず、今のパックのページをキャッシュから作り直す（チャンク・人名除去の変更用）")
     ap.add_argument("--allow-shrink", action="store_true",
                     help="全体の作り直しでページが前の版の半分を下回っても差し替える（sources を絞ったときだけ）")
+    ap.add_argument("--from-cache-pack", type=Path, action="append", default=[],
+                    help="--from-cache で、今のパックに加えてこの版（ディレクトリ）のページも読む（用途の規則を直したとき。複数可）")
     ap.add_argument("--news-only", action="store_true", help="お知らせ（WP11）の収集・分類・要約だけ")
     ap.add_argument("--no-news", action="store_true", help="お知らせ（WP11）を集めない")
     args = ap.parse_args()
@@ -1205,7 +1218,7 @@ def main() -> int:
     try:
         queries: list[str] = []
         if args.from_cache:
-            pages = pages_from_cache(pack, crawler, src)
+            pages = pages_from_cache(pack, crawler, src, args.from_cache_pack)
         else:
             pages = crawl(src, crawler, daily=args.daily)
             queries = read_queue(root, args.site) if args.daily else []

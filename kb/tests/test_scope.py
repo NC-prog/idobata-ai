@@ -95,3 +95,15 @@ def test_bad_use_is_rejected(tmp_path: Path, monkeypatch: Any) -> None:
         build._seed({"url": "https://x/", "use": "talk"}, 0)
     with pytest.raises(ValueError):
         build._check_rules([{"pattern": "x"}], "テスト")
+
+
+def test_title_words_are_regex_with_lookbehind() -> None:
+    """「議会」は協議会・審議会に当たらない、「人事」は求人事業主に当たらない（ビルドの結果で見つかった誤り）。"""
+    src = _src("akiota")
+    soshiki = src.seeds[0]
+    url = "https://www.akiota.jp/soshiki/7/1.html"
+    assert build.decide_use(url, "安芸太田町社会福祉協議会", soshiki, src)[0] == "dialogue"
+    assert build.decide_use(url, "上下水道料金審議会", soshiki, src)[0] == "dialogue"
+    assert build.decide_use(url, "求人事業主の皆様へ", soshiki, src)[0] == "dialogue"
+    assert build.decide_use(url, "議会だより", soshiki, src)[0] == "exclude"
+    assert build.decide_use(url, "人事異動について", soshiki, src)[0] == "exclude"

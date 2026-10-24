@@ -1,0 +1,24 @@
+# 2026-10-24 の実機確認（安芸太田）で出た 4 つの脱線（WP13 C）。会話の流れごと残す。
+# どれも「検索が関係ありそうな文章を拾い、8B がそれを本題にした」型。WP13 の後は、渡した資料（[出典]）の題名と応答に
+# off_topic の語が出ないこと（must_not）を見る。site は安芸太田。
+# 走らせ方: cd server && uv run python -m tests.eval.run_regression [--site akiota]
+- id: r1_kokuho_tax
+  site: akiota
+  note: 国保の手続きの話に、国保税の Q&A が付いて「国保税についてご相談ですね」と言い換えた
+  turns: [こんにちは。, うんと国保のことで聞きに来ました。, いや、えっと退職とかで。]
+  off_topic: [国保税, 国民健康保険税]
+- id: r2_jido_job
+  site: akiota
+  note: 児童手当の問いに、町内求人情報の「通勤手当」が付いた（手当の語で拾った）
+  turns: [児童手当について]
+  off_topic: [求人, 通勤手当, 児童扶養手当]
+- id: r3_wakarimashita_kyocho
+  site: akiota
+  note: 「わかりました」に「協調学習の取組」が付き、8B がその話を始めた
+  turns: [国保のことで聞きに来ました。, 退職とかで。, わかりました。]
+  off_topic: [協調学習]
+- id: r4_annai_michinoeki
+  site: akiota
+  note: 「町から案内ある？」に道の駅のブログ（移住初心者が紹介、戸河内IC前にある道の駅周辺）が付き、地域協働課で配布していると作った
+  turns: [ところで町からの何か案内ってありますか。]
+  off_topic: [道の駅, 移住初心者, 地域協働課で配布]
