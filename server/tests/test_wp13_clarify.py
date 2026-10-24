@@ -174,9 +174,9 @@ async def test_repeated_question_is_answered_not_reasked(tmp_path: Path) -> None
 
 async def test_question_while_proposal_pending_is_a_new_topic(tmp_path: Path) -> None:
     # 紹介状の提案の返事待ちに、問いの形（12 字以下でも）で言われたら、返事ではなく別の話として答える
-    llm = StubLLM([["保健医療課です。<propose:refer>"], ["国保の手続きは保健医療課（2階）で承ります。"]])
+    llm = StubLLM([["保健医療課です。<propose:refer>"], ["住民票は市民課（1階）で取れます。"]])
     c = _conv(tmp_path, llm)
     await _say(c, "国保に入りたいんですが")
     assert c.pending_action == "refer"
-    said = await _say(c, "国保の手続きはどこですか")
-    assert "保健医療課" in "".join(said) and c.pending_action != "refer"
+    said = await _say(c, "住民票はどこですか")
+    assert "市民課" in "".join(said) and c.pending_action != "refer"
