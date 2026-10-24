@@ -36,7 +36,8 @@
 - WP13（現在）: 会話で使う知識の絞り込み（パックの用途 use、発話の型ごとの検索範囲、名詞の足切り）。10/24 の実機の脱線（国保税・求人・協調学習・道の駅）を
   `server/tests/eval/cases_regression_1024.yaml`（`uv run python -m tests.eval.run_regression`）に残した。
   E: 用件の聞き分け（「国保のことで」のように複数の手続きが同程度に当たったら、定型で 1 問だけ聞いて返事を規則で判定。`src/clarify.py`、
-  定型と語は `context/actions.yaml` の `clarify`、返事の判定の例は `tests/eval/cases_clarify_replies.yaml`）。結果は `docs/WP13_result.md`
+  定型と語は `context/actions.yaml` の `clarify`、返事の判定の例は `tests/eval/cases_clarify_replies.yaml`）。場所だけを聞く問いで候補の課が同じなら聞かない。
+  手続きの問いで規則で課が決まるのに課を言わなければ「担当は〇〇です」を足す。結果は `docs/WP13_result.md`
 - 日本語 TTS は VOICEVOX で確定（WP00.5）。紹介状・職員パネルは WP04
 
 ## 実行環境（重要）
