@@ -36,6 +36,7 @@ from .asr_client import ngram_overlap
 from .clarify import OTHER, Clarifier, Clarify, load_clarify_rules
 from .config import ActionsConfig, NewsConfig, ReferralConfig, TidbitConfig
 from .dialogue import ChatBackend, Dialogue
+from .intents import noun_heavy
 from .knowledge import JST
 from .lookup import Lookup
 from .news import NewsBook, spoken_date, tidy_summary
@@ -593,13 +594,16 @@ class Conversation:
         s = self._session
         if s is None or s.news_blocked is not None or self.dialogue.intent_of(text) != "procedure":
             return None
+        cfg = self.dialogue._proc_cfg
+        t = text.strip()
+        if re.search(cfg.clarify_remark_pattern, t) or not (re.search(cfg.clarify_ask_pattern, t) or noun_heavy(t)):
+            return None  # 尋ねて・頼んでいない（感想・否定「〜ってゴミだね」）: 聞き分けない
         if self.dialogue.safety_reply(text) is not None:
             self.dialogue.last_safety = None  # 定型（代わりに申請・不満など）のターンでは聞かない（定型は応答の側で言う）
             return None
         c = self._clarifier.find(text)
         if c is None or frozenset(c.ids) in s.clarified:
             return None
-        cfg = self.dialogue._proc_cfg
         if re.search(cfg.clarify_place_pattern, text) and not re.search(cfg.clarify_content_pattern, text):
             # 場所だけを聞いた: 候補の課が全部同じなら、聞き分けずにふつうに答える（課と階。規則の課の一文で補う）
             depts = {self._department_of(r) for r in self._clarifier.exact(c)}

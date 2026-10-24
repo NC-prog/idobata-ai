@@ -331,6 +331,7 @@ class NewsBook:
         self._records: dict[str, NewsRecord] = {}
         self._stamp: tuple[int, float] | None = None
         self._checked = -1e18
+        self._logged_counts: tuple[int, int] | None = None
         self.reload(force=True)
 
     def _dir_stamp(self) -> tuple[int, float]:
@@ -350,7 +351,11 @@ class NewsBook:
             return False
         self._stamp = stamp
         self._records = {r.id: r for r in load_records(self.directory)}
-        logger.info("お知らせ: %d 件（紹介の候補 %d 件）", len(self._records), len(self.candidates()))
+        counts = (len(self._records), len(self.candidates()))
+        # 件数が変わったときだけ INFO（読み直しは 10 秒ごとに起きうるので、同じ件数は DEBUG。実機 2026-10-24）
+        level = logging.INFO if counts != self._logged_counts else logging.DEBUG
+        logger.log(level, "お知らせ: %d 件（紹介の候補 %d 件）", *counts)
+        self._logged_counts = counts
         return True
 
     def records(self) -> list[NewsRecord]:

@@ -49,7 +49,30 @@ _FALLBACK_REPLY: dict[str, str] = {
 
 # 応答末尾の出典の印（[出典:1,3]）と、文中に紛れた [1] などの番号。読み上げ前に取り除く
 # 行為の提案のタグ（<propose:lookup> など）。読み上げ前に取り除き、last_proposal に残す
-_PROPOSE_RE = re.compile(r"[<＜]\s*propose\s*[:：]\s*([a-z_]+)\s*[>＞]", re.IGNORECASE)
+# LLM が出し得るタグの形（実機 2026-10-24 22:55 に、閉じていない・別の書き方のタグが英字の言い直しで「共有する提案」と読まれた）:
+# <propose:share>・<propose: share>・<propose share>・<propose:share（「>」が無い）・</propose>・<share>（行為の名前だけ）
+_LOOSE_PROPOSE_RE = re.compile(r"[<＜]\s*/?\s*propose\s*[:：]?\s*([A-Za-z_]*)\s*/?\s*(?:[>＞]|$)", re.IGNORECASE)
+_BARE_ACTION_RE = re.compile(r"[<＜]\s*/?\s*(share|refer|lookup|news)\s*/?\s*(?:[>＞]|$)", re.IGNORECASE)
+# ほかの <…> の形（英字で始まるタグ。閉じていないものも）。日本語の〈〉や「<」だけは残す
+_OTHER_TAG_RE = re.compile(r"[<＜]\s*/?\s*[A-Za-z][A-Za-z0-9_:\-\s=\"'/]{0,40}(?:[>＞]|$)")
+
+
+def strip_tags(raw: str) -> tuple[str, list[str]]:
+    """応答の文からタグを剥がす（読み上げに残さない）。提案のタグの行為の名前（小文字）を順に返す。
+
+    英字の検査・言い直し・ほかの安全装置より前に、必ずここを通す（_finish_sentence の最初）。
+    """
+    kinds: list[str] = []
+
+    def take(m: re.Match[str]) -> str:
+        if m.group(1):
+            kinds.append(m.group(1).lower())
+        return ""
+
+    text = _LOOSE_PROPOSE_RE.sub(take, raw)
+    text = _BARE_ACTION_RE.sub(take, text)
+    text = _OTHER_TAG_RE.sub("", text)
+    return text, kinds
 
 _SOURCE_MARK_RE = re.compile(
     r"[\[［]\s*(?:出典\s*[:：]?)?\s*([0-9０-９]+(?:\s*[,，、]\s*[0-9０-９]+)*)\s*[\]］]"
@@ -356,6 +379,7 @@ class Dialogue:
         # 英字のまま出してよい語（allowed_terms.yaml）と、この応答で使った大文字の略語（1 応答に 3 語まで。WP13）
         self._allowed_terms = tuple(w.surface for w in load_allowed_terms(self._cfg.allowed_terms_path))
         self._abbrev_used: set[str] = set()
+        self._casual_re = re.compile(self._cfg.casual_interjection_pattern)
         self._allow_ascii = {a.lower() for a in (
             (facility.allow_ascii if facility else ()) + self._cfg.allow_ascii_common)}
         self._banned = tuple(self._cfg.banned_phrases) + (facility.outside_places if facility else ())
@@ -1558,13 +1582,16 @@ class Dialogue:
                     cited.add(int(n.translate(_ZEN_DIGITS)))
             return ""
 
-        def propose(m: re.Match[str]) -> str:
-            kind = m.group(1).lower()
+        # タグ（<propose:…> とほかの <…>）は、英字の検査・言い直し・ほかの安全装置より前にここで剥がす（順番はここで固定）
+        raw, kinds = strip_tags(raw)
+        for kind in kinds:
             if kind in self._enabled_actions:
                 self.last_proposal = kind
-            return ""
-
-        raw = _PROPOSE_RE.sub(propose, raw)
+        # 文頭の砕けた相槌（「おっ、」「へぇ、」）は外して残りを読む（実機 2026-10-24。おっす と同じく敬語を崩さない）
+        stripped = self._casual_re.sub("", raw.strip(), count=1)
+        if stripped != raw.strip():
+            logger.info("文頭の砕けた相槌を外しました")
+            raw = stripped
         sentence = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", _SOURCE_MARK_RE.sub(take, raw)).strip()
         sentence = fix_greeting(sentence, greeting_for(self._now(), self._cfg), self._cfg)
         sentence = _SPEAKER_LABEL_RE.sub("", sentence)  # 来訪者の話者の記号（「A：」）をまねた頭は外す
@@ -1625,7 +1652,7 @@ class Dialogue:
             logger.warning("言い直しに失敗しました。この文は読み上げません。", exc_info=True)
             self.note_drop("英字の言い直しに失敗", sentence)
             return ""
-        fixed = _SOURCE_MARK_RE.sub("", fixed).strip()
+        fixed = strip_tags(_SOURCE_MARK_RE.sub("", fixed))[0].strip()  # 言い直しの結果にもタグを残さない
         if not fixed or self._has_foreign_word(fixed):
             logger.warning("言い直しても英字が残ったため、この文は読み上げません")
             self.note_drop("英字が残った", sentence)
