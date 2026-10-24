@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 
 from .config import DialogueConfig, IntentScope, ProcedureConfig, config
-from .intents import classify_intent, load_intent_rules, nouns
+from .intents import classify_intent, load_intent_rules, nouns, procedure_names
 from .knowledge import JST, Reference, SearchResult, Weather
 from .persona import (
     Persona,
@@ -1429,6 +1429,12 @@ class Dialogue:
         if scope.need_noun:
             # 発話の名詞と、「今週末」などを具体的な日付にした語（行事の資料は日付で書かれている）
             ns = nouns(text) + self._expand_dates(text)[len(text):].split()
+            said = procedure_names(text, self._procedures) if (
+                self.last_intent == "procedure" and self._procedures is not None) else []
+            if said:
+                # 手続きの名前・別名で当たった問いは、その手続きの名前と別名で足切りする（「ふるさと納税」の名詞が
+                # 「納税」だけになり、国税の相談のページが残った。10/24 の判断の確認で）
+                ns = said
             head = self._kcfg.noun_head_chars
             kept = [r for r in refs if any(n in r.title or n in r.text[:head] for n in ns)]
             if len(kept) < len(refs):

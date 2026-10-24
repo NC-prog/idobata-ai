@@ -62,10 +62,18 @@ def noun_heavy(text: str) -> bool:
     return bool(body) and len(body) <= 12 and sum(len(n) for n in ns) * 2 >= len(body)
 
 
-def _procedure_surfaces(text: str, procedures: Procedures) -> list[str]:
+def procedure_surfaces(text: str, procedures: Procedures) -> list[str]:
     """発話に出てきた、別名表と手続きナレッジ（承認済み・下書き）の名前・別名。"""
     found = [w for r in procedures.matched(text) for w in r.surfaces if w in text]
     return found + [w for w in procedures.surfaces() if w in text]
+
+
+def procedure_names(text: str, procedures: Procedures) -> list[str]:
+    """発話で当たった手続きの、名前と別名のすべて（「国保」と言えば「国民健康保険」も。資料の足切りの語に使う）。"""
+    out = [w for r in procedures.matched(text) for w in (r.name, *r.surfaces)]
+    out += [w for p in procedures.items for w in (p.term, *p.aliases)
+            if any(s in text for s in (p.term, *p.aliases))]
+    return list(dict.fromkeys(w for w in out if w))
 
 
 def _tourism_word(surface: str, rules: IntentRules) -> bool:
@@ -80,7 +88,7 @@ def classify_intent(text: str, rules: IntentRules, procedures: Procedures | None
     t = text.strip()
     found = rules.hits(t)
     # 課の担当業務（handles）の語は見ない（商工観光課の「観光」で、観光の問いが手続きになる）
-    if procedures is not None and any(not _tourism_word(s, rules) for s in _procedure_surfaces(t, procedures)):
+    if procedures is not None and any(not _tourism_word(s, rules) for s in procedure_surfaces(t, procedures)):
         found.add(PROCEDURE)
     for intent in PRIORITY[:5]:
         if intent in found:

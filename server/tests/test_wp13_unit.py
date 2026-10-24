@@ -311,3 +311,25 @@ def test_kb_scope_env() -> None:
 
     assert build_config({"IDOBATA_KB_SCOPE": "0"}).knowledge.scope_enabled is False
     assert build_config({}).knowledge.scope_enabled is True
+
+
+async def test_procedure_name_is_the_noun_for_the_cut(tmp_path: Path) -> None:
+    # 手続きの名前で当たった問いは、その名前で足切り（「ふるさと納税」→「納税」だけで国税の相談が残った）
+    from src.dialogue import Dialogue
+    from src.procedure_kb import ProcedureBook, ProcedureRecord
+
+    ProcedureBook(tmp_path).save(ProcedureRecord(id="furusato", name="ふるさと納税", department="企画振興課",
+                                                 status="draft"))
+    procs = load_procedures(SERVER_ROOT / "context", tmp_path)
+    kokuzei = Reference("国税に関するご相談などは最寄りの税務署へ", "u/k", "国税の納税の相談は税務署へ。", 0.9, 1.0)
+    furusato = Reference("ふるさと納税のご案内", "u/f", "ふるさと納税の寄附の受付です。", 0.88, 1.0)
+    d = Dialogue(_LLM("そうですか。"), DialogueConfig(), knowledge=_KB([kokuzei, furusato]), procedures=procs)
+    await _say(d, "ふるさと納税について聞きたいのですが")
+    assert d.last_intent == "procedure" and [r.title for r in d.last_references] == ["ふるさと納税のご案内"]
+
+
+def test_procedure_names_expand_aliases() -> None:
+    from src.intents import procedure_names
+
+    names = procedure_names("国保のことで聞きに来ました", PROCS)
+    assert "国保" in names and any("国民健康保険" in n for n in names)
