@@ -57,3 +57,10 @@ def test_allowed_terms_go_to_voicevox_dictionary_only() -> None:
     words = {w.surface: w for w in load_allowed_terms(SERVER_ROOT / "context" / "allowed_terms.yaml")}
     assert words["Wi-Fi"].reading == "ワイファイ" and not words["Wi-Fi"].asr
     assert {"Web", "km", "kg", "cm", "℃"} <= set(words)
+
+
+def test_spoken_replacement_for_symbols() -> None:
+    # 「℃」は VOICEVOX の辞書より前に「ドシー」と読まれるので、合成の直前に「度」に置き換える
+    from src.site_context import load_spoken_replacements
+
+    assert ("℃", "度") in load_spoken_replacements(SERVER_ROOT / "context" / "allowed_terms.yaml")

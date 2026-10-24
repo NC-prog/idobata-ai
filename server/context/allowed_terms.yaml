@@ -7,11 +7,12 @@
 #   読みを VOICEVOX のユーザー辞書に登録する（起動時に拠点の語と一緒に同期する）
 # - 英字が 4 語以上、またはピリオドで終わる英字の並び（英文）は、ここの語や略語でも言い直し→捨てる
 #
-# surface: 表記（そのまま照らす）、reading: カタカナの読み、accent: アクセント核の位置（0 は平板）
+# surface: 表記（そのまま照らす）、reading: カタカナの読み、accent: アクセント核の位置（0 は平板）、
+# spoken: 辞書が効かない記号は、合成の直前にこの文字に置き換える（VOICEVOX は「℃」を辞書より前に「ドシー」と読む）
 terms:
   - {surface: Wi-Fi, reading: ワイファイ, accent: 0}
   - {surface: Web, reading: ウェブ, accent: 1}
   - {surface: km, reading: キロメートル, accent: 3}
   - {surface: kg, reading: キログラム, accent: 3}
   - {surface: cm, reading: センチメートル, accent: 4}
-  - {surface: ℃, reading: ド, accent: 1}
+  - {surface: ℃, reading: ド, accent: 1, spoken: 度}

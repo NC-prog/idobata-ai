@@ -192,6 +192,16 @@ def load_allowed_terms(path: Path) -> list[SiteWord]:
     return out
 
 
+def load_spoken_replacements(path: Path) -> list[tuple[str, str]]:
+    """合成の直前に置き換える表記（allowed_terms.yaml の spoken。辞書が効かない記号「℃」→「度」）。"""
+    try:
+        data: Any = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    return [(str(t["surface"]), str(t["spoken"])) for t in data.get("terms") or []
+            if isinstance(t, dict) and t.get("surface") and t.get("spoken")]
+
+
 def load_site_words(site: str, context_dir: Path, avatar_name: str = "",
                     avatar_accent: int | None = None) -> list[SiteWord]:
     """拠点の YAML から語を読む（表記の重複は先勝ち）。

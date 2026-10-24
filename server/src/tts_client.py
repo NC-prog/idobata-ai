@@ -20,7 +20,7 @@ import httpx
 import numpy as np
 
 from .config import DeviceSpec, config
-from .site_context import SiteWord
+from .site_context import SiteWord, load_spoken_replacements
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,8 @@ class TTSClient:
         self._prewarmed = False
         self._play_timeout_margin = config.audio_output.play_timeout_margin_sec
         self._write_block_sec = config.audio_output.write_block_sec
+        # 合成の直前に置き換える表記（辞書が効かない記号「℃」→「度」。allowed_terms.yaml の spoken。WP13）
+        self.spoken_replacements: list[tuple[str, str]] = load_spoken_replacements(config.dialogue.allowed_terms_path)
 
     async def prewarm(self) -> bool:
         """VOICEVOX エンジンをプリウォームする（冪等）。
@@ -147,6 +149,8 @@ class TTSClient:
         """テキストを音声に変換し、合成に使った audio_query も返す（口パクの時系列用）。"""
         speaker = speaker_id or self.speaker_id
         cfg = config.voicevox
+        for old, new in self.spoken_replacements:
+            text = text.replace(old, new)  # 辞書が効かない記号（「℃」→「度」。allowed_terms.yaml の spoken）
 
         query_response = await self._request(
             "POST", "/audio_query", params={"text": text, "speaker": speaker},
