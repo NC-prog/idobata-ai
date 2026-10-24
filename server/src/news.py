@@ -129,6 +129,8 @@ def load_records(directory: Path) -> list[NewsRecord]:
     if not directory.is_dir():
         return out
     for path in sorted(directory.glob("*.json")):
+        if path.name.startswith("."):
+            continue  # 収集の結果（.fetch_status.json）は記事ではない（pathlib の glob は「.」で始まる名前にも当たる）
         try:
             out.append(record_from_dict(json.loads(path.read_text(encoding="utf-8"))))
         except (OSError, ValueError, TypeError):
@@ -319,7 +321,7 @@ class NewsBook:
     def _dir_stamp(self) -> tuple[int, float]:
         if not self.directory.is_dir():
             return (0, 0.0)
-        files = list(self.directory.glob("*.json"))
+        files = [f for f in self.directory.glob("*.json") if not f.name.startswith(".")]
         return (len(files), max((f.stat().st_mtime for f in files), default=0.0))
 
     def reload(self, force: bool = False) -> bool:

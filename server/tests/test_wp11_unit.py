@@ -537,7 +537,7 @@ def test_tidy_summary_zero_minutes() -> None:
     assert tidy_summary("１０時００分") == "１０時"
 
 
-def test_fetch_status_label(tmp_path: Path) -> None:
+def test_fetch_status_label(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     from src.news import FETCH_STATUS_FILE
 
     book = _book(tmp_path, _rec("a"))
@@ -550,6 +550,9 @@ def test_fetch_status_label(tmp_path: Path) -> None:
     assert st is not None and not st["ok"]
     assert st["label"].startswith("最終取得: 10月24日 06:05（失敗: 市町のサイトから一覧を取れませんでした")
     assert [r.id for r in book.records()] == ["a"]  # 状態のファイルは記事として読まない
+    fresh = NewsBook(tmp_path, NewsConfig(), RULES, now=lambda: NOW)
+    assert [r.id for r in fresh.records()] == ["a"]
+    assert not [r for r in caplog.records if FETCH_STATUS_FILE in r.getMessage()]  # 記事として読もうとして警告しない
 
 
 def test_asr_fix_for_jidou_teate() -> None:
