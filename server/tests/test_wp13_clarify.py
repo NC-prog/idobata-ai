@@ -159,16 +159,16 @@ async def test_clarified_intake_is_one_shorter(tmp_path: Path) -> None:
 
 
 async def test_repeated_question_is_answered_not_reasked(tmp_path: Path) -> None:
-    # 聞き分けの問いに答えず同じ問いを言い直した（意地悪 20 番）: 聞き直しを重ねず、ふつうに答える
+    # 聞き分けの問いに答えず同じ問いを言い直した（意地悪 20 番の形。場所の問いは聞き分けないので、中身の問いで見る）: 聞き直しを重ねず、ふつうに答える
     llm = StubLLM([["国保の手続きは保健医療課（2階）で承ります。"]] * 4)
     c = _conv(tmp_path, llm)
-    first = await _say(c, "国保の手続きはどこですか")
+    first = await _say(c, "国保の手続きって何が必要ですか")
     assert first[0].startswith("国保のことですね。")
-    second = await _say(c, "国保の手続きはどこですか")
+    second = await _say(c, "国保の手続きって何が必要ですか")
     assert "保健医療課" in "".join(second)
     assert c.turn_info["clarify"] == "聞き分けた（候補 3 件 → 未決（別の話））"
     for _ in range(3):
-        said = await _say(c, "国保の手続きはどこですか")
+        said = await _say(c, "国保の手続きって何が必要ですか")
         assert not any(x.startswith(("国保のことですね", "すみません、国保に入る")) for x in said)  # 聞き分けを重ねない
 
 
@@ -180,3 +180,18 @@ async def test_question_while_proposal_pending_is_a_new_topic(tmp_path: Path) ->
     assert c.pending_action == "refer"
     said = await _say(c, "住民票はどこですか")
     assert "市民課" in "".join(said) and c.pending_action != "refer"
+
+
+async def test_place_question_with_one_department_is_answered(tmp_path: Path) -> None:
+    # 場所を聞く問いで、候補（国保の加入・脱退）の課が同じ保健医療課なら聞き分けずに答える。中身を聞いたら聞き分ける
+    llm = StubLLM([["保健医療課（2階）で承ります。"]])
+    c = _conv(tmp_path, llm)
+    said = await _say(c, "国保の手続きはどこですか")
+    assert "保健医療課" in "".join(said) and not said[0].startswith("国保のことですね。")
+    c2 = _conv(tmp_path / "b", StubLLM([]))
+    said = await _say(c2, "国保の手続きって何が必要ですか")
+    assert said[0].startswith("国保のことですね。")
+    # 場所の問いでも、課が分かれる候補（児童手当＝子育て支援課、特別児童扶養手当＝社会福祉課）なら聞き分ける
+    c3 = _conv(tmp_path / "c", StubLLM([]))
+    said = await _say(c3, "手当の窓口はどこですか")
+    assert said[0].startswith("手当のことですね。")

@@ -182,6 +182,11 @@ class Clarifier:
         key = max(ambiguous, key=len)
         return Clarify(key, shown, keys, more=len(tied) > cfg.clarify_show)
 
+    def exact(self, c: Clarify) -> list[ProcedureRecord]:
+        """候補のうち、鍵をそのまま名前・別名に持つもの（「国保」なら国保の加入・脱退。国保税は「国保」を含むだけ）。"""
+        return [r for r in c.candidates
+                if any(k in r.surfaces or k in self._rules.extra_words.get(r.id, ()) or k in r.when for k in c.keys)]
+
     # --- 問い ---
 
     def label(self, r: ProcedureRecord) -> str:

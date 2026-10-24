@@ -345,7 +345,19 @@ async def test_unruled_procedure_drops_llm_department() -> None:
     fac = load_facility("etajima", SERVER_ROOT / "context")
     d = Dialogue(_LLM("犬を飼うと届けが要りますよ。市民課（1階）で手続きできます。"), DialogueConfig(), knowledge=_KB([]),
                  procedures=seeded_procedures(), facility=fac)
-    said = await _say(d, "犬飼うたら何か届けいるん？")
+    said = await _say(d, "ハムスター飼うたら何か届けいるん？")  # 別名表にも手続きナレッジにも無い言い方
     assert d.last_intent == "procedure"
     assert not any("市民課" in s for s in said)
     assert said[-1] == "手続きの詳しいことは、担当の課でご案内します。"
+
+
+async def test_rule_department_sentence_without_approved() -> None:
+    # 承認済みが無くても、手続きの問いで規則で課が決まるのに課を言わなければ、担当の課の一文（手続き 100 問の 88 番）
+    from src.dialogue import Dialogue
+    from src.site_context import load_facility
+
+    fac = load_facility("etajima", SERVER_ROOT / "context")
+    d = Dialogue(_LLM("お子さんの学校が変わるときは、手続きが必要です。"), DialogueConfig(), knowledge=_KB([]),
+                 procedures=seeded_procedures(), facility=fac)
+    said = await _say(d, "子どもの学校かわるんじゃけど何すりゃええ？")
+    assert said[-1].startswith("担当は学校教育課")

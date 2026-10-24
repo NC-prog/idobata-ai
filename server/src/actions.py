@@ -593,7 +593,22 @@ class Conversation:
         c = self._clarifier.find(text)
         if c is None or frozenset(c.ids) in s.clarified:
             return None
+        cfg = self.dialogue._proc_cfg
+        if re.search(cfg.clarify_place_pattern, text) and not re.search(cfg.clarify_content_pattern, text):
+            # 場所だけを聞いた: 候補の課が全部同じなら、聞き分けずにふつうに答える（課と階。規則の課の一文で補う）
+            depts = {self._department_of(r) for r in self._clarifier.exact(c)}
+            if len(depts) == 1 and None not in depts:
+                logger.info("場所を聞く問いで、候補の課が同じ（%s）なので聞き分けません", next(iter(depts)))
+                return None
         return c
+
+    def _department_of(self, r: ProcedureRecord) -> str | None:
+        """手続きの担当課（承認済みならその課、ほかは名前と別名から規則で。一意でなければ None）。"""
+        book = self._procedures.book
+        if book is not None and book.usable(r) and r.department:
+            return r.department
+        cands = self._procedures.departments_for(" ".join((r.name, *r.aliases)), self._facility)
+        return cands[0] if len(cands) == 1 else None
 
     async def _ask_clarify(self, c: Clarify, text: str, language: str, index: int) -> AsyncIterator[str]:
         assert self._session is not None

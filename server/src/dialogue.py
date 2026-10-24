@@ -801,10 +801,13 @@ class Dialogue:
                     logger.info("聞き直されて課の名前の文を捨てたので、その文を言い直します")
                     sentences.append(line)
                     yield line
-        if (sentences and proc_refs and expected_dept is not None and self._facility is not None
+        if (sentences and (proc_refs or (self.last_intent == "procedure" and extra_refs is None
+                                         and not self.last_procedures))  # 下書きに当たった問いは下書きの一文に任せる
+                and expected_dept is not None and self._facility is not None
                 and not any(d.name in x for x in sentences for d in self._facility.departments)):
             # 承認済みの手続きで答えたのに課の名前を言わなかった（パックを渡さなくなって、場所の一覧だけ言う癖が出た。
-            # WP13 C の 30 問の住民票・パスポート・印鑑登録）: 規則で決まった担当の課を一文足す
+            # WP13 C の 30 問の住民票・パスポート・印鑑登録）: 規則で決まった担当の課を一文足す。
+            # 承認済みが無くても、手続きの問いで規則で課が決まれば同じ（手続き 100 問の「学校かわる」で学校教育課を言わなかった）
             line = self._proc_cfg.approved_department_sentence.format(
                 department=self._department_line(expected_dept))
             logger.info("承認済みの手続きの応答に課の名前が無いので、担当の課の一文を足します")
