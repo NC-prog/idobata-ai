@@ -37,7 +37,7 @@ from .config import ActionsConfig, NewsConfig, ReferralConfig, TidbitConfig
 from .dialogue import ChatBackend, Dialogue
 from .knowledge import JST
 from .lookup import Lookup
-from .news import NewsBook, spoken_date
+from .news import NewsBook, spoken_date, tidy_summary
 from .persona import organization_word
 from .procedures import AsrFixes, IntakeSet, Procedures
 from .referrals import (
@@ -921,7 +921,7 @@ class Conversation:
         self._news_closing = closing
         self._news_history = self._t("news", "history", intro=intro, title=rec.title, closing=closing)
         yield intro
-        for sentence in re.split(r"(?<=[。！？!?])", rec.summary):
+        for sentence in re.split(r"(?<=[。！？!?])", tidy_summary(rec.summary)):
             if sentence.strip():
                 yield sentence.strip()
 

@@ -9,6 +9,10 @@
 - dropped: 安全装置で読み上げなかった文（理由つき）
 - declined: 提案が辞退された往復（提案した往復と、辞退の返事）
 - rephrased: 来訪者が言い直した往復（直前の来訪者の発話と文字 2-gram の重なりが高い）
+- unheard: 聞き取れなかった・短すぎて聞き取らなかった発話区間（WP12 の asr_status。文字は無い）
+
+来訪者の発話の行には utterance_id（WP12 の発話の id）を付ける。**音声は入れない**（素材は外に出す前提）。
+``--with-audio`` を付けたときだけ、素材に出てきた発話の音声を ``$DATA/review/<date>_audio/<id>.wav`` に並べて出す（既定オフ）。
 
 氏名・電話番号・地区（拠点 YAML の地名と番地）は「＊＊」に伏せる。文字記録の時点で、紹介状の聞き取りで
 伺った答えは「（お名前を伺いました）」に置き換わっているが、ふだんの会話の中の名乗りや番号はここで伏せる。
@@ -118,16 +122,20 @@ def extract(rows: list[dict[str, Any]], places: list[str]) -> list[dict[str, Any
         for row in items:
             speaker = row.get("speaker")
             if speaker == "user":
+                if row.get("asr_status") in ("empty", "rejected_short"):
+                    out.append({**base, "kind": "unheard", "ts": row.get("ts"), "utterance_id": row.get("id"),
+                                "asr_status": row.get("asr_status")})
+                    continue
                 if row.get("ignored") or _PLACEHOLDER_RE.match(str(row.get("text") or "")):
                     last_user, last_assistant = None, None
                     continue
                 text = str(row.get("text") or "")
                 if row.get("asr_raw") and row.get("asr_raw") != text:
-                    out.append({**base, "kind": "asr_fixed", "ts": row.get("ts"),
+                    out.append({**base, "kind": "asr_fixed", "ts": row.get("ts"), "utterance_id": row.get("id"),
                                 "asr_raw": r(row["asr_raw"]), "text": r(text)})
                 if (last_user is not None and len(re.sub(r"\s", "", text)) >= REPHRASE_MIN_CHARS
                         and overlap(str(last_user.get("text") or ""), text) >= REPHRASE_MIN_OVERLAP):
-                    out.append({**base, "kind": "rephrased", "ts": row.get("ts"),
+                    out.append({**base, "kind": "rephrased", "ts": row.get("ts"), "utterance_id": row.get("id"),
                                 "previous": turn(last_user, last_assistant), "rephrased": r(text),
                                 "overlap": round(overlap(str(last_user.get("text") or ""), text), 2)})
                 last_user, last_assistant = row, None
@@ -146,12 +154,29 @@ def extract(rows: list[dict[str, Any]], places: list[str]) -> list[dict[str, Any
     return out
 
 
+def copy_audio(rows: list[dict[str, Any]], items: list[dict[str, Any]], root: Path, out: Path) -> int:
+    """素材に出てきた発話の音声を out に写す（--with-audio のときだけ）。写した件数。"""
+    import shutil
+
+    wanted = {str(x["utterance_id"]) for x in items if x.get("utterance_id")}
+    copied = 0
+    for row in rows:
+        uid, rel = str(row.get("id") or ""), str(row.get("audio") or "")
+        if uid in wanted and rel and (root / rel).is_file():
+            out.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / rel, out / f"{uid}.wav")
+            copied += 1
+    return copied
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--site", default=os.environ.get("IDOBATA_SITE", "etajima"))
     parser.add_argument("--date", type=date.fromisoformat, default=datetime.now(JST).date())
     parser.add_argument("--data-dir", type=Path,
                         default=Path(os.environ.get("IDOBATA_DATA_DIR", str(Path.home() / "idobata-data"))))
+    parser.add_argument("--with-audio", action="store_true",
+                        help="素材に出てきた発話の音声（WP12）も review/<date>_audio/ に並べて出す（既定オフ）")
     args = parser.parse_args()
 
     src = args.data_dir / "transcripts" / args.site / f"{args.date.isoformat()}.jsonl"
@@ -163,6 +188,10 @@ def main() -> int:
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text("".join(json.dumps({"date": args.date.isoformat(), "site": args.site, **x}, ensure_ascii=False)
                            + "\n" for x in items), encoding="utf-8")
+    if args.with_audio:
+        copied = copy_audio(read_rows(src), items, args.data_dir / "transcripts" / args.site,
+                            args.data_dir / "review" / f"{args.date.isoformat()}_audio")
+        print(f"音声 {copied} 件を出しました（review/{args.date.isoformat()}_audio/）")
     counts: dict[str, int] = {}
     for x in items:
         counts[x["kind"]] = counts.get(x["kind"], 0) + 1

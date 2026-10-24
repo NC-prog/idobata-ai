@@ -22,7 +22,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -64,7 +64,7 @@ from .speech_output import (
 )
 from .themes import Theme, ThemeSelector, background_credit, load_themes
 from .timeofday import all_greetings, greeting_for
-from .transcripts import TranscriptStore
+from .transcripts import AudioStore, TranscriptStore, new_utterance_id
 from .tts_client import TTSClient
 from .vad import SpeechEventType, VADBackend, create_vad
 
@@ -181,6 +181,8 @@ class VoiceLoop:
         self._asr_fixes = AsrFixes(config.asr.site_context_dir, config.data_dir)
         # 会話の文字記録（WP06。音声・映像は残さない。管理者だけが /admin/transcripts/ で読む）
         self._transcripts = TranscriptStore(config.data_dir, config.site, config.transcript.retention_days)
+        # 来訪者の発話区間の音声（WP12。既定 7 日、IDOBATA_AUDIO_RETENTION_DAYS=0 で保存しない。管理者だけが聞く）
+        self._audio = AudioStore(self._transcripts, config.audio)
         self._last_lookup_query: str | None = None
         self._lookup = Lookup(config.lookup, config.site, config.data_dir, self._make_lookup_query)
         # セッション限りの話者の区別（WP02 B。埋め込みはメモリだけ。会話が区切れたら捨てる）
@@ -244,7 +246,7 @@ class VoiceLoop:
                                  tuple(d.name for d in (facility.departments if facility else ())),
                                  self._asr_fixes, self._themes, self._procedure_panel(llm, facility),
                                  self._news_panel(llm, facility)),
-                admin=AdminPanel(self._transcripts, config.admin),
+                admin=AdminPanel(self._transcripts, config.admin, self._audio),
                 debug_frame=(lambda: self._camera.debug_jpeg if self._camera else None) if camera_debug else None,
                 debug_state=self._camera_state,
                 edge_allow=config.edge.allow,
@@ -311,13 +313,8 @@ class VoiceLoop:
         if self._camera is not None:
             await self._prepare_fixed_lines()
             self._spawn(self._watch_silence(), "silence-watch")
-        removed = self._referrals.cleanup() + self._visits.cleanup() + self._tidbits.cleanup()
-        if removed:
-            logger.info("保存期間を過ぎた紹介状・来訪記録・小ネタを %d 件消しました", removed)
-        removed_lines = self._transcripts.cleanup()
-        if removed_lines:
-            logger.info("保存期間（%d 日）を過ぎた会話の文字記録を %d 行消しました",
-                        self._transcripts.retention_days, removed_lines)
+        await asyncio.to_thread(self.cleanup_stores)
+        self._spawn(self._watch_daily_cleanup(), "daily-cleanup")
         await asyncio.to_thread(self._knowledge.reload_if_changed)
         self._dialogue.attach_knowledge(self._knowledge)
         if self._mode == "voice" and config.speaker.enabled:
@@ -493,6 +490,8 @@ class VoiceLoop:
                     try:
                         if segment_frames and self._long_enough(segment_frames):
                             await self._on_segment(segment_frames, t_speech_start)
+                        elif segment_frames:
+                            self._on_short_segment(segment_frames)
                     finally:
                         self._hearing = False
                         self._last_activity = time.monotonic()
@@ -501,6 +500,23 @@ class VoiceLoop:
                 segment_frames.append(frame)
             else:
                 preroll.append(frame)
+
+    def _on_short_segment(self, frames: list[np.ndarray]) -> None:
+        """短すぎて ASR に渡さなかった区間（輪があるときだけ、音声と記録を残す。WP12）。"""
+        if not self._audio.enabled or not (self._party_at_start or self._camera_listening()):
+            return
+        uid = new_utterance_id()
+        audio = self._keep_audio(uid, frames)
+        if audio is not None:
+            self._record_user("", "", "", "短すぎて聞き取らなかった", None, uid, "rejected_short", audio)
+
+    def _audio_discard(self, relpath: str) -> None:
+        """残し始めた音声を取り消す（輪の外の話者と分かったとき）。書き終わるのを待ってから消す。"""
+        async def later() -> None:
+            await asyncio.sleep(0.5)
+            (self._transcripts.root / relpath).unlink(missing_ok=True)
+
+        self._spawn(later(), "audio-discard")
 
     async def _transcribe(self, frames: list[np.ndarray], t_speech_start: float,
                           force: str | None) -> tuple[str, str]:
@@ -531,6 +547,7 @@ class VoiceLoop:
         """1 セグメントを ASR に掛け、確定テキストが出たら応答タスクを起こす。"""
         assert self._asr is not None
         timing = TurnTiming(t_speech_end=time.monotonic())
+        uid = new_utterance_id()  # 文字記録の行と音声のファイル名（WP12）
         voiced = voiced_ms(frames, config.vad.sample_rate, config.vad.voiced_peak_ratio, config.vad.voiced_min_rms)
         wave = np.concatenate(frames) if frames else np.zeros(0, dtype=np.float32)
         if not (self._party_at_start or self._camera_listening()):
@@ -551,6 +568,7 @@ class VoiceLoop:
                  if config.asr.force_language_on_reply and short_reply else None)
         frames = pad_segment(frames, config.vad.reply_pad_to_sec if short_reply else config.vad.pad_to_sec,
                              config.vad.sample_rate)
+        audio = self._keep_audio(uid, frames)  # ASR に渡すのと同じ波形（聞き取れなくても残す）
         final_text, language = await self._transcribe(frames, t_speech_start, force)
         session_lang = self._conversation.session_language
         if (force is None and session_lang and (not final_text or language != session_lang)
@@ -563,6 +581,8 @@ class VoiceLoop:
         timing.t_asr_done = time.monotonic()
         emb = await emb_task if emb_task is not None else None
         if not final_text:
+            # 聞き取れなかった: 音声と一緒に記録だけ残す（何が言われていたかを管理者が確かめられるように）
+            self._record_user("", "", language, "聞き取れなかった", None, uid, "empty", audio)
             await self._send_state("idle")
             return
         speaker: str | None = None
@@ -570,10 +590,13 @@ class VoiceLoop:
             turn = self._speakers.assign(emb, voiced / 1000, PartyState.PARTY)
             if not turn.accepted:
                 logger.info("輪の外で先に聞いた話者 %s の発話なので、応答しません", turn.label)
-                self._record_user(final_text, final_text, language, "輪の外の話者", turn.label)
+                if audio is not None:  # 話し相手でない人の声は残さない
+                    self._audio_discard(audio)
+                self._record_user(final_text, final_text, language, "輪の外の話者", turn.label, uid, "no_party")
                 await self._send_state("idle")
                 return
             speaker = turn.label
+        status = "ok" if language == (self._conversation.session_language or "ja") else "other_language"
 
         self._last_utterance_at = time.monotonic()
         self._asr.push_rolling_context(final_text)
@@ -581,10 +604,10 @@ class VoiceLoop:
         if self._conversation.ignores(final_text):
             # 紹介状の保存直後の断片（読み上げに重なった番号の残りなど）: 相槌も字幕も出さない
             logger.info("紹介状の保存直後の短い断片を無視しました")
-            self._record_user(asr_raw, final_text, language, "保存直後の断片", speaker)
+            self._record_user(asr_raw, final_text, language, "保存直後の断片", speaker, uid, status, audio)
             await self._send_state("idle")
             return
-        self._record_user(asr_raw, final_text, language, None, speaker)
+        self._record_user(asr_raw, final_text, language, None, speaker, uid, status, audio)
         shown = self._shown_user_text(final_text)
         print(f"[聞き取り:{language}] {shown}")
         await self._send_caption(shown, role="user")
@@ -965,9 +988,60 @@ class VoiceLoop:
             logger.warning("話者埋め込みに失敗しました（この区間は話者を区別しません）", exc_info=True)
             return None
 
+    def _keep_audio(self, uid: str, frames: list[np.ndarray]) -> str | None:
+        """来訪者の発話区間の音声を残す（別スレッドで書く。ターンを止めない）。残すなら文字記録に書く相対パス。
+
+        紹介状の聞き取りの区間は include_intake のときだけ（文字記録は伏せたまま。音声は管理者だけが聞く）。
+        """
+        a = self._audio
+        if not a.enabled or not frames or (self._conversation.private_label and not config.audio.include_intake):
+            return None
+        day = datetime.now(JST).date().isoformat()
+        wave = np.concatenate(frames)
+        t0 = time.perf_counter()
+        async def write() -> None:
+            await asyncio.to_thread(a.save, day, uid, wave)
+
+        self._spawn(write(), "audio-save")
+        logger.debug("発話の音声の保存を頼みました（%.2f ms）", (time.perf_counter() - t0) * 1000)
+        return a.relpath(day, uid)
+
+    def cleanup_stores(self) -> None:
+        """保存期間を過ぎた紹介状・来訪記録・小ネタ・文字記録・発話の音声を消す（起動時と毎日 cleanup_hour 時）。"""
+        removed = self._referrals.cleanup() + self._visits.cleanup() + self._tidbits.cleanup()
+        if removed:
+            logger.info("保存期間を過ぎた紹介状・来訪記録・小ネタを %d 件消しました", removed)
+        removed_audio = self._audio.cleanup()  # 文字記録より先（保全の判定に行の id を使う）
+        if removed_audio:
+            logger.info("保存期間（%d 日）を過ぎた発話の音声を %d 件消しました", config.audio.retention_days,
+                        removed_audio)
+        removed_lines = self._transcripts.cleanup()
+        if removed_lines:
+            logger.info("保存期間（%d 日）を過ぎた会話の文字記録を %d 行消しました",
+                        self._transcripts.retention_days, removed_lines)
+
+    async def _watch_daily_cleanup(self) -> None:
+        """1 日 1 回（cleanup_hour 時）の掃除。窓口機は何日も起動したままなので、起動時だけでは消えない。"""
+        while True:
+            now = datetime.now(JST)
+            nxt = now.replace(hour=config.transcript.cleanup_hour, minute=0, second=0, microsecond=0)
+            if nxt <= now:
+                nxt += timedelta(days=1)
+            await asyncio.sleep((nxt - now).total_seconds())
+            logger.info("毎日の掃除をします")
+            try:
+                await asyncio.to_thread(self.cleanup_stores)
+            except Exception:
+                logger.exception("毎日の掃除に失敗しました（次の日にまた試します）")
+
     def _record_user(self, asr_raw: str, text: str, language: str, ignored: str | None,
-                     speaker: str | None = None) -> None:
-        """来訪者の 1 発話を文字記録に書く。氏名・地区・電話番号の答えは書かない。"""
+                     speaker: str | None = None, uid: str | None = None, asr_status: str | None = None,
+                     audio: str | None = None) -> None:
+        """来訪者の 1 発話を文字記録に書く。氏名・地区・電話番号の答えは書かない。
+
+        uid は発話の id（音声のファイル名と同じ）、asr_status は ok / empty / other_language / rejected_short / no_party、
+        audio は音声の相対パス（WP12。音声を残したときだけ）。
+        """
         label = self._conversation.private_label
         if label:
             asr_raw = text = f"（{label}を伺いました）"
@@ -975,9 +1049,10 @@ class VoiceLoop:
             asr_raw, text = _mask_digits(asr_raw), _mask_digits(text)
         else:
             asr_raw, text = self._conversation.redact(asr_raw), self._conversation.redact(text)
+        extra = {k: v for k, v in (("asr_status", asr_status), ("audio", audio)) if v is not None}
         self._transcripts.append("user", self._conversation.session_id, self._edge_id(),
-                                 asr_raw=asr_raw, text=text, language=language, ignored=ignored,
-                                 speaker_label=speaker)
+                                 id=uid or new_utterance_id(), asr_raw=asr_raw, text=text, language=language,
+                                 ignored=ignored, speaker_label=speaker, **extra)
 
     def _record_assistant(self, lines: list[str], timing: TurnTiming | None, trigger: str | None) -> None:
         """案内役の 1 応答を文字記録に書く（読み上げた文・行為・検索語・出典・安全装置で捨てた文・計測値）。"""
@@ -1166,6 +1241,9 @@ class VoiceLoop:
 
     async def _shutdown(self) -> None:
         await self._drain_turns()
+        saving = [t for t in self._bg_tasks if t.get_name() == "audio-save"]
+        if saving:
+            await asyncio.wait(saving, timeout=5.0)  # 書きかけの発話の音声を書き終える（WP12）
         await self._conversation.end_session()
         self._speakers.reset()
         await close_browser()

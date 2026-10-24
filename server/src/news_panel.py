@@ -21,6 +21,7 @@ from .news import (
     NewsRecord,
     TextChecker,
     is_candidate,
+    read_fetch_status,
     record_to_dict,
     refresh_status,
     summary_problems,
@@ -80,6 +81,19 @@ class NewsPanel:
                 "held": sum(r.status == "held" for r in intro), "stopped": sum(r.status == "stopped" for r in intro),
                 "priority": sum(r.status == "priority" for r in intro), "skip": sum(
                     r.relevance == "skip" for r in self.book.records())}
+
+    def fetch_status(self) -> dict[str, Any] | None:
+        """夜の収集の最後の結果（職員パネルの上に「最終取得: M月D日 HH:MM（成功／失敗: 理由）」）。"""
+        st = read_fetch_status(self.book.directory)
+        if st is None:
+            return None
+        try:
+            at = datetime.fromisoformat(str(st.get("at")))
+        except ValueError:
+            return None
+        ok = bool(st.get("ok"))
+        label = f"最終取得: {at.month}月{at.day}日 {at:%H:%M}（{'成功' if ok else '失敗: ' + str(st.get('reason') or '')}）"
+        return {"ok": ok, "at": st.get("at"), "label": label, "reason": st.get("reason", "")}
 
     def detail(self, rid: str) -> dict[str, Any] | None:
         r = self.book.get(rid)

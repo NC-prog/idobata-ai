@@ -39,6 +39,7 @@ if str(SERVER_DIR) not in sys.path:
 
 from src.config import NewsConfig, config
 from src.news import (
+    FETCH_STATUS_FILE,
     NewsRecord,
     NewsRules,
     load_records,
@@ -412,9 +413,13 @@ def collect(src: Sources, crawler: Crawler, store: Path, cfg: NewsConfig | None 
     store.mkdir(parents=True, exist_ok=True)
     existing = {r.id: r for r in load_records(store)}
     seen: dict[str, FeedItem] = {}
+    feeds_failed: list[str] = []
     for feed in news.feeds:
         url = str(feed["url"])
+        failed_before = stats["failed"]
         xml = fetch_raw(crawler, url, stats)
+        if stats["failed"] > failed_before:
+            feeds_failed.append(url)
         if xml is not None:
             items = parse_feed(xml, url)
         else:
@@ -487,8 +492,25 @@ def collect(src: Sources, crawler: Crawler, store: Path, cfg: NewsConfig | None 
                 rec.image, rec.image_src = None, None
         save_record(store, rec)
     stats["removed"] = prune(store, today, cfg)
+    write_fetch_status(store, now, len(news.feeds), feeds_failed, stats)
     logger.info("お知らせの収集: %s", stats)
     return stats
+
+
+def write_fetch_status(store: Path, now: datetime, feeds: int, feeds_failed: list[str], stats: dict[str, int]) -> None:
+    """最後の収集の結果（職員パネルの「お知らせ」タブの上に出す）。一覧が 1 本でも取れなければ失敗。"""
+    ok = not feeds_failed
+    if ok:
+        reason = ""
+    elif len(feeds_failed) == feeds:
+        reason = f"市町のサイトから一覧を取れませんでした（{feeds} 本とも。前に取った内容で続けています）"
+    else:
+        reason = f"一覧 {feeds} 本のうち {len(feeds_failed)} 本を取れませんでした（前に取った内容で続けています）"
+    data = {"at": now.isoformat(timespec="seconds"), "ok": ok, "reason": reason, "feeds": feeds,
+            "feeds_failed": feeds_failed, "items": stats.get("items", 0), "pages_failed": stats.get("failed", 0)}
+    tmp = store / (FETCH_STATUS_FILE + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(store / FETCH_STATUS_FILE)
 
 
 def prune(store: Path, today: date, cfg: NewsConfig) -> int:

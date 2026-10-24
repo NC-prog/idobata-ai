@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from src.main import VoiceLoop
-from src.transcripts import TranscriptStore
+from src.transcripts import AudioStore, TranscriptStore
 
 
 class _Recorder:
@@ -34,6 +34,7 @@ def _loop() -> tuple[VoiceLoop, _Recorder]:
     app._dialogue.reset = rec.reset  # type: ignore[method-assign]
     # 文字記録は作業用のディレクトリに書く（実データの ~/idobata-data に書かない）
     app._transcripts = TranscriptStore(Path(tempfile.mkdtemp(prefix="idobata-test-")), "etajima", 7)
+    app._audio = AudioStore(app._transcripts, app._audio.cfg)  # 音声も作業用のディレクトリへ（WP12）
     return app, rec
 
 

@@ -434,6 +434,20 @@ class DialogueConfig:
         r"と思う|と思います|思うんよ|思うんです|ですよね|でしょう|じゃろ|べき|じゃない[？?]|よね[。？?！!]?$|"
         r"ほうがいい|方がいい|ほうが良い|方が良い"
     )
+    # 「お変わりありませんか」の類は、来訪者の発話が挨拶・雑談のときだけ。手続きの語か質問のあるターンでは読まない（WP11 の後始末）。
+    # 答えの後ろに付け足す一般論（「お住まいの近くで…必要なときもありますよね」）も同じターンでは読まない
+    generic_addon_pattern: str = r"^お住まいの近く|(とき|こと|場合)もありますよね|(とき|こと|場合)もあるかと思います"
+    # 名前の似た別の手続き（児童手当と児童扶養手当など）。来訪者が言った方だけを案内する: 言っていない方の資料を外し、
+    # その名前を言う文を読み上げない（WP11 の後始末の確認で、「児童手当について」に児童扶養手当のページで答えた）
+    confusable_terms: tuple[tuple[str, ...], ...] = (("特別児童扶養手当", "児童扶養手当", "児童手当"),)
+    # 言い淀みだけの発話（LLM を通さず、決まった一言で待つ）
+    filler_only_pattern: str = r"^(えっと|えーと|ええと|えーっと|あの|あのー|あのう|えー|えーっと|うーん|んー|うーんと|そのー)[ー〜～…・、。！!？?\s]*$"
+    filler_reply: str = "はい、ゆっくりで大丈夫ですよ。"
+    # 求人のページ（資料の題名に「求人」）を使うターンは、給与・手当・時給などの金額を読まず、案内の一文にする（WP11 の後始末）
+    job_ref_pattern: str = r"求人"
+    job_amount_pattern: str = r"[0-9０-９][0-9０-９,，]*円|時給|日給|月給|給与|給料|賃金|手当|報酬|ボーナス|賞与"
+    job_info_sentence: str = "求人の案内は、{org}のホームページと{department}でご確認ください。"
+    job_department_keywords: tuple[str, ...] = ("求人", "職業相談", "就職")
     # 応答の文を全部捨てたときの穴埋め（直前の来訪者の発話の種類で選ぶ）。質問 → もう一度、否定 → わかりました、雑談・報告 → そうですか
     empty_question_filler: str = "ちょっと分からなかったので、もう一度いいですか。"
     empty_negative_filler: str = "わかりました。"
@@ -561,7 +575,14 @@ class DialogueConfig:
         r"録音|録画|(撮って|撮影して|写して)(る|い|ます)|カメラ(で|は|って|に)?[^。]{0,6}(撮|映|見|写)|"
         r"(会話|話|声|内容)(は|を|って|も)?[^。]{0,4}(記録|保存|残)(して|され|る|す)|記録(して|され)(る|い|ます)"
     )
+    # 発話区間の音声も残す設定（WP12、既定）のとき。掲示文言の案（docs/市への確認事項.md の 5）どおり
     privacy_lines: tuple[str, ...] = (
+        "お話は、文字と声の記録を{days}日間、庁内に残し、品質の確認のために決まった管理者だけが確かめて、その後消します。",
+        "声や映像が建物の外に出ることはありません。",
+        "カメラは、前に人がいるかを見るためだけに使っていて、映像は残しません。",
+    )
+    # 音声を残さない設定（IDOBATA_AUDIO_RETENTION_DAYS=0）のとき（WP06 の文言）
+    privacy_lines_no_audio: tuple[str, ...] = (
         "声は録音していません。",
         "お話の内容は、間違いを直すために文字だけを{days}日間、庁内に残し、決まった職員だけが読みます。",
         "カメラは、前に人がいるかを見るためだけに使っていて、映像は残しません。",
@@ -944,10 +965,31 @@ class AdminConfig:
 
 @dataclass(frozen=True)
 class TranscriptConfig:
-    """会話の文字記録（$DATA/transcripts/<site>/<date>.jsonl、WP06）。音声・映像は残さない。"""
+    """会話の文字記録（$DATA/transcripts/<site>/<date>.jsonl、WP06）。来訪者の発話区間の音声は WP12（AudioRetentionConfig）。"""
 
-    # 保持日数（起動時に古い日を消す。保全したセッションは残す）。環境変数 IDOBATA_TRANSCRIPT_RETENTION_DAYS
+    # 保持日数（起動時と毎日 cleanup_hour 時に古い日を消す。保全したセッションは残す）。環境変数 IDOBATA_TRANSCRIPT_RETENTION_DAYS
     retention_days: int = 7
+    # 1 日 1 回の掃除の時刻（JST の時。窓口機は何日も起動したままなので、起動時だけでは消えない。WP12）
+    cleanup_hour: int = 4
+
+
+@dataclass(frozen=True)
+class AudioRetentionConfig:
+    """来訪者の発話区間の音声（WP12）。$DATA/transcripts/<site>/<date>/audio/<utterance_id>.wav。
+
+    VAD で切って ASR に渡した区間だけ（案内役の応答は VOICEVOX で再合成できるので残さない）。輪が無くて ASR に渡さなかった
+    音声・輪の外の話者の音声は残さない。読むのは管理者ロール（/admin/transcripts/）だけで、誤り探しの素材には入れない。
+    """
+
+    # 保持日数。環境変数 IDOBATA_AUDIO_RETENTION_DAYS（0 で保存しない）
+    retention_days: int = 7
+    sample_rate: int = 16000
+    format: str = "wav"
+    # 紹介状の聞き取り（氏名・地区・電話番号）の区間も残すか（文字記録は従来どおり伏せる）。テスト運用の方針（2026-10-24）
+    include_intake: bool = True
+    # ディスクの空きがこれを切ったら保存を止める（WARNING を 1 回）
+    min_free_bytes: int = 1024 ** 3
+    subdir: str = "audio"
 
 
 @dataclass(frozen=True)
@@ -1167,6 +1209,7 @@ class AppConfig:
     staff: StaffConfig = field(default_factory=StaffConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
     transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
+    audio: AudioRetentionConfig = field(default_factory=AudioRetentionConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     party: PartyConfig = field(default_factory=PartyConfig)
     speaker: SpeakerConfig = field(default_factory=SpeakerConfig)
@@ -1255,6 +1298,8 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         staff=staff,
         admin=admin,
         transcript=transcript,
+        audio=AudioRetentionConfig(retention_days=int(_parse_float(
+            env, "IDOBATA_AUDIO_RETENTION_DAYS", AudioRetentionConfig.retention_days))),
         camera=camera,
         persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
         procedure=ProcedureConfig(recheck_keep_using=env.get("IDOBATA_PROCEDURE_RECHECK_USE", "1").strip().lower()

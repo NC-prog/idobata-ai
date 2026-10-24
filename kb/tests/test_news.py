@@ -294,3 +294,19 @@ def test_collect_while_site_down_then_recovered(tmp_path: Path) -> None:
     assert stats["unchanged"] == 1  # 本文は同じ（分類・要約はやり直さない）
     assert rec.published == "2026-10-20" and rec.image == f"{rec.id}.jpg" and rec.image_checked
     assert (store / rec.image).is_file()
+
+
+def test_fetch_status_and_tidy_existing_summary(tmp_path: Path) -> None:
+    from src.news import read_fetch_status
+
+    news_collect.write_fetch_status(tmp_path, NOW, 3, ["https://x/1"], {"items": 10, "failed": 1})
+    st = read_fetch_status(tmp_path)
+    assert st is not None and not st["ok"] and "3 本のうち 1 本" in st["reason"]
+    news_collect.write_fetch_status(tmp_path, NOW, 3, [], {})
+    assert read_fetch_status(tmp_path)["ok"]  # type: ignore[index]
+    # 前に保存した要約にも「10時00分」→「10時」を当てる（職員が直したものも。意味は変わらない）
+    r = _record(title="通行止めのお知らせ", body=BODY, relevance="introduce", summary="11月10日10時00分から通行止めです。",
+                edited_by_staff=True, summarized_hash="h1", summary_checks={"result": "ok", "reasons": []})
+    save_record(tmp_path, r)
+    stats = news_summarize.summarize(tmp_path, "akiota", _LLM([]), None, CFG, now=NOW)  # type: ignore[arg-type]
+    assert stats["tidied"] == 1 and load_records(tmp_path)[0].summary == "11月10日10時から通行止めです。"

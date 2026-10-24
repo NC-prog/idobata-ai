@@ -13,7 +13,7 @@ import numpy as np
 from src.camera import CameraClient, PartySnapshot, PartyState, PartyTracker, PersonObs, is_facing
 from src.config import CameraConfig, PartyConfig
 from src.main import VoiceLoop
-from src.transcripts import TranscriptStore
+from src.transcripts import AudioStore, TranscriptStore
 
 CFG = PartyConfig()
 
@@ -103,6 +103,7 @@ def _loop() -> tuple[VoiceLoop, _Edge]:
     edge = _Edge()
     app._edge = edge  # type: ignore[assignment]
     app._transcripts = TranscriptStore(Path(tempfile.mkdtemp(prefix="idobata-test-")), "etajima", 7)
+    app._audio = AudioStore(app._transcripts, app._audio.cfg)  # 音声も作業用のディレクトリへ（WP12）
     return app, edge
 
 

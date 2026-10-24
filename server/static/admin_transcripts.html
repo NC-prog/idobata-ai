@@ -23,15 +23,19 @@
   .drop { color:var(--drop); font-size:12px; }
   pre { white-space:pre-wrap; margin:0; font-size:12px; color:var(--mut); }
   button { margin:2px; padding:4px 8px; font-size:13px; }
+  .play { padding:0 6px; margin-left:4px; }
+  tr.playing td { background:#fff3cd; }
+  .asr { display:inline-block; margin-left:4px; padding:0 5px; border-radius:3px; background:#b00020; color:#fff; font-size:11px; }
 </style>
 </head>
 <body>
-<h1>井戸端AI 会話の文字記録 <span class="mut">（管理者のみ。__RETENTION_DAYS__ 日で消えます。保全したセッションは残ります。音声は録音していません）</span></h1>
-<label>日付 <select id="day"></select></label>
+<h1>井戸端AI 会話の文字記録 <span class="mut">（管理者のみ。文字は __RETENTION_DAYS__ 日、来訪者の発話の音声は __AUDIO_DAYS__ 日で消えます。保全したセッションは残ります）</span></h1>
+<label>日付 <select id="day"></select></label> <span class="mut" id="audio-size"></span>
+<audio id="player" preload="none"></audio>
 <div class="wrap">
   <div class="sessions">
     <h2>セッション</h2>
-    <table><thead><tr><th>時刻</th><th>発話</th><th>保全</th></tr></thead><tbody id="sessions"></tbody></table>
+    <table><thead><tr><th>時刻</th><th>発話</th><th>音声</th><th>保全</th></tr></thead><tbody id="sessions"></tbody></table>
   </div>
   <div class="detail">
     <h2 id="title">記録</h2>
@@ -65,14 +69,22 @@ async function loadSessions() {
   $("sessions").innerHTML = rows.map((s) =>
     `<tr class="click ${s.held ? "held" : ""} ${current === s.session_id ? "sel" : ""}" data-id="${esc(s.session_id)}">
        <td>${time(s.started_at)}〜${time(s.ended_at)}<div class="mut">${esc(s.session_id)}</div></td>
-       <td>${s.user_lines}</td><td>${s.held ? "保全中" : ""}</td></tr>`).join("")
-    || `<tr><td colspan="3" class="mut">記録はありません</td></tr>`;
+       <td>${s.user_lines}</td><td>${s.has_audio ? "あり" : '<span class="mut">なし</span>'}</td><td>${s.held ? "保全中" : ""}</td></tr>`).join("")
+    || `<tr><td colspan="4" class="mut">記録はありません</td></tr>`;
+  const size = await api(`/admin/api/transcripts/audio_size?day=${day}`);
+  $("audio-size").textContent = size.retention_days
+    ? `この日の音声 ${size.files} 件・${(size.bytes / 1024 / 1024).toFixed(1)} MB` : "音声は保存しない設定です";
   document.querySelectorAll("#sessions tr.click").forEach((tr) => tr.onclick = () => loadSession(tr.dataset.id));
 }
 
+const ASR_LABEL = {empty: "聞き取れず", other_language: "他の言語", rejected_short: "短すぎ", no_party: "輪の外"};
+const audioUrl = (r) => r.audio ? `/admin/transcripts/audio/${r.audio.split("/")[0]}/${encodeURIComponent(r.id)}` : "";
+
 function body(r) {
   if (r.speaker === "user") {
-    let h = esc(r.text);
+    let h = esc(r.text) || '<span class="mut">（文字なし）</span>';
+    if (r.audio) h += `<button class="play" title="この発話の音声" onclick='playOne(${JSON.stringify(r.id)})'>▶</button>`;
+    if (r.asr_status && r.asr_status !== "ok") h += `<span class="asr">${esc(ASR_LABEL[r.asr_status] || r.asr_status)}</span>`;
     if (r.asr_raw && r.asr_raw !== r.text) h += `<div class="mut">ASR: ${esc(r.asr_raw)}</div>`;
     if (r.ignored) h += `<div class="mut">（${esc(r.ignored)}）</div>`;
     return h;
@@ -95,13 +107,39 @@ async function loadSession(id) {
   const held = (await api(`/admin/api/transcripts?day=${day}`)).find((s) => s.session_id === id)?.held;
   $("title").textContent = `記録 ${id}`;
   $("hold").innerHTML = held
-    ? `<button onclick="hold(false)">保全を外す</button> <span class="mut">外すと、期限を過ぎていれば次の起動で消えます</span>`
-    : `<button onclick="hold(true)">保全する</button> <span class="mut">期限を過ぎても消さずに残します</span>`;
+    ? `<button onclick="hold(false)">保全を外す</button> <span class="mut">外すと、期限を過ぎていれば次の掃除（毎日 4 時）で消えます（文字と音声）</span>`
+    : `<button onclick="hold(true)">保全する</button> <span class="mut">期限を過ぎても文字と音声を消さずに残します</span>`;
+  sessionRows = rows;
+  const n = rows.filter((r) => r.audio).length;
+  if (n) $("hold").innerHTML += ` <button onclick="playAll()">このセッションの来訪者の音声を順に再生（${n} 件）</button> <button onclick="stopPlay()">止める</button>`;
   $("rows").innerHTML = rows.map((r) =>
-    `<tr><td>${time(r.ts)}</td><td class="${r.speaker}">${{user:"来訪者",assistant:"案内役",backchannel:"相槌"}[r.speaker] || r.speaker}</td>
+    `<tr data-id="${esc(r.id || "")}"><td>${time(r.ts)}</td><td class="${r.speaker}">${{user:"来訪者",assistant:"案内役",backchannel:"相槌"}[r.speaker] || r.speaker}</td>
      <td>${body(r)}</td></tr>`).join("");
   await loadSessions();
 }
+
+let sessionRows = [], queue = [];
+const player = $("player");
+function mark(id) {
+  document.querySelectorAll("#rows tr").forEach((tr) => tr.classList.toggle("playing", !!id && tr.dataset.id === id));
+}
+function play(r) {
+  mark(r.id);
+  player.src = audioUrl(r);
+  player.play();
+}
+function playOne(id) {
+  queue = [];
+  const r = sessionRows.find((x) => x.id === id);
+  if (r) play(r);
+}
+function playAll() {
+  queue = sessionRows.filter((r) => r.audio);
+  const r = queue.shift();
+  if (r) play(r);
+}
+function stopPlay() { queue = []; player.pause(); mark(null); }
+player.onended = () => { const r = queue.shift(); if (r) play(r); else mark(null); };
 
 async function hold(on) {
   if (!current) return;

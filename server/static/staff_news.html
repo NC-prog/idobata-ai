@@ -23,6 +23,8 @@
   .mut { color:var(--mut); font-size:12px; }
   .warn { color:#b00020; }
   .count-held { color:#b00020; font-weight:bold; }
+  .fetch { margin:6px 0; font-size:14px; }
+  .fetch.ng { color:#b00020; font-weight:bold; }
   label { display:block; margin-top:8px; font-size:13px; font-weight:bold; }
   textarea { width:100%; box-sizing:border-box; font-size:15px; font-family:inherit; min-height:6em; }
   select { font-size:14px; }
@@ -47,6 +49,7 @@
     <option value="">すべて</option><option>通行止め</option><option>ライフライン</option><option>防災</option><option>施設</option><option>ごみ</option><option>イベント</option><option>募集</option><option>健康</option><option>その他</option>
   </select></label>
 <label style="display:inline"><input type="checkbox" id="f-skip" onchange="loadList()"> 紹介しない記事も見る</label>
+<div id="fetch" class="fetch"></div>
 <div id="counts" class="mut"></div>
 <div class="wrap">
   <div class="list">
@@ -68,6 +71,10 @@ async function loadList() {
   if (cat) q.set("category", cat);
   if (document.getElementById("f-skip").checked) q.set("skip", "true");
   const data = await fetch("../api/news?" + q).then((r) => r.json());
+  const f = data.fetch;
+  const fe = document.getElementById("fetch");
+  fe.textContent = f ? f.label : "最終取得: まだありません（夜の更新を待っています）";
+  fe.className = "fetch" + (f && !f.ok ? " ng" : "");
   const c = data.counts;
   document.getElementById("counts").innerHTML = `紹介する記事 ${c.introduce} 件（いま紹介の候補 ${c.candidates}・優先 ${c.priority}・`
     + `<span class="${c.held ? "count-held" : ""}">保留 ${c.held}</span>・止めた ${c.stopped}）／紹介しない記事 ${c.skip} 件`;

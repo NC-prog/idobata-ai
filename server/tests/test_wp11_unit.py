@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -521,3 +522,104 @@ def test_reply_after_leading_ack(text: str, verdict: str) -> None:
 
     words, _ = load_templates(SERVER_ROOT / "context" / "actions.yaml")
     assert classify_reply(text, words) == verdict
+
+
+# ------------------------------------------------------------------
+# WP11 の後始末（WP12 のブランチで）
+# ------------------------------------------------------------------
+
+
+def test_tidy_summary_zero_minutes() -> None:
+    from src.news import tidy_summary
+
+    assert tidy_summary("11月29日10時00分から14時00分まで開きます。") == "11月29日10時から14時まで開きます。"
+    assert tidy_summary("10時30分から") == "10時30分から"
+    assert tidy_summary("１０時００分") == "１０時"
+
+
+def test_fetch_status_label(tmp_path: Path) -> None:
+    from src.news import FETCH_STATUS_FILE
+
+    book = _book(tmp_path, _rec("a"))
+    panel = NewsPanel(book, _checker, DialogueConfig(), NewsConfig(), today=lambda: TODAY)
+    assert panel.fetch_status() is None
+    (tmp_path / FETCH_STATUS_FILE).write_text(json.dumps(
+        {"at": "2026-10-24T06:05:12+09:00", "ok": False, "reason": "市町のサイトから一覧を取れませんでした（3 本とも。前に取った内容で続けています）"},
+        ensure_ascii=False), encoding="utf-8")
+    st = panel.fetch_status()
+    assert st is not None and not st["ok"]
+    assert st["label"].startswith("最終取得: 10月24日 06:05（失敗: 市町のサイトから一覧を取れませんでした")
+    assert [r.id for r in book.records()] == ["a"]  # 状態のファイルは記事として読まない
+
+
+def test_asr_fix_for_jidou_teate() -> None:
+    from src.config import config
+    from src.procedures import AsrFixes
+
+    fixes = AsrFixes(SERVER_ROOT / "context", config.data_dir)
+    assert fixes.apply("自動手当について。") == "児童手当について。"
+    assert fixes.apply("自動手当店のことで") == "児童手当のことで"
+    assert fixes.apply("特別自動扶養手当の申請") == "特別児童扶養手当の申請"
+    assert fixes.apply("自動ドアが開かない") == "自動ドアが開かない"
+
+
+async def test_casual_words_are_not_spoken() -> None:
+    from src.config import PersonaConfig
+    from src.persona import load_persona
+
+    persona = load_persona(PersonaConfig())
+    d = Dialogue(DlgLLM(["おっす！"]), DialogueConfig(), persona=persona, now=lambda: NOW)
+    assert await _collect(d, "そうなんだ") == ["そうですか。"]  # 1 文だけの応答も通す
+    d2 = Dialogue(DlgLLM(["りょ。こちらで確認しておけば安心ですよ。"]), DialogueConfig(), persona=persona, now=lambda: NOW)
+    assert await _collect(d2, "住民票を取りたい") == ["こちらで確認しておけば安心ですよ。"]  # 「しておけば」は当たらない
+
+
+async def test_job_page_amounts_are_not_read() -> None:
+    from src.knowledge import Reference
+
+    fac = load_facility("akiota", SERVER_ROOT / "context")
+    ref = Reference("町内求人情報（令和8年10月）", "https://www.akiota.jp/x.html", "介護職員の募集。時給1,050円。通勤手当あり。",
+                    0.9, 1.0, "official", "町のホームページ")
+    d = Dialogue(DlgLLM(["町内では介護職員の募集があります。時給は1,050円で、通勤手当もあります。"]), DialogueConfig(),
+                 facility=fac, now=lambda: NOW)
+    out = [s async for s in d.respond("求人ある？", extra_refs=[ref])]
+    assert out == ["町内では介護職員の募集があります。", "求人の案内は、町のホームページと産業観光課でご確認ください。"]
+    assert any(x["reason"] == "求人の金額" for x in d.last_dropped)
+
+
+async def test_checkin_and_generic_addon_only_in_smalltalk() -> None:
+    fac = load_facility("akiota", SERVER_ROOT / "context")
+    d = Dialogue(DlgLLM(["国保の手続きは健康福祉課でご案内します。最近、お変わりありませんか？",
+                         "国保の手続きは健康福祉課です。お住まいの近くで、手続きが必要なときもありますよね。",
+                         "こんにちは。最近、お変わりありませんか？"]),
+                 DialogueConfig(), facility=fac, procedures=PROCS, now=lambda: NOW)
+    assert await _collect(d, "国保のことで聞きに来ました。") == ["国保の手続きは健康福祉課でご案内します。"]
+    assert await _collect(d, "国保はどこですか") == ["国保の手続きは健康福祉課です。"]
+    d.reset()
+    assert await _collect(d, "こんにちは") == ["こんにちは。", "最近、お変わりありませんか？"]  # 挨拶のターンの切り出しは言う
+
+
+async def test_filler_only_reply_and_one_offer_per_reply() -> None:
+    d = Dialogue(DlgLLM(["こんにちは。お困りのことがありましたら、いつでもどうぞ。最近、お変わりありませんか？"]),
+                 DialogueConfig(), now=lambda: NOW)
+    assert await _collect(d, "えっと") == ["はい、ゆっくりで大丈夫ですよ。"]  # LLM を通さない
+    d.reset()  # 会話の最初の挨拶として聞く（途中の挨拶は別の規則で捨てる）
+    out = await _collect(d, "こんにちは")
+    assert out == ["こんにちは。", "お困りのことがありましたら、いつでもどうぞ。"]  # 1 回の応答で 1 つまで
+
+
+async def test_confusable_allowance_is_not_answered() -> None:
+    from src.knowledge import Reference
+
+    fac = load_facility("akiota", SERVER_ROOT / "context")
+    fuyo = Reference("児童扶養手当について", "https://www.akiota.jp/site/kosodate/1428.html",
+                     "児童扶養手当は、申請者の個人番号が必要です。", 0.9, 1.0, "official", "町のホームページ")
+    d = Dialogue(DlgLLM(["児童手当ですね。児童扶養手当は、申請に個人番号が必要です。担当の課でご案内します。"]),
+                 DialogueConfig(), facility=fac, now=lambda: NOW)
+    out = [s async for s in d.respond("児童手当について", extra_refs=[fuyo])]
+    assert all("児童扶養手当" not in x for x in out) and d.last_references == []
+    assert any(x["reason"] == "名前の似た別の手続き" for x in d.last_dropped)
+    # 来訪者が児童扶養手当と言ったら、児童扶養手当の資料はそのまま使う（「児童手当」は言っていない方）
+    d2 = Dialogue(DlgLLM(["児童扶養手当は、申請に個人番号が必要です。"]), DialogueConfig(), facility=fac, now=lambda: NOW)
+    out2 = [s async for s in d2.respond("児童扶養手当の申請をしたい", extra_refs=[fuyo])]
+    assert "".join(out2) == "児童扶養手当は、申請に個人番号が必要です。" and d2.last_references == [fuyo]
