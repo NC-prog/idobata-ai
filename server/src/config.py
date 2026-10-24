@@ -1089,6 +1089,8 @@ class ProcedureConfig:
     )
     # 下書き（未承認）の手続きだけに当たった問いでは、応答の最後にこの一文を足す（応答がもう担当の課を案内していなければ）
     draft_sentence: str = "手続きの詳しいことは、{department}でご案内します。"
+    # 承認済みの手続きで答えた応答に課の名前が無いときに足す一文（WP13 C。{department} は「市民課（1階）」の形）
+    approved_department_sentence: str = "担当は{department}です。"
     draft_department_fallback: str = "担当の課"
     # 下書きに当たった発話が、手続きを尋ねる・頼む形か（問いの形・手続きの語に加えて）
     draft_request_pattern: str = r"たい|ほしい|欲しい|要る|いる[？?]|すりゃ|どうしたら|ええ[？?]|けど$|けど[、。]|ですが|んですが|んじゃけど"

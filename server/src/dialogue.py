@@ -780,6 +780,15 @@ class Dialogue:
                     logger.info("聞き直されて課の名前の文を捨てたので、その文を言い直します")
                     sentences.append(line)
                     yield line
+        if (sentences and proc_refs and expected_dept is not None and self._facility is not None
+                and not any(d.name in x for x in sentences for d in self._facility.departments)):
+            # 承認済みの手続きで答えたのに課の名前を言わなかった（パックを渡さなくなって、場所の一覧だけ言う癖が出た。
+            # WP13 C の 30 問の住民票・パスポート・印鑑登録）: 規則で決まった担当の課を一文足す
+            line = self._proc_cfg.approved_department_sentence.format(
+                department=self._department_line(expected_dept))
+            logger.info("承認済みの手続きの応答に課の名前が無いので、担当の課の一文を足します")
+            sentences.append(line)
+            yield line
         if not sentences and not self.last_dropped:
             yield _FALLBACK_REPLY.get(language, _FALLBACK_REPLY["ja"])  # LLM が何も返さなかった
             return

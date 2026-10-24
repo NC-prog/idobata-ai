@@ -131,6 +131,19 @@ def test_intent_priority() -> None:
     assert classify_intent("雨の日のおすすめの観光地", RULES, PROCS, None, QRE) == "tourism"
 
 
+def test_tourism_alias_of_draft_is_not_procedure(tmp_path: Path) -> None:
+    # 下書き「観光案内」の別名「観光」「観光地」だけで当たった問いは観光（調べるの提案が先）。ほかの語が当たれば手続き
+    from src.procedure_kb import ProcedureBook, ProcedureRecord
+
+    ProcedureBook(tmp_path).save(ProcedureRecord(id="kanko", name="観光案内", aliases=("観光", "観光地"),
+                                                 department="商工観光課", status="draft"))
+    procs = load_procedures(SERVER_ROOT / "context", tmp_path)
+    assert classify_intent("江田島でおすすめの観光地はありますか", RULES, procs, None, QRE) == "tourism"
+    assert classify_intent("このあたりの観光の案内はどちらで聞けますか", RULES, procs, None, QRE) == "tourism"
+    assert classify_intent("観光の補助金の申請をしたい", RULES, procs, None, QRE) == "procedure"
+    assert classify_intent("住民票を取りたいんですが", RULES, procs, None, QRE) == "procedure"
+
+
 def test_nouns() -> None:
     assert nouns("お祭りはありますか") == ["祭り"]
     assert nouns("町からの何か案内ってありますか") == ["案内"]
@@ -237,3 +250,19 @@ async def test_lookup_searches_pack_dialogue_and_lookup_first(tmp_path: Path) ->
     lk = Lookup(LookupConfig(sources_dir=tmp_path), "akiota", tmp_path, make_query, pack=pack)
     result = await lk.run("近くに温泉ある？")
     assert result.found and [r.title for r in result.references] == ["温井ダムと温泉"] and asked == ["温泉"]
+
+
+async def test_approved_procedure_reply_gets_department_when_missing() -> None:
+    # 承認済みの手続きで答えたのに課の名前を言わなかった: 規則で決まった担当の課を一文足す（WP13 C の 30 問）
+    from src.dialogue import Dialogue
+    from src.site_context import load_facility
+
+    fac = load_facility("etajima", SERVER_ROOT / "context")
+    d = Dialogue(_LLM("まずは一時停止の手続きをしてください。"), DialogueConfig(), knowledge=_KB([]),
+                 procedures=seeded_procedures(), facility=fac)
+    said = await _say(d, "マイナンバーカードをなくしたんですが")
+    assert said[-1] == "担当は市民課（1階）です。"
+    d = Dialogue(_LLM("市民課（1階）で再交付の手続きができます。"), DialogueConfig(), knowledge=_KB([]),
+                 procedures=seeded_procedures(), facility=fac)
+    said = await _say(d, "マイナンバーカードをなくしたんですが")
+    assert not any(s.startswith("担当は") for s in said)  # 課の名前を言っていれば足さない
