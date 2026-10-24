@@ -334,3 +334,18 @@ def test_procedure_names_expand_aliases() -> None:
 
     names = procedure_names("国保のことで聞きに来ました", PROCS)
     assert "国保" in names and any("国民健康保険" in n for n in names)
+
+
+async def test_unruled_procedure_drops_llm_department() -> None:
+    # 手続きの型で、手続きナレッジに当たらず規則でも課が決まらない（資料 0 件）: LLM が言う課は推測なので読み上げない
+    # （手続き 100 問の 58 番。「犬飼うたら」が下書きの別名「犬を飼」に当たらず、市民課と言ったのが通り抜けた）
+    from src.dialogue import Dialogue
+    from src.site_context import load_facility
+
+    fac = load_facility("etajima", SERVER_ROOT / "context")
+    d = Dialogue(_LLM("犬を飼うと届けが要りますよ。市民課（1階）で手続きできます。"), DialogueConfig(), knowledge=_KB([]),
+                 procedures=seeded_procedures(), facility=fac)
+    said = await _say(d, "犬飼うたら何か届けいるん？")
+    assert d.last_intent == "procedure"
+    assert not any("市民課" in s for s in said)
+    assert said[-1] == "手続きの詳しいことは、担当の課でご案内します。"

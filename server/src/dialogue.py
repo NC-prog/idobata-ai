@@ -629,8 +629,12 @@ class Dialogue:
         bring_cautioned = False
         # 下書きの手続きに当たったのに規則で課が決まらない: LLM が言う課は推測なので読み上げない（WP09 C の評価で
         # 移住・体育館・ふるさと納税を社会福祉課と言った）
-        guess_guard = draft_dept is not None and expected_dept is None
-        allowed_depts = {draft_dept} if guess_guard else set()
+        # 手続きの型で、承認済みにも下書きにも当たらず規則でも課が決まらないとき（資料 0 件）も同じ（手続き 100 問の 58 番:
+        # 「犬飼うたら」が下書きの別名「犬を飼」に当たらず、LLM が市民課と言ったのが通り抜けた）
+        unruled = (self._procedures is not None and draft_dept is None and expected_dept is None and not proc_refs
+                   and extra_refs is None and self.last_intent == "procedure")
+        guess_guard = (draft_dept is not None or unruled) and expected_dept is None
+        allowed_depts: set[str | None] = {draft_dept} if draft_dept is not None and guess_guard else set()
         # 読点で早めに切った 1 文目の頭（「納期限は、」）が期限・金額に触れていたら、続きと合わせてから根拠を見る
         # （先に読み上げると、続きを捨てたときに「納期限は、詳しい期限や金額は…」とつながってしまう）
         held = ""
@@ -752,8 +756,9 @@ class Dialogue:
                 labels=source_labels(self._cfg, self._facility, page_cited))
             sentences.append(line)
             yield line
-        if draft_dept is not None and sentences and not self._points_to_department(sentences):
-            line = self._proc_cfg.draft_sentence.format(department=draft_dept)
+        if (draft_dept is not None or (unruled and any(d["reason"] == "規則で決まらない課の推測" for d in self.last_dropped))) \
+                and sentences and not self._points_to_department(sentences):
+            line = self._proc_cfg.draft_sentence.format(department=draft_dept or self._proc_cfg.draft_department_fallback)
             logger.info("承認前の手続きなので、詳しいことは担当の課で、の一文を足します")
             sentences.append(line)
             yield line
