@@ -1003,6 +1003,28 @@ def shrink_refused(previous_pages: int, new_pages: int, ratio: float = FULL_MIN_
     return previous_pages > 0 and new_pages < previous_pages * ratio
 
 
+def build_news(src: Sources, crawler: Crawler, root: Path, pack: Path) -> None:
+    """お知らせ（WP11）: 一覧から集め、夜のうちに分類と要約を作る。失敗してもパックの更新は続ける。"""
+    try:
+        from news_classify import NightLLM, classify
+        from news_collect import collect, link_news, store_dir
+        from news_summarize import SpeechMeter, summarize
+        from src.config import config as server_config
+
+        store = store_dir(root, src.site)
+        link_news(pack, store, server_config.news)
+        collect(src, crawler, store)
+        llm, meter = NightLLM(), SpeechMeter()
+        try:
+            classify(store, llm)
+            summarize(store, src.site, llm, meter)
+        finally:
+            llm.close()
+            meter.close()
+    except Exception:
+        logger.exception("お知らせの処理に失敗しました（知識パックの更新は続けます）")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="井戸端AI 知識パックのビルド")
     ap.add_argument("--site", required=True)
@@ -1014,6 +1036,8 @@ def main() -> int:
                     help="取得し直さず、今のパックのページをキャッシュから作り直す（チャンク・人名除去の変更用）")
     ap.add_argument("--allow-shrink", action="store_true",
                     help="全体の作り直しでページが前の版の半分を下回っても差し替える（sources を絞ったときだけ）")
+    ap.add_argument("--news-only", action="store_true", help="お知らせ（WP11）の収集・分類・要約だけ")
+    ap.add_argument("--no-news", action="store_true", help="お知らせ（WP11）を集めない")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         stream=sys.stdout)
@@ -1045,6 +1069,11 @@ def main() -> int:
             return 0
 
     crawler = Crawler(src, root / "cache" / args.site)
+    if args.news_only or (not args.no_news and not args.from_cache):
+        build_news(src, crawler, root, pack)
+        if args.news_only:
+            crawler.close()
+            return 0
     t0 = time.monotonic()
     try:
         queries: list[str] = []
@@ -1098,6 +1127,10 @@ def main() -> int:
     staging.mkdir(parents=True)
     embed_stats = embed_and_save(chunks, staging, reuse)
     shutil.copy2(pack / "weather.json", staging / "weather.json")
+    from news_collect import link_news, store_dir
+    from src.config import config as server_config
+
+    link_news(staging, store_dir(root, args.site), server_config.news)
     n_pages = len({c.source_url for c in chunks})
     write_json(staging / "manifest.json", {
         "site": args.site,

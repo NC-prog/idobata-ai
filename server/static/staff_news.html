@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>井戸端AI お知らせ</title>
+<style>
+  :root { --bg:#fafafa; --fg:#222; --mut:#666; --line:#ddd; --held:#ffebee; --stopped:#eeeeee; --priority:#e3f2fd; --ok:#e8f5e9; }
+  body { margin:16px; font-family:"Noto Sans JP",sans-serif; background:var(--bg); color:var(--fg); }
+  h1 { font-size:20px; margin:0 0 12px; }
+  nav a { margin-right:12px; }
+  .wrap { display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+  .list { flex:1 1 480px; min-width:0; }
+  .detail { flex:1 1 460px; min-width:0; background:#fff; border:1px solid var(--line); border-radius:6px; padding:12px; }
+  table { border-collapse:collapse; width:100%; background:#fff; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
+  tr { cursor:pointer; }
+  tr.sel td { outline:2px solid #333; }
+  .st-held { background:var(--held); color:#b00020; font-weight:bold; }
+  .st-stopped { background:var(--stopped); color:var(--mut); }
+  .st-priority { background:var(--priority); font-weight:bold; }
+  .st-auto { background:var(--ok); }
+  .mut { color:var(--mut); font-size:12px; }
+  .warn { color:#b00020; }
+  .count-held { color:#b00020; font-weight:bold; }
+  label { display:block; margin-top:8px; font-size:13px; font-weight:bold; }
+  textarea { width:100%; box-sizing:border-box; font-size:15px; font-family:inherit; min-height:6em; }
+  select { font-size:14px; }
+  button { margin:2px; padding:4px 10px; font-size:13px; }
+  button.primary { background:#2e7d32; color:#fff; border:1px solid #2e7d32; }
+  .body { white-space:pre-wrap; background:#f5f5f5; padding:6px; font-size:12px; max-height:16em; overflow:auto; }
+  .thumb { max-width:100%; max-height:180px; display:block; margin-top:4px; border:1px solid var(--line); }
+</style>
+</head>
+<body>
+<h1>井戸端AI 職員パネル</h1>
+<nav><a href="../">紹介状・今日の状況</a><a href="../procedures/">手続き</a><b>お知らせ</b></nav>
+<p class="mut">市町のサイトのお知らせから、住民に広く関係する記事を夜に選び、紹介の要約を作っています。<b>承認は要りません（自動で出ます）</b>。
+出したくない記事は「止める」、先に出したい記事は「優先」にしてください。保留は、要約が安全装置（本文に無い日付・金額・英単語など）に
+引っかかった記事です。要約を直して保存すると出るようになります。案内役は 1 回の会話で 1 件まで、来訪者が「はい」と言ったときだけ紹介します。</p>
+<label style="display:inline">状態
+  <select id="f-status" onchange="loadList()">
+    <option value="">すべて</option><option value="auto">自動</option><option value="priority">優先</option><option value="held">保留</option><option value="stopped">止めた</option>
+  </select></label>
+<label style="display:inline">分類
+  <select id="f-category" onchange="loadList()">
+    <option value="">すべて</option><option>通行止め</option><option>ライフライン</option><option>防災</option><option>施設</option><option>ごみ</option><option>イベント</option><option>募集</option><option>健康</option><option>その他</option>
+  </select></label>
+<label style="display:inline"><input type="checkbox" id="f-skip" onchange="loadList()"> 紹介しない記事も見る</label>
+<div id="counts" class="mut"></div>
+<div class="wrap">
+  <div class="list">
+    <table>
+      <thead><tr><th>題名</th><th>掲載日</th><th>分類</th><th>状態</th><th>期限</th><th>紹介</th><th>画像</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div class="detail" id="detail"><span class="mut">左の一覧から記事を選んでください。</span></div>
+</div>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let current = null;
+
+async function loadList() {
+  const q = new URLSearchParams();
+  const st = document.getElementById("f-status").value, cat = document.getElementById("f-category").value;
+  if (st) q.set("status", st);
+  if (cat) q.set("category", cat);
+  if (document.getElementById("f-skip").checked) q.set("skip", "true");
+  const data = await fetch("../api/news?" + q).then((r) => r.json());
+  const c = data.counts;
+  document.getElementById("counts").innerHTML = `紹介する記事 ${c.introduce} 件（いま紹介の候補 ${c.candidates}・優先 ${c.priority}・`
+    + `<span class="${c.held ? "count-held" : ""}">保留 ${c.held}</span>・止めた ${c.stopped}）／紹介しない記事 ${c.skip} 件`;
+  document.getElementById("rows").innerHTML = data.rows.map((r) => `
+    <tr class="${current === r.id ? "sel" : ""}" onclick='openDetail("${esc(r.id)}")'>
+      <td>${esc(r.title)}${r.relevance === "skip" ? '<div class="mut">紹介しない</div>' : ""}${r.candidate ? '<div class="mut">候補</div>' : ""}</td>
+      <td>${esc(r.published)}</td>
+      <td>${esc(r.category)}</td>
+      <td class="st-${esc(r.status)}">${esc(r.status_label)}${r.reasons.length ? `<div class="mut">${esc(r.reasons.join("・"))}</div>` : ""}</td>
+      <td>${r.expired ? '<span class="mut">期限切れ</span>' : esc(r.expires_at)}</td>
+      <td>${r.shown_count}</td>
+      <td>${r.has_image ? (r.image_hidden ? '<span class="mut">出さない</span>' : "あり") : '<span class="mut">なし</span>'}</td>
+    </tr>`).join("") || `<tr><td colspan="7" class="mut">ありません</td></tr>`;
+}
+
+async function openDetail(id) {
+  current = id;
+  const d = await fetch("../api/news/" + encodeURIComponent(id)).then((r) => r.json());
+  const checks = d.summary_checks || {};
+  const reasons = (checks.reasons || []).join("・");
+  document.getElementById("detail").innerHTML = `
+    <div><b>${esc(d.title)}</b></div>
+    <div class="mut">${esc(d.published)} 掲載・${esc(d.category)}・${esc(d.status_label)}${d.candidate ? "（いま紹介の候補）" : ""}・紹介 ${d.shown_count} 回・
+      期限 ${esc(d.expires_at)}${d.period && d.period.end ? `（期間 ${esc(d.period.start || "")}〜${esc(d.period.end)}）` : ""}</div>
+    <div class="mut">分類: ${esc(d.relevance)}（${esc(d.relevance_by)}）${esc(d.relevance_reason)}</div>
+    <div><a href="${esc(d.url)}" target="_blank" rel="noopener">記事のページを開く</a></div>
+    <label>紹介の要約（読み上げる文。15〜22 秒が目安）</label>
+    <textarea id="summary">${esc(d.summary)}</textarea>
+    <div class="mut">安全装置: ${checks.result === "held" ? `<span class="warn">保留（${esc(reasons)}）</span>` : "通っています"}
+      ${checks.speech_sec ? `・読み上げ ${checks.speech_sec} 秒` : ""}${d.edited_by_staff ? `・職員が直した（${esc(d.edited_by)}）` : ""}</div>
+    <div id="save-msg" class="warn"></div>
+    <button class="primary" onclick="saveSummary()">要約を保存</button>
+    <div style="margin-top:8px">
+      <button onclick="act('stop')">止める</button>
+      <button onclick="act('auto')">自動に戻す</button>
+      <button onclick="act('priority')">優先にする</button>
+      ${d.image ? (d.image_hidden ? `<button onclick="act('show_image')">画像を出す</button>` : `<button onclick="act('hide_image')">画像を出さない</button>`) : ""}
+    </div>
+    <div style="margin-top:8px">プレビュー:
+      <a href="/edge/?preview=${encodeURIComponent(d.id)}&orient=landscape" target="_blank">横置き</a>
+      <a href="/edge/?preview=${encodeURIComponent(d.id)}&orient=portrait" target="_blank">縦置き</a></div>
+    ${d.image ? `<img class="thumb" src="/edge/news/${esc(d.id)}.jpg" alt="記事の画像" onerror="this.replaceWith(document.createTextNode('（画像は出さない設定です）'))">` : '<div class="mut">画像なし（画面は題名だけの板になります）</div>'}
+    <label>本文（抜き出したもの）</label>
+    <div class="body">${esc(d.body)}</div>`;
+  loadList();
+}
+
+async function saveSummary() {
+  const r = await fetch("../api/news/" + encodeURIComponent(current), {
+    method: "PUT", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({summary: document.getElementById("summary").value}),
+  });
+  if (!r.ok) {
+    const e = await r.json();
+    const d = e.detail || {};
+    document.getElementById("save-msg").textContent = (d.message || "保存できませんでした") + (d.reasons ? "：" + d.reasons.join("・") : "");
+    return;
+  }
+  openDetail(current);
+}
+
+async function act(action) {
+  await fetch("../api/news/" + encodeURIComponent(current) + "/" + action, {method: "POST"});
+  openDetail(current);
+}
+
+loadList();
+setInterval(loadList, 10000);
+</script>
+</body>
+</html>

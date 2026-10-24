@@ -33,6 +33,8 @@ from pydantic import BaseModel
 from .config import AdminConfig, StaffConfig
 from .edge_bridge import allowed_peer
 from .knowledge import JST
+from .news import NewsBook
+from .news_panel import NewsPanel, SummaryRejected
 from .procedure_kb import PROVISIONAL_BY
 from .procedure_panel import ProcedurePanel
 from .procedures import AsrFixes
@@ -50,6 +52,7 @@ _NOT_BUILT_HTML = """<!doctype html><meta charset="utf-8"><title>井戸端AI エ
 _STAFF_HTML = Path(__file__).resolve().parent.parent / "static" / "staff.html"
 _PROCEDURES_HTML = Path(__file__).resolve().parent.parent / "static" / "staff_procedures.html"
 _ADMIN_HTML = Path(__file__).resolve().parent.parent / "static" / "admin_transcripts.html"
+_NEWS_HTML = Path(__file__).resolve().parent.parent / "static" / "staff_news.html"
 
 
 class StatusUpdate(BaseModel):
@@ -78,6 +81,10 @@ class ProcedureEdit(BaseModel):
     fields: dict[str, Any]
 
 
+class NewsSummaryIn(BaseModel):
+    summary: str
+
+
 class ApproveIn(BaseModel):
     by: str = ""  # 空なら職員パネルのログイン名
 
@@ -99,7 +106,7 @@ class StaffPanel:
     def __init__(self, referrals: ReferralStore, visits: VisitLog, cfg: StaffConfig,
                  tidbits: TidbitStore | None = None, departments: tuple[str, ...] = (),
                  asr_fixes: AsrFixes | None = None, themes: ThemeSelector | None = None,
-                 procedures: ProcedurePanel | None = None) -> None:
+                 procedures: ProcedurePanel | None = None, news: NewsPanel | None = None) -> None:
         self.referrals = referrals
         self.visits = visits
         self.cfg = cfg
@@ -111,6 +118,8 @@ class StaffPanel:
         self.themes = themes
         # 手続きナレッジ（WP09）
         self.procedures = procedures
+        # お知らせ（WP11）
+        self.news = news
         # 職員の呼び出し（深刻な打ち明け・迷子。WP09 C）。発話の本文は持たない。メモリだけ（再起動で消える）
         self.alerts: list[dict[str, Any]] = []
 
@@ -335,6 +344,46 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
     async def review_procedure_faq(rid: str, body: FaqReview) -> dict[str, bool]:
         return {"written": procs().review(rid, body.q, body.answer, body.ok, body.note)}
 
+    def news() -> NewsPanel:
+        if panel.news is None:
+            raise HTTPException(404, "お知らせはありません")
+        return panel.news
+
+    @app.get("/staff/news/", include_in_schema=False, dependencies=auth)
+    async def news_page() -> HTMLResponse:
+        return HTMLResponse(_NEWS_HTML.read_text(encoding="utf-8"))
+
+    @app.get("/staff/api/news", dependencies=auth)
+    async def list_news(status: str | None = None, category: str | None = None,
+                        skip: bool = False) -> dict[str, Any]:
+        n = news()
+        return {"rows": n.rows(status or None, category or None, skip), "counts": n.counts()}
+
+    @app.get("/staff/api/news/{rid}", dependencies=auth)
+    async def get_news(rid: str) -> dict[str, Any]:
+        d = news().detail(rid)
+        if d is None:
+            raise HTTPException(404, "お知らせがありません")
+        return d
+
+    @app.put("/staff/api/news/{rid}", dependencies=auth)
+    async def edit_news(rid: str, body: NewsSummaryIn, request: Request) -> dict[str, Any]:
+        try:
+            return news().edit_summary(rid, body.summary, login_name(request))
+        except KeyError as e:
+            raise HTTPException(404, "お知らせがありません") from e
+        except SummaryRejected as e:
+            raise HTTPException(422, {"message": "安全装置に引っかかったので保存しませんでした", "reasons": e.reasons}) from e
+
+    @app.post("/staff/api/news/{rid}/{action}", dependencies=auth)
+    async def news_action(rid: str, action: str) -> dict[str, Any]:
+        try:
+            return news().act(rid, action)
+        except KeyError as e:
+            raise HTTPException(404, "お知らせがありません") from e
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
+
     @app.get("/staff/api/alerts", dependencies=auth)
     async def list_alerts() -> list[dict[str, Any]]:
         return [a for a in panel.alerts if not a["done"]]
@@ -424,7 +473,8 @@ def _add_debug_routes(app: FastAPI, frame: DebugFrame, state: DebugState) -> Non
 
 
 def _add_media_routes(app: FastAPI, static_dir: Path, avatars_dir: Path | None,
-                      backgrounds_dir: Path | None) -> None:
+                      backgrounds_dir: Path | None, news: NewsBook | None = None,
+                      theme_message: Callable[[], dict[str, Any]] | None = None) -> None:
     """アバター（VRM）と背景を ~/idobata-data から配信する（WP08。モデルは git にもビルドにも入れない）。
 
     /edge/avatars/<name> は avatars_dir だけ。/edge/backgrounds/<name> は backgrounds_dir（実写）にあればそれ、
@@ -445,11 +495,27 @@ def _add_media_routes(app: FastAPI, static_dir: Path, avatars_dir: Path | None,
     async def background_file(name: str) -> FileResponse:
         return pick(name, backgrounds_dir, static_dir / "backgrounds")
 
+    # お知らせ（WP11）: 記事の画像（職員が止めた画像は出さない）と、職員パネルのプレビュー用の構図
+    @app.get("/edge/news/preview/{rid}", include_in_schema=False)
+    async def news_preview(rid: str) -> dict[str, Any]:
+        r = news.get(rid) if news is not None else None
+        if r is None or news is None:
+            raise HTTPException(404, "ありません")
+        return {**news.layout_message(r), "theme": theme_message() if theme_message is not None else None}
+
+    @app.get("/edge/news/{name}", include_in_schema=False)
+    async def news_image(name: str) -> FileResponse:
+        path = news.image_path(name.removesuffix(".jpg")) if news is not None and name.endswith(".jpg") else None
+        if path is None:
+            raise HTTPException(404, "ありません")
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
 
 def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPanel | None = None,
                debug_frame: DebugFrame | None = None, debug_state: DebugState | None = None,
                edge_allow: tuple[str, ...] | None = None, avatars_dir: Path | None = None,
-               backgrounds_dir: Path | None = None) -> FastAPI:
+               backgrounds_dir: Path | None = None, news: NewsBook | None = None,
+               theme_message: Callable[[], dict[str, Any]] | None = None) -> FastAPI:
     """エッジページ（と職員パネル・管理者ページ・カメラのデバッグ表示）を配信する FastAPI アプリ。
 
     edge_allow を渡すと、/edge/ と / はこの機体自身と edge_allow の相手からだけ開ける（IDOBATA_EDGE_ALLOW。WP02 D）。
@@ -467,7 +533,7 @@ def create_app(static_dir: Path, staff: StaffPanel | None = None, admin: AdminPa
             return await call_next(request)
     if debug_frame is not None:
         _add_debug_routes(app, debug_frame, debug_state or (dict))  # /edge の静的配信より先に置く
-    _add_media_routes(app, static_dir, avatars_dir, backgrounds_dir)  # /edge の静的配信より先に置く
+    _add_media_routes(app, static_dir, avatars_dir, backgrounds_dir, news, theme_message)  # /edge の静的配信より先に置く
     if staff is not None:
         _add_staff_routes(app, staff)
     if admin is not None:
@@ -495,9 +561,11 @@ class EdgeServer:
     def __init__(self, host: str, port: int, static_dir: Path, staff: StaffPanel | None = None,
                  admin: AdminPanel | None = None, debug_frame: DebugFrame | None = None,
                  debug_state: DebugState | None = None, edge_allow: tuple[str, ...] | None = None,
-                 avatars_dir: Path | None = None, backgrounds_dir: Path | None = None) -> None:
+                 avatars_dir: Path | None = None, backgrounds_dir: Path | None = None,
+                 news: NewsBook | None = None, theme_message: Callable[[], dict[str, Any]] | None = None) -> None:
         cfg = uvicorn.Config(
-            create_app(static_dir, staff, admin, debug_frame, debug_state, edge_allow, avatars_dir, backgrounds_dir),
+            create_app(static_dir, staff, admin, debug_frame, debug_state, edge_allow, avatars_dir, backgrounds_dir,
+                       news, theme_message),
             host=host, port=port, log_level="warning", lifespan="off",
         )
         self._server = uvicorn.Server(cfg)

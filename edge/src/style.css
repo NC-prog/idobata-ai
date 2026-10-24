@@ -32,6 +32,167 @@ body {
   width: 100%;
   height: 100%;
   display: block;
+  transition: opacity 0.25s ease;
+}
+
+/* お知らせの紹介の構図（WP11 C-4）。切り替えは 0.25 秒で消して 0.25 秒で出す（合わせて 0.5 秒のフェード）。
+   アバターは canvas の位置と大きさだけを変える（口パク・視線・まばたきの処理は同じ。構図は avatar.frame() で取り直す） */
+body.fading #avatar,
+body.fading #news {
+  opacity: 0;
+}
+
+#news {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+#news[hidden] {
+  display: none;
+}
+
+#news-board {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 1vh;
+  padding: 1.2vh 1.2vw;
+  border-radius: 0.6em;
+  background: rgba(12, 16, 22, 0.86);
+}
+
+#news-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.4em;
+  background: #0b0e13;
+  overflow: hidden;
+}
+
+#news-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+#news-image[hidden] {
+  display: none;
+}
+
+/* 画像の無い記事は題名だけの板（題名を大きく） */
+#news.no-image #news-frame {
+  display: none;
+}
+
+#news.no-image #news-title {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: clamp(32px, min(5vw, 7vh), 110px);
+  -webkit-line-clamp: 4;
+}
+
+#news-title {
+  flex: 0 0 auto; /* 画像に押されて縮まない（題名は必ず見せる） */
+  margin: 0;
+  color: #fff;
+  font-weight: 700;
+  line-height: 1.3;
+  font-size: clamp(22px, min(3.2vw, 4.2vh), 68px);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+#news-qr {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+}
+
+#news-qr-img {
+  display: block;
+  width: var(--qr-size);
+  height: var(--qr-size);
+  image-rendering: pixelated;
+}
+
+#news-qr-label {
+  margin: 0;
+  color: #222;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* 横置き: 左 2/3 に記事の板、右 1/3 にアバター（胸から上、少し上に寄せる）、QR（一辺 180px）は画面の右下隅
+   （クレジットの上。右端から 24px・下から 48px）。アバターの下端と QR の上端は 40px 以上空ける
+   （QR の箱は 180px ＋ 文字・余白で約 224px → アバターの canvas は下から 48 + 224 + 40 = 312px より上） */
+body.layout-news:not(.portrait) #avatar {
+  left: 66.6vw;
+  width: 33.4vw;
+  height: min(56vh, calc(100vh - 312px));
+}
+
+body.layout-news:not(.portrait) #news-board {
+  left: 2vw;
+  top: 2.5vh;
+  width: 62.6vw;
+  height: 55vh;
+}
+
+/* 紹介の間は、ひとつ前のやりとりを出さない（記事の板と字幕を重ねない） */
+body.layout-news #caption-previous {
+  display: none;
+}
+
+body.layout-news:not(.portrait) .caption.assistant {
+  font-size: clamp(24px, min(2.6vw, 4.6vh), 80px);
+}
+
+body.layout-news:not(.portrait) #news-qr {
+  --qr-size: 180px;
+  right: 24px;
+  bottom: 48px;
+}
+
+/* 横置きの字幕は左の列（右下の QR と重ねない） */
+body.layout-news:not(.portrait) #captions {
+  left: 2vw;
+  transform: none;
+  width: 62.6vw;
+}
+
+/* 縦置き（本番）: 上 45% に記事の板と題名、下にアバター（少し小さく）、QR はアバターの右下（一辺 220px） */
+body.layout-news.portrait #avatar {
+  top: 44.5vh;
+  height: 27vh;
+}
+
+body.layout-news.portrait #news-board {
+  left: 3vw;
+  top: 1.5vh;
+  width: 94vw;
+  height: 42.5vh;
+}
+
+body.layout-news.portrait #news-qr {
+  --qr-size: 220px;
+  right: 3vw;
+  top: 47vh;
 }
 
 /* 字幕: 画面下。来訪者の確定発話と、アバターが今話している文（声と同期）。

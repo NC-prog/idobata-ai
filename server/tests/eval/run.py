@@ -30,6 +30,7 @@ from src.procedure_kb import procedures_dir
 from src.procedures import load_procedures
 from src.referrals import ReferralStore, load_tags
 from src.site_context import load_facility
+from tests.eval.news_helper import eval_news_book
 
 _ASCII_RUN = re.compile(r"[A-Za-zＡ-Ｚａ-ｚ]{3,}")
 
@@ -70,7 +71,9 @@ async def run(site: str, case_set: str = "") -> str:
     conv = Conversation(dialogue, llm, config.llm.chat_model, config.actions, config.referral, facility,
                         load_tags(SERVER_ROOT / "context" / "tags.yaml"),
                         referrals=ReferralStore(Path(tempfile.mkdtemp(prefix="idobata-eval-")), site, 1, False),
-                        procedures=procs)
+                        procedures=procs,
+                        # お知らせ（WP11）: 実機と同じく提案の候補に入れる（記事の紹介回数は書き換えない写し）
+                        news=eval_news_book(site), news_cfg=config.news)
     rows = ["| # | 発話 | 応答（全文） | 参考資料（上位） | 出典表示 | 検索 | 提案 | 補助判定 |",
             "|---|---|---|---|---|---|---|---|"]
     ascii_total = 0

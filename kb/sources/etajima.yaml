@@ -178,6 +178,16 @@ seeds:
     recheck_days: 7
     trust: semi
     label: 県の観光サイト
+# ---- お知らせ（WP11 A-1）。新着のお知らせ・トピックス・行事の Atom から、住民に広く関係する記事を紹介する ----
+# 記事は $DATA/kb/etajima.news/ に 1 件 1 ファイル（kb/news_collect.py）。画像は記事と同じホスト（市のサイト）のものだけ。
+# 2026-10-24 時点で市のサイトはセキュリティ対策の緊急メンテナンスで閲覧停止中（簡易サイトのみ）。取れない間は前回取った内容で続ける
+news:
+  label: 市のホームページ
+  feeds:
+    - {url: "https://www.city.etajima.hiroshima.jp/cms/atom/news", type: atom}
+    - {url: "https://www.city.etajima.hiroshima.jp/cms/atom/topics", type: atom}
+    - {url: "https://www.city.etajima.hiroshima.jp/cms/atom/events", type: atom}
+  include: ['^https://www\.city\.etajima\.hiroshima\.jp/cms/articles/show/\d+$']
 # 個人名を含みうるページを外す（議会・会議録・入札・人事・職員採用・市長の部屋・選挙・監査）
 exclude_breadcrumb_keywords: [議会, 会議録, 入札, 契約, 職員採用, 人事, 市長の部屋, 秘書室, 選挙, 監査, 合併協議会]
 exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]

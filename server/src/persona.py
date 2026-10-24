@@ -164,8 +164,12 @@ def build_system_prompt(
     enabled_actions: tuple[str, ...] = (),
     greeting: str = "こんにちは",
     persona: Persona | None = None,
+    role_block: str | None = None,
 ) -> str:
     """システムプロンプト（固定事実 + 決まり + 今日）。参考資料は入れない（build_turn_message）。
+
+    role_block はいまの役（roles.py）の段落で、【話し方の決まり】の後ろに入る。None なら人物像の段落
+    （総合受付の役の段落と同じもの）。
 
     挨拶は時間帯（1 日 3 回だけ変わる）なので、プレフィックスキャッシュはほぼ効いたまま。
     """
@@ -179,7 +183,8 @@ def build_system_prompt(
         avatar_name=avatar_name or "（未定）",
         propose_rules=format_propose_rules(cfg, enabled_actions),
         greeting=greeting,
-        persona=persona.block(facility.name if facility else "市役所") if persona else "",
+        persona=role_block if role_block is not None else (
+            persona.block(facility.name if facility else "市役所") if persona else ""),
     )
 
 

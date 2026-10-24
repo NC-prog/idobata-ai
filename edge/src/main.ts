@@ -7,10 +7,15 @@ import { Avatar } from "./avatar";
 import { startCamera } from "./camera";
 import { FrontLink } from "./link";
 import { KIND_JPEG, KIND_PCM } from "./protocol";
-import type { CameraMessage, DownMessage, SpeakMessage, ThemeMessage } from "./protocol";
+import type { CameraMessage, DownMessage, LayoutMessage, SpeakMessage, ThemeMessage } from "./protocol";
 
+const params = new URLSearchParams(location.search);
 // WebSocket のポート。既定は 8765、ページの URL に ?ws=<番号> を付けると変えられる（試験用に別ポートで動かすとき）
-const WS_PORT = Number(new URLSearchParams(location.search).get("ws")) || 8765;
+const WS_PORT = Number(params.get("ws")) || 8765;
+// 職員パネルのプレビュー（WP11）: ?preview=<記事の id> で、WebSocket につながずにお知らせの構図だけを描く。
+// ?orient=portrait|landscape で縦置き・横置きを決める（無ければ画面の縦横）
+const PREVIEW_ID = params.get("preview");
+const ORIENT = params.get("orient");
 // 開発用の既定のアバター。本番のアバターはフロントの theme（~/idobata-data/avatars/ から /edge/avatars/ で配信）で読む。
 // フロントにつながらないまま THEME_WAIT_MS 経ったら、これを出しておく
 const DEFAULT_MODEL = "models/VRM1_Constraint_Twist_Sample.vrm";
@@ -28,6 +33,11 @@ const startEl = $<HTMLDivElement>("start");
 const backgroundEl = $<HTMLDivElement>("background");
 const bgCreditEl = $<HTMLDivElement>("bg-credit");
 const replacedEl = $<HTMLDivElement>("replaced");
+const newsEl = $<HTMLDivElement>("news");
+const newsImage = $<HTMLImageElement>("news-image");
+const newsTitle = $<HTMLParagraphElement>("news-title");
+const newsQr = $<HTMLImageElement>("news-qr-img");
+const newsQrLabel = $<HTMLParagraphElement>("news-qr-label");
 
 // ---------------------------------------------------------------- 描画
 const canvas = $<HTMLCanvasElement>("avatar");
@@ -42,8 +52,13 @@ scene.add(light, new THREE.AmbientLight(0xffffff, 0.6));
 const avatar = new Avatar(scene, camera);
 
 function resize(): void {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
+  // 縦置き・横置き（お知らせの構図が変わる）。canvas の大きさは CSS で決まる（お知らせの紹介中は右 1/3・下の段）
+  document.body.classList.toggle(
+    "portrait",
+    ORIENT ? ORIENT === "portrait" : window.innerHeight > window.innerWidth,
+  );
+  const w = canvas.clientWidth || window.innerWidth;
+  const h = canvas.clientHeight || window.innerHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
@@ -85,6 +100,33 @@ function applyTheme(msg: ThemeMessage): void {
   bgCreditEl.textContent = credit;
   bgCreditEl.hidden = credit === "";
   console.info("テーマ", msg.name ?? msg.season);
+}
+
+// ---------------------------------------------------------------- お知らせの構図（WP11）
+const FADE_MS = 250;
+let layoutSeq = 0;
+
+/** 構図を切り替える（0.25 秒で消して、入れ替えて、0.25 秒で出す）。アバターは canvas の大きさだけが変わる */
+function applyLayout(msg: LayoutMessage): void {
+  const seq = ++layoutSeq;
+  document.body.classList.add("fading");
+  setTimeout(() => {
+    if (seq !== layoutSeq) return; // 続けて来たら最後のものだけ
+    const news = msg.mode === "news";
+    if (news) {
+      newsTitle.textContent = msg.title ?? "";
+      newsImage.hidden = !msg.image;
+      if (msg.image) newsImage.src = asset(msg.image.replace(/^\/edge\//, ""));
+      else newsImage.removeAttribute("src");
+      newsEl.classList.toggle("no-image", !msg.image);
+      newsQr.src = msg.qr ?? "";
+      newsQrLabel.textContent = msg.label ?? "";
+    }
+    newsEl.hidden = !news;
+    document.body.classList.toggle("layout-news", news);
+    resize();
+    document.body.classList.remove("fading");
+  }, FADE_MS);
 }
 
 // ---------------------------------------------------------------- 音声
@@ -169,6 +211,9 @@ function edgeId(): string {
 
 function handleMessage(msg: DownMessage): void {
   switch (msg.type) {
+    case "layout":
+      applyLayout(msg);
+      break;
     case "state":
       avatar.setState(msg.value);
       if (msg.value === "listening" || msg.value === "thinking") sourcesCaption.textContent = "";
@@ -266,13 +311,33 @@ async function start(): Promise<void> {
   if (link.isOpen) sendHello();
 }
 
-link.connect();
+/** 職員パネルのプレビュー: フロントから構図（とテーマ）を 1 回もらって描く。マイク・WebSocket は使わない */
+async function startPreview(id: string): Promise<void> {
+  statusEl.textContent = "プレビュー";
+  const r = await fetch(asset(`news/preview/${encodeURIComponent(id)}`), { cache: "no-store" });
+  if (!r.ok) {
+    statusEl.textContent = `プレビューを読めません（${r.status}）`;
+    return;
+  }
+  const msg = (await r.json()) as LayoutMessage & { theme?: ThemeMessage | null };
+  if (msg.theme) applyTheme(msg.theme);
+  assistantCaption.textContent = "（ここに読み上げの字幕が出ます）";
+  applyLayout(msg);
+}
+
+if (PREVIEW_ID) {
+  void startPreview(PREVIEW_ID);
+} else {
+  link.connect();
+}
 $<HTMLButtonElement>("reclaim-button").addEventListener("click", () => {
   replacedEl.hidden = true;
   link.connect(); // hello すると、今度はこちらが音声を受け持つ（前の画面が休止する）
 });
 // 自動再生が許されている（キオスク起動のフラグ付き）ならそのまま始める。そうでなければボタンを出す
-if (playbackCtx.state === "running") {
+if (PREVIEW_ID) {
+  // プレビューではマイクを開かない
+} else if (playbackCtx.state === "running") {
   void start();
 } else {
   startEl.hidden = false;
