@@ -61,11 +61,15 @@ seeds:
     exclude: *exclude
     scope_breadcrumbs: ["組織で情報を探す > 子育て支援課"]
   - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/224
+    use: lookup
+    why: 観光・企業立地・求人が中心で、窓口の手続きはほぼ無い（WP13。題名の引き上げ語の記事は dialogue）
     depth: 2
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
     scope_breadcrumbs: ["組織で情報を探す > 商工観光課"]
   - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/232
+    use: lookup
+    why: 支払・口座の事業者向けが多い（WP13）
     depth: 2
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
@@ -100,11 +104,15 @@ seeds:
     daily: true
   # 新着のお知らせ・トピックス
   - url: https://www.city.etajima.hiroshima.jp/cms/atom/news
+    use: lookup
+    why: 入札・人事から暮らしまで混在。急ぎの案内は WP11 のお知らせが受け持つ（WP13）
     depth: 1
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
     daily: true
   - url: https://www.city.etajima.hiroshima.jp/cms/atom/topics
+    use: lookup
+    why: 同上（WP13）
     depth: 1
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
@@ -118,6 +126,8 @@ seeds:
     daily: true
   # 広報えたじま（本文は PDF が多いので、取れるのは目次・お知らせの記事）
   - url: https://www.city.etajima.hiroshima.jp/cms/categories/show/29
+    use: lookup
+    why: 広報紙（WP13）
     depth: 2
     include: ["/cms/articles/show/\\d+$"]
     exclude: *exclude
@@ -126,6 +136,8 @@ seeds:
   # ---- 市以外の公的・準公的なソース（WP03 追加作業。robots.txt と利用条件を確認済み、docs/WP03_result.md）----
   # 江田島市観光協会: ブラウザで描画するサイト（STUDIO）なので Playwright で描画する。sitemap から行事・お知らせ・名所
   - url: https://etajima-kanko.com/sitemap.xml
+    use: lookup
+    why: 観光（WP13）
     sitemap: true
     depth: 1
     render: playwright
@@ -136,6 +148,8 @@ seeds:
     label: 観光協会のホームページ
   # 観光協会の行事・お知らせだけ（毎朝。子の sitemap に lastmod があるので、変わっていないページは取り直さない）
   - url: https://etajima-kanko.com/sitemap.xml
+    use: lookup
+    why: 観光（WP13）
     sitemap: true
     depth: 1
     render: playwright
@@ -146,12 +160,18 @@ seeds:
     daily: true
   # 江田島市社会福祉協議会（サイトポリシー: 出所を明示すれば引用・転載可）
   - url: https://etajima-syakyo.org/sitemap.xml
+    use: lookup
+    why: 事例・職員募集・予算決算・規約は会話に要らない。相談窓口のページだけ dialogue（WP13）
+    use_rules:
+      - {pattern: '^https://etajima-syakyo\.org/pages/(23|24|29|31|32|46|47|48|54|55|69)/?$', use: dialogue, why: 介護・障害・地域・権利擁護・暮らしのサポート・移動販売・見守り・サロン・安心生活・連絡先・心配ごと相談}
     sitemap: true
     depth: 1
     include: ['^https://etajima-syakyo\.org/(pages/\d+/?)?$']
     trust: semi
     label: 社会福祉協議会のホームページ
   - url: https://etajima-syakyo.org/pages/57?detail=1&b_id=727&view=list&block727_limit=20
+    use: lookup
+    why: ブログ的な記事（WP13）
     depth: 1
     include: ['^https://etajima-syakyo\.org/pages/\d+/?$']
     trust: semi
@@ -159,6 +179,10 @@ seeds:
     daily: true
   # 江田島市立図書館（各館の開館時間・休館日・行事）
   - url: https://www.library.etajima.hiroshima.jp/sitemap.xml
+    use: lookup
+    why: 新着・行事は「調べる」で。利用案内・開館は dialogue（WP13）
+    use_rules:
+      - {pattern: '^https://www\.library\.etajima\.hiroshima\.jp/(information|faq|minilibrary)?/?$', use: dialogue, why: 利用案内・よくある質問・ミニ図書館・トップ（施設の案内）}
     sitemap: true
     depth: 1
     include: ['^https://www\.library\.etajima\.hiroshima\.jp/(info/info-[\d-]+|event/event-\d+|library|information|faq|minilibrary|collection|dayori)?/?$']
@@ -169,6 +193,8 @@ seeds:
   # Dive! Hiroshima（広島県観光連盟と広島市の共同運営。旧ひろしま観光ナビ）。県全体なので、
   # 本文に「江田島市」を含む名所・行事だけ採る。約 4,300 ページあるので 1 晩 400 件まで、取ったページは 7 日間取り直さない
   - url: https://dive-hiroshima.com/sitemap.xml
+    use: lookup
+    why: 観光（WP13）
     sitemap: true
     depth: 1
     include: ['^https://dive-hiroshima\.com/(explore/\d+|events/events-\d+(-\d+)?)/$']
@@ -188,6 +214,10 @@ news:
     - {url: "https://www.city.etajima.hiroshima.jp/cms/atom/topics", type: atom}
     - {url: "https://www.city.etajima.hiroshima.jp/cms/atom/events", type: atom}
   include: ['^https://www\.city\.etajima\.hiroshima\.jp/cms/articles/show/\d+$']
+# ---- 会話で使う範囲（WP13 A）。区画の use（書かなければ dialogue）、区画の use_rules、拠点の use_rules（ここ）、
+# 題名の語の規則（kb/scope_rules.yaml）で、1 ページの用途を dialogue / lookup / exclude に決める。決め方は scope_rules.yaml の先頭
+# 江田島の市のサイトの記事は URL（/cms/articles/show/<番号>）で種類を見分けられないので、区画の use と題名の語で決める
+use_rules: []
 # 個人名を含みうるページを外す（議会・会議録・入札・人事・職員採用・市長の部屋・選挙・監査）
 exclude_breadcrumb_keywords: [議会, 会議録, 入札, 契約, 職員採用, 人事, 市長の部屋, 秘書室, 選挙, 監査, 合併協議会]
 exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]

@@ -22,6 +22,8 @@ seeds:
     exclude: *akiota_exclude
     daily: true
   - url: https://cs-akiota.or.jp/news/category/イベント/
+    use: lookup
+    why: 観光・道の駅（WP13）
     depth: 1
     include: ["/news/"]
     exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
@@ -29,6 +31,8 @@ seeds:
     label: あきおおたからのホームページ
     daily: true
   - url: https://cs-akiota.or.jp/special/category/観光/
+    use: lookup
+    why: 観光・道の駅（WP13）
     depth: 1
     include: ["/special/"]
     exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
@@ -44,22 +48,30 @@ seeds:
   # 就学援助（/site/kyoiku/17778.html）は本文が PDF の案内だけでチャンクにならないので入れない
   # 町の新着・重要なお知らせ・トピックス（RSS 1.0）。入札（list8）は入れない
   - url: https://www.akiota.jp/rss/10/list1.xml
+    use: lookup
+    why: 混在（10/24 の「協調学習」はここから）。急ぎの案内は WP11 のお知らせ。題名の引き上げ語の記事は dialogue（WP13）
     depth: 1
     include: ["/soshiki/", "/site/", "/life/"]
     exclude: *akiota_exclude
     daily: true
   - url: https://www.akiota.jp/rss/10/list3.xml
+    use: lookup
+    why: 混在（10/24 の「協調学習」はここから）。急ぎの案内は WP11 のお知らせ。題名の引き上げ語の記事は dialogue（WP13）
     depth: 1
     include: ["/soshiki/", "/site/", "/life/"]
     exclude: *akiota_exclude
     daily: true
   - url: https://www.akiota.jp/rss/10/list6.xml
+    use: lookup
+    why: 混在（10/24 の「協調学習」はここから）。急ぎの案内は WP11 のお知らせ。題名の引き上げ語の記事は dialogue（WP13）
     depth: 1
     include: ["/soshiki/", "/site/", "/life/"]
     exclude: *akiota_exclude
     daily: true
   # 道の駅 来夢とごうち（建て替えで休館中、令和10年3月再開予定。案内はあきおおたからに載る）
   - url: https://cs-akiota.or.jp/special/category/道の駅/
+    use: lookup
+    why: 観光・道の駅（WP13）
     depth: 1
     include: ["/special/", "/news/raimutogouchi"]
     exclude: ["/wp-admin/", "add-to-cart", "/cart", "/my-account"]
@@ -67,12 +79,16 @@ seeds:
     label: 道の駅のお知らせ
   # 安芸太田町社会福祉協議会
   - url: https://www.akiota-shakyo.jp/news/feed/
+    use: lookup
+    why: ブログ的な記事（WP13）
     depth: 1
     include: ['^https://www\.akiota-shakyo\.jp/news/\d+/?$']
     trust: semi
     label: 社会福祉協議会のホームページ
     daily: true
   - url: https://www.akiota-shakyo.jp/wp-sitemap.xml
+    use_rules:
+      - {pattern: '/(news|event)(/|$)', use: lookup, why: 社協だより・事業計画・行事（ブログ的な記事）}
     sitemap: true
     depth: 1
     include: ['^https://www\.akiota-shakyo\.jp/(news/\d+|event/\d+|gaiyo|jigyo(/[a-z]+)?|news|event)?/?$']
@@ -81,6 +97,8 @@ seeds:
     label: 社会福祉協議会のホームページ
   # Dive! Hiroshima（県の観光サイト）。本文に「安芸太田町」を含む名所・行事だけ
   - url: https://dive-hiroshima.com/sitemap.xml
+    use: lookup
+    why: 観光（WP13）
     sitemap: true
     depth: 1
     include: ['^https://dive-hiroshima\.com/(explore/\d+|events/events-\d+(-\d+)?)/$']
@@ -110,6 +128,21 @@ news:
     - {url: "https://www.akiota.jp/rss/10/list6.xml", type: rss}
   include: ['^https://www\.akiota\.jp/(soshiki|site|life)/.+\.html$']
   exclude: ["/site/gikai/", "/site/saiyou/", "/site/chocho-shitsu/", "/site/furusatonouzei/", "/soshiki/2/", "/soshiki/23/"]
+# ---- 会話で使う範囲（WP13 A）。課のページは RSS・くらしの区画からも入ってくるので、拠点の URL の規則で分ける（上から順に）。
+# final: true の規則はそこで確定。それ以外の規則は「既定」を差し替え、題名の語の規則（kb/scope_rules.yaml: exclude → dialogue への
+# 引き上げ）はその後に効く（総務課を lookup にしても、題名に「防災」「気象」の記事は dialogue）
+use_rules:
+  - {pattern: '/site/kyoiku/(8264|10011)\.html$', use: dialogue, final: true, why: 手続きナレッジの出典（就学援助・黎明館）}
+  - {pattern: '/soshiki/list7-', use: lookup, final: true, why: 町内求人情報の一覧（「求人がある」ことは言える。題名の exclude より先）}
+  - {pattern: '/site/userguide/|/soshiki/list[0-9]', use: exclude, final: true, why: サイトの使い方・新着一覧の一覧ページ}
+  - {pattern: '/soshiki/8/', use: lookup, why: 産業観光課（補助金・観光・職業紹介。職業紹介所は手続きナレッジの就労で答える）}
+  - {pattern: '/soshiki/25/', use: lookup, why: 道の駅推進チーム}
+  - {pattern: '/soshiki/5/', use: lookup, why: 企画DX課（計画・SNS。ライドシェア・もりカーは題名の引き上げで dialogue）}
+  - {pattern: '/soshiki/3/', use: lookup, why: 総務課（指定管理・計画・方針。防災気象情報は題名の引き上げで dialogue）}
+  - {pattern: '/soshiki/(18|22)/', use: lookup, why: 農業委員会・筒賀支所（委員名簿・プロジェクト。支所の窓口案内は題名の引き上げで dialogue）}
+  - {pattern: '/site/(ijyu|furusatonouzei|profile|kouhou|bbikou|morica)/', use: lookup, why: 移住・空き家、ふるさと納税、町のプロフィール、広報、ブロードバンド、地域通貨}
+  - {pattern: '/site/kyoiku/', use: lookup, why: 大会・事業・プロポーザルが多い}
+  - {pattern: '/life/3/', use: lookup, why: 事業者向け}
 exclude_breadcrumb_keywords: [議会, 会議録, 入札, 職員採用, 人事, 町長の部屋, 選挙]
 exclude_title_keywords: [議事録, 会議録, 入札, 人事異動, 職員採用, 叙勲, 褒章, 表彰, 議員, の皆様をご紹介]
 weather:

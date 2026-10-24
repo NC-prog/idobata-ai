@@ -664,6 +664,8 @@ class KnowledgeConfig:
     # 埋め込みは CPU（GPU の予備枠は姿勢推定と話者埋め込み用に残す）
     embed_device: str = "cpu"
     embed_threads: int = 4
+    # 用途（WP13）で絞って検索するとき、候補を何倍取ってから落とすか
+    use_filter_widen: int = 4
 
 
 @dataclass(frozen=True)

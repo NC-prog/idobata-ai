@@ -106,6 +106,9 @@ class KnowledgeBase:
             (pack_dir / "manifest.json").read_text(encoding="utf-8")
         )
         rows = pq.read_table(pack_dir / "chunks.parquet").to_pylist()
+        # 用途（WP13）。format 1（WP12 まで）のパックには use が無いので全部 dialogue とみなす
+        for r in rows:
+            r["use"] = r.get("use") or "dialogue"
         self._rows: list[dict[str, Any]] = rows
         self._index_of = {r["id"]: i for i, r in enumerate(rows)}
         self._bm25 = _BM25([f"{r['title']}\n{r['text']}" for r in rows], cfg.bm25_k1, cfg.bm25_b)
@@ -145,15 +148,28 @@ class KnowledgeBase:
             return None
         return cls(pack, cfg)
 
-    def search(self, query: str) -> SearchResult:
-        """来訪者の発話で参考資料を探す（同期、CPU）。"""
+    def use_counts(self) -> dict[str, int]:
+        """用途ごとのチャンク数。"""
+        out: dict[str, int] = defaultdict(int)
+        for r in self._rows:
+            out[str(r["use"])] += 1
+        return dict(out)
+
+    def search(self, query: str, uses: frozenset[str] | None = None) -> SearchResult:
+        """来訪者の発話で参考資料を探す（同期、CPU）。uses を渡すと、その用途のチャンクだけ（WP13）。"""
         t0 = time.perf_counter()
         cfg = self._cfg
         vec = self._model.encode([self._query_prefix + query], normalize_embeddings=True)[0]
-        hits = self._vector_query(vec).limit(cfg.vector_candidates).to_list()
+        # 用途で絞るときは、候補を多めに取ってから落とす（同じ順位の付け方のまま）
+        widen = 1 if uses is None else cfg.use_filter_widen
+        hits = self._vector_query(vec).limit(cfg.vector_candidates * widen).to_list()
+        if uses is not None:
+            hits = [h for h in hits if self._rows[self._index_of[h["id"]]]["use"] in uses][: cfg.vector_candidates]
         vec_rank = {self._index_of[h["id"]]: (r, 1.0 - float(h["_distance"]))
                     for r, h in enumerate(hits)}
-        bm25 = self._bm25.search(query, cfg.bm25_candidates)
+        bm25 = self._bm25.search(query, cfg.bm25_candidates * widen)
+        if uses is not None:
+            bm25 = [(d, sc) for d, sc in bm25 if self._rows[d]["use"] in uses][: cfg.bm25_candidates]
         bm_rank = {doc: (r, s) for r, (doc, s) in enumerate(bm25)}
 
         fused: dict[int, float] = defaultdict(float)
@@ -246,11 +262,11 @@ class KnowledgeStore:
             logger.info("知識パックを差し替えました: %s", Path(key[0]).parent.name)
         return True
 
-    def search(self, query: str) -> SearchResult:
+    def search(self, query: str, uses: frozenset[str] | None = None) -> SearchResult:
         kb = self.current  # 差し替えの途中でも、取った版で最後まで検索する
         if kb is None:
             return SearchResult([], 0.0)
-        return kb.search(query)
+        return kb.search(query, uses)
 
 
 class Weather:

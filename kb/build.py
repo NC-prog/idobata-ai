@@ -58,6 +58,7 @@ CHUNK_OVERLAP = 100
 CHUNK_DROP_BELOW = 40  # これより短い断片は捨てる（ナビの残りなど）
 
 LANCE_TABLE = "chunks"
+PACK_FORMAT = 2
 HTTP_TIMEOUT_SEC = 20.0
 RENDER_TIMEOUT_MS = 30000
 SITEMAP_MAX_DEPTH = 2
@@ -111,6 +112,11 @@ class Seed:
     label: str = ""
     # 更新の速い区画（お知らせ・イベント・広報・防災・休館日）。毎朝の --daily では、これだけを深さ 1 で取る
     daily: bool = False
+    # 用途（WP13）: dialogue（会話の参考資料。既定）/ lookup（「調べる」のときだけ）/ exclude（集めない）。why は理由のメモ
+    use: str = "dialogue"
+    why: str = ""
+    # 区画の中で URL の型で用途を変える規則（[{pattern, use, why}]。上から順に、最初に当たったもの）
+    use_rules: list[dict[str, str]] = field(default_factory=list)
 
     def matches(self, patterns: list[str], url: str) -> bool:
         return any(re.search(p, url) for p in patterns)
@@ -138,6 +144,72 @@ class Sources:
     max_fetches: int
     # 調べる（WP04）の取得先。翌朝、来訪者の検索語（seed_queue）をここで探す
     lookup: list[dict[str, Any]] = field(default_factory=list)
+    # 拠点全体の用途の規則（URL の正規表現。区画の use_rules の次に見る。WP13）
+    use_rules: list[dict[str, str]] = field(default_factory=list)
+    # 題名の語での用途の規則（kb/scope_rules.yaml。全拠点共通）
+    scope: ScopeRules = field(default_factory=lambda: ScopeRules((), ()))
+
+
+USES = ("dialogue", "lookup", "exclude")
+
+
+@dataclass(frozen=True)
+class ScopeRules:
+    """題名の語での用途の規則（kb/scope_rules.yaml）。"""
+
+    exclude_title_words: tuple[str, ...]
+    dialogue_title_words: tuple[str, ...]
+
+
+def load_scope_rules(path: Path | None = None) -> ScopeRules:
+    data = yaml.safe_load((path or KB_DIR / "scope_rules.yaml").read_text(encoding="utf-8")) or {}
+    return ScopeRules(tuple(str(w) for w in data.get("exclude_title_words") or []),
+                      tuple(str(w) for w in data.get("dialogue_title_words") or []))
+
+
+def _check_rules(rules: list[dict[str, Any]], where: str) -> list[dict[str, str]]:
+    out = []
+    for r in rules:
+        use = str(r.get("use", ""))
+        if use not in USES or not r.get("pattern"):
+            raise ValueError(f"{where} の use_rules は pattern と use（{'/'.join(USES)}）が要ります: {r}")
+        re.compile(str(r["pattern"]))
+        out.append({"pattern": str(r["pattern"]), "use": use, "why": str(r.get("why", "")),
+                    "final": "1" if r.get("final") else ""})
+    return out
+
+
+def decide_use(url: str, title: str, seed: Seed | None, src: Sources) -> tuple[str, str]:
+    """1 ページの用途と、決めた規則（WP13 A）。
+
+    確定する URL の規則（final） → 題名の exclude → 題名の引き上げ（既定が lookup のとき dialogue に） → 既定。
+    既定は、URL の規則（区画 → 拠点の順で最初に当たったもの。final でないもの）があればその use、無ければ区画の use。
+    URL の規則で lookup にした課（総務課・企画 DX 課など）でも、題名の引き上げ語の記事（防災気象情報・ライドシェア）は dialogue になる。
+    区画の分からないページ（夜に回された「調べる」の検索語で足したページなど）の既定は lookup。
+    """
+    default = seed.use if seed is not None else "lookup"
+    basis = "区画の既定" if seed is not None else "区画なし（調べるで足したページ）"
+    for rule in (seed.use_rules if seed is not None else []) + src.use_rules:
+        if re.search(rule["pattern"], url):
+            if rule.get("final"):
+                return rule["use"], f"URL の規則（確定） {rule['pattern']}"
+            default, basis = rule["use"], f"URL の規則 {rule['pattern']}"
+            break
+    hit = next((w for w in src.scope.exclude_title_words if w in title), None)
+    if hit:
+        return "exclude", f"題名に「{hit}」"
+    up = next((w for w in src.scope.dialogue_title_words if w in title), None)
+    if up and default == "lookup":
+        return "dialogue", f"題名に「{up}」（引き上げ。元は{basis}）"
+    return default, basis
+
+
+def _seed(raw: dict[str, Any], i: int) -> Seed:
+    seed = Seed(**raw)
+    if seed.use not in USES:
+        raise ValueError(f"区画 {i}（{seed.url}）の use は {'/'.join(USES)} のどれか: {seed.use}")
+    seed.use_rules = _check_rules(seed.use_rules, f"区画 {i}（{seed.url}）")
+    return seed
 
 
 def load_sources(site: str) -> Sources:
@@ -146,12 +218,14 @@ def load_sources(site: str) -> Sources:
     return Sources(
         site=data["site"],
         allow_domains=list(data["allow_domains"]),
-        seeds=[Seed(**s) for s in data["seeds"]],
+        seeds=[_seed(s, i) for i, s in enumerate(data["seeds"])],
         exclude_title_keywords=list(data.get("exclude_title_keywords", [])),
         exclude_breadcrumb_keywords=list(data.get("exclude_breadcrumb_keywords", [])),
         default_trust=str(data.get("default_trust", "official")),
         default_label=str(data.get("default_label", "")),
         lookup=[dict(x) for x in data.get("lookup") or []],
+        use_rules=_check_rules(list(data.get("use_rules") or []), f"{site} の拠点"),
+        scope=load_scope_rules(),
         weather=dict(data.get("weather", {})),
         rate_limit_sec=float(crawl.get("rate_limit_sec", 1.0)),
         user_agent=str(crawl.get("user_agent", "idobata-ai-kb/0.1")),
@@ -177,6 +251,9 @@ class Page:
     breadcrumbs: list[str] = field(default_factory=list)
     trust: str = ""
     label: str = ""
+    # 用途（WP13）と、それを決めた規則
+    use: str = "dialogue"
+    use_why: str = ""
 
 
 class Crawler:
@@ -305,7 +382,7 @@ class Crawler:
             logger.warning("sitemap を取得できません: %s", url)
             return []
         out: list[str] = []
-        for block in re.findall(r"<(?:url|sitemap)>(.*?)</(?:url|sitemap)>", r.text, re.S):
+        for block in re.findall(r"<(?:url|sitemap)>(.*?)</(?:url|sitemap)>", r.text, re.DOTALL):
             loc = re.search(r"<loc>\s*([^<\s]+)\s*</loc>", block)
             if not loc:
                 continue
@@ -392,8 +469,8 @@ class Crawler:
         return page
 
 
-_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
-_HREF_RE = re.compile(r"""href\s*=\s*["']([^"'#][^"']*)["']""", re.I)
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.DOTALL | re.IGNORECASE)
+_HREF_RE = re.compile(r"""href\s*=\s*["']([^"'#][^"']*)["']""", re.IGNORECASE)
 # サイト名の接尾辞（「… - 江田島市役所ホームページ」など）を落とす
 _TITLE_SUFFIX_RE = re.compile(r"\s*[-|｜–—]\s*[^-|｜–—]*(ホームページ|公式サイト|公式ホームページ)\s*$")
 
@@ -465,6 +542,8 @@ def crawl(src: Sources, crawler: Crawler, daily: bool = False) -> list[Page]:
     for seed in src.seeds:
         if daily and not seed.daily:
             continue
+        if seed.use == "exclude":
+            continue  # 集めない区画（理由は why に書く）
         if daily:  # 毎朝は更新の速い区画だけを深さ 1 で
             seed = dataclasses.replace(seed, depth=min(seed.depth, 1))
         seen: set[str] = set()
@@ -501,9 +580,12 @@ def crawl(src: Sources, crawler: Crawler, daily: bool = False) -> list[Page]:
             if seed.require_text and not any(k in page.text for k in seed.require_text):
                 is_target = False
             if is_target and page.text and url not in pages:
-                page.trust = seed.trust or src.default_trust
-                page.label = seed.label or src.default_label
-                pages[url] = page
+                use, why = decide_use(url, clean_title(page.title), seed, src)
+                if use != "exclude":
+                    page.trust = seed.trust or src.default_trust
+                    page.label = seed.label or src.default_label
+                    page.use, page.use_why = use, why
+                    pages[url] = page
             if depth < seed.depth:
                 for link in page.links:
                     if (link not in seen and crawler.allowed_domain(link)
@@ -562,6 +644,7 @@ def pages_for_queries(src: Sources, crawler: Crawler, queries: list[str]) -> lis
                 if _overlap(query, f"{page.title}\n{page.text}") >= QUEUE_MIN_OVERLAP:
                     page.trust = str(entry.get("trust") or src.default_trust)
                     page.label = str(entry.get("label") or src.default_label)
+                    page.use, page.use_why = "lookup", "夜に回された「調べる」の検索語"  # WP13
                     found.setdefault(page.url, page)
                     hits += 1
                     if hits >= QUEUE_MAX_PAGES_PER_QUERY:
@@ -570,6 +653,23 @@ def pages_for_queries(src: Sources, crawler: Crawler, queries: list[str]) -> lis
                 break
         logger.info("夜に回された検索語 1 件: %d ページ", hits)  # 検索語そのものはログに出さない
     return list(found.values())
+
+
+def seed_of(page: Page, crawler: Crawler, src: Sources) -> Seed | None:
+    """ページを採用しうる最初の区画（取得の順。集めない区画は除く）。"""
+    for seed in src.seeds:
+        if seed.use == "exclude" or not crawler.allowed_domain(page.url):
+            continue
+        if urlparse(seed.url).hostname != urlparse(page.url).hostname:
+            continue
+        if seed.include and not seed.matches(seed.include, page.url):
+            continue
+        if seed.matches(seed.exclude, page.url) or not seed.in_scope(page):
+            continue
+        if seed.require_text and not any(k in page.text for k in seed.require_text):
+            continue
+        return seed
+    return None
 
 
 def pages_from_cache(pack: Path, crawler: Crawler, src: Sources) -> list[Page]:
@@ -589,7 +689,13 @@ def pages_from_cache(pack: Path, crawler: Crawler, src: Sources) -> list[Page]:
             page.trust, page.label = meta[url]
             if not page.label:
                 page.trust, page.label = src.default_trust, src.default_label
-            if not _excluded(page, src):
+            if _excluded(page, src):
+                continue
+            # 用途（WP13）: 取ったときの区画は残っていないので、取得の順に区画の条件（ドメイン・include・パンくず・本文の語）に
+            # 先に当たった区画とみなす。どれにも当たらなければ「調べる」で足したページ（lookup）
+            seed = seed_of(page, crawler, src)
+            page.use, page.use_why = decide_use(url, clean_title(page.title), seed, src)
+            if page.use != "exclude":
                 pages.append(page)
     logger.info("キャッシュから %d ページ（パックには %d ページ）", len(pages), len(urls))
     return pages
@@ -618,6 +724,8 @@ class Chunk:
     label: str = ""
     # 元のページの本文ハッシュ（毎朝の差分で、変わっていないページのチャンクとベクトルを使い回す）
     page_hash: str = ""
+    # 用途（WP13）: dialogue / lookup。exclude のページはチャンクにしない
+    use: str = "dialogue"
 
     def embed_text(self) -> str:
         return f"{DOC_PREFIX}{self.title}\n{self.text}"
@@ -686,12 +794,12 @@ REDACTED = "（氏名省略）"
 _ROLE_NAME_RE = re.compile(
     rf"({_ROLE}(?:（[^）]{{1,6}}）{_ROLE})?(?:[ 　:：]*(?={_NAME})|[ 　:：]+(?=[一-龥々]{{2,3}}[一-龥々ぁ-ゖ]{{1,3}}(?:$|[\s、。／/（(【]))))"
     rf"(?:{_NAME}|[一-龥々]{{2,3}}[一-龥々ぁ-ゖ]{{1,3}})",
-    re.M,
+    re.MULTILINE,
 )
 # 2) 敬称・役職が後ろに付く氏名（「山田 太郎さん」「山田 太郎 議員」）
 _NAME_TITLE_RE = re.compile(rf"(?<![一-龥々]){_NAME}(?=[ 　]*(?:さん|氏|様|先生|議員|委員))")
 # 3) 氏名だけを ／・、 で並べた行（出演者・MC の一覧）
-_NAME_LIST_RE = re.compile(rf"^[ 　]*{_NAME}(?:[ 　]*[／/・、,，][ 　]*{_NAME})+[ 　]*$", re.M)
+_NAME_LIST_RE = re.compile(rf"^[ 　]*{_NAME}(?:[ 　]*[／/・、,，][ 　]*{_NAME})+[ 　]*$", re.MULTILINE)
 
 
 # 5) 空白なしで敬称が付く氏名（「小杉怜子さん」）。漢字 3〜5 字だけ（「皆さん」「社協さん」「家族の皆様」は当たらない）
@@ -733,7 +841,7 @@ def make_chunks(pages: list[Page], seen_text: set[str] | None = None) -> list[Ch
             seen_text.add(key)
             cid = hashlib.sha1(f"{page.url}#{i}".encode()).hexdigest()[:16]
             chunks.append(Chunk(cid, page.url, page.title, page.fetched_at, text,
-                                page.trust, page.label, phash))
+                                page.trust, page.label, phash, page.use))
     return chunks
 
 
@@ -832,7 +940,8 @@ def load_previous(pack: Path) -> tuple[list[Chunk], dict[str, Any]]:
         return [], {}
     rows = pq.read_table(pack / "chunks.parquet").to_pylist()
     chunks = [Chunk(r["id"], r["source_url"], r["title"], r["fetched_at"], r["text"],
-                    r.get("trust") or "", r.get("label") or "", r.get("page_hash") or "")
+                    r.get("trust") or "", r.get("label") or "", r.get("page_hash") or "",
+                    r.get("use") or "dialogue")  # format 1（WP12 まで）のパックは全部 dialogue
               for r in rows]
     vectors: dict[str, Any] = {}
     try:
@@ -866,6 +975,10 @@ def merge_daily(previous: list[Chunk], pages: list[Page]) -> tuple[list[Chunk], 
         candidates.append(page)
     replaced = {p.url for p in candidates if p.url in by_url}
     kept = [c for c in previous if c.source_url not in replaced]
+    # 本文が変わっていないページも、用途の規則（WP13）が変わっていれば今回の判定に合わせる（ベクトルはそのまま使い回せる）
+    use_of = {p.url: p.use for p in pages}
+    kept = [dataclasses.replace(c, use=use_of[c.source_url]) if use_of.get(c.source_url, c.use) != c.use else c
+            for c in kept]
     seen_text = {hashlib.sha1(c.text.encode()).hexdigest() for c in kept}
     new_chunks: list[Chunk] = []
     for page in candidates:
@@ -913,17 +1026,30 @@ def embed_and_save(chunks: list[Chunk], out: Path, reuse: dict[str, Any] | None 
         "trust": [c.trust for c in chunks],
         "label": [c.label for c in chunks],
         "page_hash": [c.page_hash for c in chunks],
+        "use": [c.use for c in chunks],
     })
     pq.write_table(table, out / "chunks.parquet")
     dim = len(next(v for v in vectors if v is not None))
     db = lancedb.connect(str(out / "index.lancedb"))
     db.create_table(
         LANCE_TABLE,
-        data=pa.table({"id": table["id"], "vector": pa.array(
+        data=pa.table({"id": table["id"], "use": table["use"], "vector": pa.array(
             [list(v) for v in vectors], type=pa.list_(pa.float32(), dim))}),
         mode="overwrite",
     )
     return stats
+
+
+def use_counts(chunks: list[Chunk]) -> dict[str, dict[str, int]]:
+    """用途ごとのページ数・チャンク数（manifest と結果文書の表に使う）。"""
+    out: dict[str, dict[str, int]] = {}
+    pages: dict[str, set[str]] = {}
+    for c in chunks:
+        out.setdefault(c.use, {"pages": 0, "chunks": 0})["chunks"] += 1
+        pages.setdefault(c.use, set()).add(c.source_url)
+    for use, urls in pages.items():
+        out[use]["pages"] = len(urls)
+    return out
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -1009,6 +1135,7 @@ def build_news(src: Sources, crawler: Crawler, root: Path, pack: Path) -> None:
         from news_classify import NightLLM, classify
         from news_collect import collect, link_news, store_dir
         from news_summarize import SpeechMeter, summarize
+
         from src.config import config as server_config
 
         store = store_dir(root, src.site)
@@ -1128,12 +1255,16 @@ def main() -> int:
     embed_stats = embed_and_save(chunks, staging, reuse)
     shutil.copy2(pack / "weather.json", staging / "weather.json")
     from news_collect import link_news, store_dir
+
     from src.config import config as server_config
 
     link_news(staging, store_dir(root, args.site), server_config.news)
     n_pages = len({c.source_url for c in chunks})
     write_json(staging / "manifest.json", {
         "site": args.site,
+        # パックの形式（WP13 で 2: チャンクと LanceDB の表に use。1 は use が無く、読む側は全部 dialogue とみなす）
+        "format": PACK_FORMAT,
+        "use_counts": use_counts(chunks),
         "generated_at": datetime.now(JST).isoformat(timespec="seconds"),
         "mode": "daily" if args.daily else ("from-cache" if args.from_cache else "full"),
         "pages": n_pages,
