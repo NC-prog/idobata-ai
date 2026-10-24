@@ -61,6 +61,7 @@ from .site_context import (
 )
 from .speaker import SpeakerClusters, SpeakerEmbedder
 from .speech_gate import SpeechGate
+from .speech_meter import SpeechMeter
 from .speech_output import (
     EdgeSpeaker,
     LocalSpeaker,
@@ -283,7 +284,9 @@ class VoiceLoop:
             return Dialogue(llm, facility=facility, avatar_name=config.actions.avatar_name,
                             persona=load_persona(config.persona))
 
-        return NewsPanel(self._news, checker, config.dialogue, config.news)
+        # 「確認済みとして保存」の長さの検査に、夜の要約と同じ VOICEVOX の測り方を使う（WP13）
+        meter = SpeechMeter()
+        return NewsPanel(self._news, checker, config.dialogue, config.news, speech_seconds=meter.seconds)
 
     def _procedure_panel(self, llm: LLMClient, facility: Facility | None) -> ProcedurePanel | None:
         """職員パネルの「手続き」タブ（WP09）。想定問答は、その手続きだけを承認済みにした対話に通す。"""

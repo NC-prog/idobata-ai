@@ -334,3 +334,16 @@ def test_staff_edited_english_hold_is_not_touched(tmp_path: Path) -> None:
     save_record(tmp_path, r)
     stats = news_summarize.summarize(tmp_path, "akiota", _LLM([]), None, CFG, now=NOW)  # type: ignore[arg-type]
     assert stats["rejudged"] == 0 and load_records(tmp_path)[0].summary_checks["reasons"] == ["英単語"]
+
+
+def test_verified_summary_is_not_rechecked_at_night(tmp_path: Path) -> None:
+    # 職員が確認済みとして保存した要約は、本文が変わっても夜に掛け直さない（印だけ。WP13）
+    staff = "町道津浪巡回線は、11月10日から11月14日まで終日全面通行止めです。料金は500円です。"
+    r = _record(title="通行止めのお知らせ", body=BODY, relevance="introduce", summary=staff, edited_by_staff=True,
+                verified_by="staff", verified_at="2026-10-24T10:00:00+09:00", verified_hash="old",
+                summarized_hash="old", content_hash="new", summary_checks={"result": "ok", "reasons": []})
+    save_record(tmp_path, r)
+    stats = news_summarize.summarize(tmp_path, "akiota", _LLM([]), None, CFG, now=NOW)  # type: ignore[arg-type]
+    got = load_records(tmp_path)[0]
+    assert got.summary == staff and got.summary_checks["result"] == "ok" and stats["staff"] == 1
+    assert got.verified and got.verified_stale

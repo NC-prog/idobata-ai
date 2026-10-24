@@ -7,16 +7,15 @@ introduce の記事だけ、LLM に 90〜120 字・2〜3 文の話し言葉（�
 VOICEVOX で合成した長さ（文ごとに合成して足す。WAV は保存しない）が speech_min_sec〜speech_max_sec に収まらなければ
 1 回だけ書き直させる。どれかで引っかかれば summary_checks を held にして紹介しない（職員パネルで直せる）。
 職員が直した要約（edited_by_staff）は書き直さず、本文が変わったら安全装置だけ掛け直す。
+職員が確認済みとして保存した要約（verified_by）は掛け直しもしない（本文が変わったら職員パネルに印。WP13）。
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import logging
 import re
 import sys
-import time
 import wave
 from datetime import date, datetime
 from pathlib import Path
@@ -31,7 +30,7 @@ if str(SERVER_DIR) not in sys.path:
 from news_classify import NightLLM
 
 from src.config import NewsConfig, config
-from src.dialogue import Dialogue, speech_text
+from src.dialogue import Dialogue
 from src.knowledge import JST
 from src.news import (
     NewsRecord,
@@ -43,6 +42,7 @@ from src.news import (
 )
 from src.persona import load_persona
 from src.site_context import load_facility
+from src.speech_meter import SpeechMeter
 
 logger = logging.getLogger("kb.news")
 
@@ -72,44 +72,6 @@ def make_checker(site: str, now: datetime | None = None) -> Dialogue:
 def checks_for(summary: str, r: NewsRecord, checker: Dialogue, today: date) -> list[str]:
     return summary_problems(summary, r, checker, today, re.compile(config.dialogue.grounding_claim_pattern),
                             re.compile(config.news.summary_future_pattern))
-
-
-class SpeechMeter:
-    """VOICEVOX で合成した長さ（秒）。文ごとに合成して足す（読み上げも文単位で合成する）。"""
-
-    def __init__(self) -> None:
-        self.cfg = config.voicevox
-        self.client = httpx.Client(base_url=self.cfg.base_url, timeout=self.cfg.timeout)
-
-    def _post(self, path: str, **kwargs: object) -> httpx.Response:
-        last: Exception | None = None
-        for attempt in range(self.cfg.max_retries + 1):
-            try:
-                r = self.client.post(path, **kwargs)  # type: ignore[arg-type]
-                r.raise_for_status()
-                return r
-            except httpx.HTTPError as exc:
-                last = exc
-                time.sleep(self.cfg.retry_wait_sec * (attempt + 1))
-        raise RuntimeError(f"VOICEVOX に繋がりません: {last}")
-
-    def seconds(self, text: str) -> float:
-        total = 0.0
-        for sentence in re.split(r"(?<=[。！？!?])", text):
-            spoken = speech_text(sentence)
-            if not spoken:
-                continue
-            q = self._post("/audio_query", params={"text": spoken, "speaker": self.cfg.speaker_id}).json()
-            q.update(speedScale=self.cfg.speed_scale, pitchScale=self.cfg.pitch_scale,
-                     intonationScale=self.cfg.intonation_scale, volumeScale=self.cfg.volume_scale,
-                     postPhonemeLength=self.cfg.post_phoneme_length)
-            wav = self._post("/synthesis", params={"speaker": self.cfg.speaker_id}, json=q).content
-            with wave.open(io.BytesIO(wav)) as w:
-                total += w.getnframes() / w.getframerate()
-        return round(total, 1)
-
-    def close(self) -> None:
-        self.client.close()
 
 
 def clean_summary(text: str, cfg: NewsConfig) -> str:
@@ -256,7 +218,13 @@ def summarize(store: Path, site: str, llm: NightLLM, meter: SpeechMeter | None, 
         if r.expired(at.date()):
             stats["expired"] += 1
             continue
-        if r.edited_by_staff:
+        if r.verified:
+            # 職員が確認済みとして保存した要約は、夜の再判定で上書きしない（手続きナレッジの承認と同じ考え方）。
+            # 本文が変わったら verified_stale の印が職員パネルに出る（要約は使い続ける）
+            if r.verified_stale:
+                logger.info("確認済みの要約の記事の本文が変わりました（職員パネルに印）: %s", r.id)
+            stats["staff"] += 1
+        elif r.edited_by_staff:
             if r.summarized_hash != r.content_hash:
                 recheck_staff_summary(r, checker, at.date())
                 save_record(store, r)

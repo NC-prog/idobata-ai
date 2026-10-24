@@ -42,11 +42,14 @@ class SummaryRejected(ValueError):
 
 class NewsPanel:
     def __init__(self, book: NewsBook, checker: Callable[[], TextChecker], dialogue_cfg: DialogueConfig,
-                 cfg: NewsConfig, today: Callable[[], date] = lambda: datetime.now(JST).date()) -> None:
+                 cfg: NewsConfig, today: Callable[[], date] = lambda: datetime.now(JST).date(),
+                 speech_seconds: Callable[[str], float] | None = None) -> None:
         self.book = book
         self.checker = checker
         self.cfg = cfg
         self.today = today
+        # 読み上げの長さ（秒）を測る（VOICEVOX。「確認済みとして保存」の長さの検査に使う。無ければ字数だけ）
+        self.speech_seconds = speech_seconds
         self._claim_re = re.compile(dialogue_cfg.grounding_claim_pattern)
         self._future_re = re.compile(cfg.summary_future_pattern)
 
@@ -56,7 +59,7 @@ class NewsPanel:
                 "relevance": r.relevance, "expires_at": r.expires_at, "expired": r.expired(today),
                 "shown_count": r.shown_count, "has_image": bool(r.image), "image_hidden": r.image_hidden,
                 "candidate": is_candidate(r, today), "reasons": r.summary_checks.get("reasons", []),
-                "edited_by_staff": r.edited_by_staff}
+                "edited_by_staff": r.edited_by_staff, "verified": r.verified, "verified_stale": r.verified_stale}
 
     def rows(self, status: str | None = None, category: str | None = None,
              include_skip: bool = False) -> list[dict[str, Any]]:
@@ -115,17 +118,50 @@ class NewsPanel:
         return summary_problems(summary, self._get(rid), self.checker(), self.today(), self._claim_re,
                                 self._future_re)
 
-    def edit_summary(self, rid: str, summary: str, by: str) -> dict[str, Any]:
-        """要約を直す。安全装置に引っかかる文は保存しない（SummaryRejected に理由）。"""
+    def length_problems(self, text: str) -> tuple[list[str], float | None]:
+        """長さの検査（字数と読み上げの秒数。夜の要約と同じ範囲）。"""
+        cfg = self.cfg
+        problems: list[str] = []
+        n = len(re.sub(r"\s", "", text))
+        if not cfg.summary_min_chars <= n <= cfg.summary_max_chars:
+            problems.append(f"長さ（{n} 字。{cfg.summary_min_chars}〜{cfg.summary_max_chars} 字）")
+        sec: float | None = None
+        if self.speech_seconds is not None:
+            try:
+                sec = self.speech_seconds(text)
+            except RuntimeError:
+                problems.append("読み上げの長さを測れません（VOICEVOX）")
+        if sec is not None and not cfg.speech_min_sec <= sec <= cfg.speech_max_sec:
+            problems.append(f"読み上げ {sec} 秒（{cfg.speech_min_sec:g}〜{cfg.speech_max_sec:g} 秒）")
+        return problems, sec
+
+    def edit_summary(self, rid: str, summary: str, by: str, verified: bool = False) -> dict[str, Any]:
+        """要約を直す。安全装置に引っかかる文は保存しない（SummaryRejected に理由）。
+
+        verified（「確認済みとして保存」）: 職員が記事と照らして確かめたものとして、日付・期限・金額・支払方法の本文照合だけを外し、
+        長さ（字数・読み上げの秒数）を足して見る。手続きナレッジの「承認」と同じく、人が確かめたものは機械の照合より上に置く。
+        """
         r = self._get(rid)
         text = re.sub(r"\s*\n\s*", "", summary.strip())
         problems = self.check(rid, text)
+        sec: float | None = None
+        skipped: list[str] = []
+        if verified:
+            skipped = [p for p in problems if p in self.cfg.verified_skip_reasons]
+            problems = [p for p in problems if p not in self.cfg.verified_skip_reasons]
+            length, sec = self.length_problems(text)
+            problems += length
         if problems:
             raise SummaryRejected(problems)
         r.summary = text
         r.edited_by_staff, r.edited_by = True, by
-        r.summary_checks = {"result": "ok", "reasons": [], "speech_sec": None, "by": "staff",
-                            "checked_at": datetime.now(JST).isoformat(timespec="seconds")}
+        now = datetime.now(JST).isoformat(timespec="seconds")
+        r.summary_checks = {"result": "ok", "reasons": [], "speech_sec": sec, "by": "staff_verified" if verified else "staff",
+                            "checked_at": now, **({"skipped": skipped} if skipped else {})}
+        if verified:
+            r.verified_by, r.verified_at, r.verified_hash = by, now, r.content_hash
+        else:
+            r.verified_by, r.verified_at, r.verified_hash = "", "", ""  # ふつうに直したら確認済みの印は外す
         r.summarized_hash = r.content_hash
         refresh_status(r)
         self.book.save(r)

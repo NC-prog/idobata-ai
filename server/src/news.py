@@ -88,6 +88,11 @@ class NewsRecord:
     shown_count: int = 0
     edited_by_staff: bool = False
     edited_by: str = ""
+    # 職員が「確認済みとして保存」した（WP13）: ログイン名・日時・そのときの本文のハッシュ。
+    # 日付・期限・金額・支払方法の本文照合を外して保存し、夜の再判定で上書きしない（手続きナレッジの「承認」と同じ考え方）
+    verified_by: str = ""
+    verified_at: str = ""
+    verified_hash: str = ""
     label: str = ""  # 出どころの言い方（町のホームページ など）
     # 分類・要約をした本文のハッシュ（content_hash と違えば夜に作り直す）
     classified_hash: str = ""
@@ -96,6 +101,16 @@ class NewsRecord:
     @property
     def held(self) -> bool:
         return self.summary_checks.get("result") == "held"
+
+    @property
+    def verified(self) -> bool:
+        """職員が確認済みとして保存した要約か。"""
+        return bool(self.verified_by)
+
+    @property
+    def verified_stale(self) -> bool:
+        """確認済みの後に記事の本文が変わった（職員に確かめ直してもらう印。要約は使い続ける）。"""
+        return self.verified and self.verified_hash != self.content_hash
 
     def expired(self, today: date) -> bool:
         return bool(self.expires_at) and date.fromisoformat(self.expires_at) <= today

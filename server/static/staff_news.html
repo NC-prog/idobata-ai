@@ -22,6 +22,7 @@
   .st-auto { background:var(--ok); }
   .mut { color:var(--mut); font-size:12px; }
   .warn { color:#b00020; }
+  .ok { color:#1b5e20; }
   .count-held { color:#b00020; font-weight:bold; }
   .fetch { margin:6px 0; font-size:14px; }
   .fetch.ng { color:#b00020; font-weight:bold; }
@@ -83,7 +84,7 @@ async function loadList() {
       <td>${esc(r.title)}${r.relevance === "skip" ? '<div class="mut">紹介しない</div>' : ""}${r.candidate ? '<div class="mut">候補</div>' : ""}</td>
       <td>${esc(r.published)}</td>
       <td>${esc(r.category)}</td>
-      <td class="st-${esc(r.status)}">${esc(r.status_label)}${r.reasons.length ? `<div class="mut">${esc(r.reasons.join("・"))}</div>` : ""}</td>
+      <td class="st-${esc(r.status)}">${esc(r.status_label)}${r.verified ? `<div class="${r.verified_stale ? "warn" : "ok"}">職員確認${r.verified_stale ? "（要再確認）" : ""}</div>` : ""}${r.reasons.length ? `<div class="mut">${esc(r.reasons.join("・"))}</div>` : ""}</td>
       <td>${r.expired ? '<span class="mut">期限切れ</span>' : esc(r.expires_at)}</td>
       <td>${r.shown_count}</td>
       <td>${r.has_image ? (r.image_hidden ? '<span class="mut">出さない</span>' : "あり") : '<span class="mut">なし</span>'}</td>
@@ -105,8 +106,10 @@ async function openDetail(id) {
     <textarea id="summary">${esc(d.summary)}</textarea>
     <div class="mut">安全装置: ${checks.result === "held" ? `<span class="warn">保留（${esc(reasons)}）</span>` : "通っています"}
       ${checks.speech_sec ? `・読み上げ ${checks.speech_sec} 秒` : ""}${d.edited_by_staff ? `・職員が直した（${esc(d.edited_by)}）` : ""}</div>
+    ${d.verified_by ? `<div class="${d.verified_stale ? "warn" : "ok"}">職員確認（${esc(d.verified_by)}・${esc(d.verified_at)}）${d.verified_stale ? "：確認の後に記事の本文が変わりました。確かめ直してください" : ""}</div>` : ""}
     <div id="save-msg" class="warn"></div>
-    <button class="primary" onclick="saveSummary()">要約を保存</button>
+    <button class="primary" onclick="saveSummary(false)">要約を保存</button>
+    <button onclick="saveSummary(true)" title="記事と照らして確かめた要約として保存します（日付・期限・金額・支払方法の本文照合だけを外し、英字・長さ・課の名前と階・過ぎた日付の検査は残します）">確認済みとして保存</button>
     <div style="margin-top:8px">
       <button onclick="act('stop')">止める</button>
       <button onclick="act('auto')">自動に戻す</button>
@@ -122,10 +125,10 @@ async function openDetail(id) {
   loadList();
 }
 
-async function saveSummary() {
+async function saveSummary(verified) {
   const r = await fetch("../api/news/" + encodeURIComponent(current), {
     method: "PUT", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({summary: document.getElementById("summary").value}),
+    body: JSON.stringify({summary: document.getElementById("summary").value, verified: !!verified}),
   });
   if (!r.ok) {
     const e = await r.json();

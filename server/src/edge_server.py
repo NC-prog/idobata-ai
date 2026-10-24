@@ -83,6 +83,8 @@ class ProcedureEdit(BaseModel):
 
 class NewsSummaryIn(BaseModel):
     summary: str
+    # 「確認済みとして保存」（日付・期限・金額・支払方法の本文照合を外し、長さを見る。WP13）
+    verified: bool = False
 
 
 class ApproveIn(BaseModel):
@@ -392,7 +394,8 @@ def _add_staff_routes(app: FastAPI, panel: StaffPanel) -> None:
     @app.put("/staff/api/news/{rid}", dependencies=auth)
     async def edit_news(rid: str, body: NewsSummaryIn, request: Request) -> dict[str, Any]:
         try:
-            return news().edit_summary(rid, body.summary, login_name(request))
+            # 確認済みは読み上げの長さを VOICEVOX で測る（数秒かかるので別スレッド）
+            return await asyncio.to_thread(news().edit_summary, rid, body.summary, login_name(request), body.verified)
         except KeyError as e:
             raise HTTPException(404, "お知らせがありません") from e
         except SummaryRejected as e:
