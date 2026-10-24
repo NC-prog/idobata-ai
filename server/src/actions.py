@@ -154,6 +154,12 @@ class Session:
     news_proposed: int = 0
     news_blocked: str | None = None
     smalltalk_streak: int = 0
+    # 話題の手続き（手続きナレッジの id か別名表の語）と、それが続いたターン数、承認済みか、
+    # その間に LLM が紹介状を提案しなかったターン数（WP11 の実機確認で足した「用件が一段落」の規則）
+    topic: str | None = None
+    topic_turns: int = 0
+    topic_approved: bool = False
+    topic_no_refer: int = 0
 
 
 StateHook = Callable[[str], Awaitable[None]]
@@ -244,6 +250,11 @@ class Conversation:
         self._nothing_else_re = re.compile(self._news_cfg.nothing_else_pattern)
         self._anything_else_re = re.compile(self._news_cfg.anything_else_pattern)
         self._smalltalk_re = re.compile(self.dialogue._cfg.smalltalk_pattern)
+        self._visitor_question_re = re.compile(self.dialogue._cfg.visitor_question_pattern)
+        news_t = self._templates.get("news", {})
+        self._news_ask_re = re.compile(news_t.get("ask_pattern") or r"(?!)")
+        self._news_ask_request_re = re.compile(news_t.get("ask_request_pattern") or r"(?!)")
+        self._closing_reply_re = re.compile(news_t.get("closing_reply_pattern") or r"(?!)")
 
     # ------------------------------------------------------------------
     # 会話の区切り
@@ -362,6 +373,7 @@ class Conversation:
         async for s in self._respond_turn(text, language, index):
             lines.append(s)
             yield s
+        logger.info("お知らせの判定: %s", self._news_status())
         if self._held and not lines:
             return  # 電話番号の断片: 続きを待つ（返事も記録もしない）
         # 氏名・地区・電話番号はプロセス内の記録にも残さない
@@ -394,6 +406,16 @@ class Conversation:
                 yield line
             return
         self.dialogue.last_safety = None
+        if self._is_news_ask(text) and (self._pending is None or self._pending.phase == "proposed"):
+            # 来訪者が直接お知らせを聞いた: LLM に答えさせず、提案文を飛ばしてすぐ紹介する（返事待ちの提案は辞退として閉じる）
+            if self._pending is not None:
+                logger.info("提案の返事待ちにお知らせを聞かれたので、提案を辞退扱いにして紹介します（%s）", self._pending.action)
+                self._outcome("declined")
+                self._pending = None
+            self._session.smalltalk_streak = 0
+            async for s in self._present_news_direct(text, language, index):
+                yield s
+            return
         if (after_action and self._pending is None and classify_reply(text, self._words) != "unclear"
                 and len(re.sub(r"[\s、。！？!?]", "", text)) <= self._cfg.reply_max_chars):
             # 行為が終わった直後の「うん」「ありがとう」は決まった文で受ける（お知らせを紹介できるなら、その提案）
@@ -414,6 +436,8 @@ class Conversation:
             self._pending = None
         if self._pending is not None:
             self._session.smalltalk_streak = 0
+            if self._session.topic is not None:
+                self._session.topic_turns += 1  # 提案への返事・聞き取りの答えも、手続きの話の続きに数える
             async for s in self._on_reply(text):
                 yield s
             self._after_action = self._pending is None
@@ -430,6 +454,16 @@ class Conversation:
             self.dialogue.add_turn(text, "")
             yield self._propose_news(text, language, index, "ほかに無い")
             return
+        s_ = self._session
+        if (self._news_cfg.propose_after_business and s_.topic is not None
+                and s_.topic_turns >= self._news_cfg.topic_turns and self._closing_reply_re.search(text.strip())
+                and len(re.sub(r"[\s、。！？!?]", "", text)) <= self._cfg.reply_max_chars and self._news_available()):
+            # 同じ手続きの話が続いた後の「わかりました」「ありがとう」: 用件が一段落したので、お知らせを一つ紹介してよいか尋ねる
+            s_.smalltalk_streak = 0
+            s_.topic, s_.topic_turns = None, 0
+            self.dialogue.add_turn(text, "")
+            yield self._propose_news(text, language, index, "手続きの話の後の締めの返事")
+            return
         item = self._reopen_item(text)
         if item is not None and self._saved_referral is not None:
             # 保存の後に来訪者の側から触れた: その項目だけ聞き取りを再開する（LLM には聞かせない。
@@ -445,9 +479,6 @@ class Conversation:
             yield line
             return
 
-        smalltalk = (self._smalltalk_re.search(text) is not None or re.search(self._cfg.share_fallback_topic, text) is not None) \
-            and not re.search(self._ref_cfg.procedure_pattern, text)
-        self._session.smalltalk_streak = self._session.smalltalk_streak + 1 if smalltalk else 0
         reply: list[str] = []
         offered = self._tidbit_to_offer(text)
         hint = self._tidbit_cfg.offer_template.format(text=offered["text"]) if offered else ""
@@ -466,8 +497,23 @@ class Conversation:
         kind = (self.dialogue.last_proposal
                 if self.dialogue.last_safety in ("complaint", "cannot_apply", "cannot_meet")  # 定型が付けた「伝えましょうか」
                 else self._adjust_proposal(self.dialogue.last_proposal, text, "".join(reply)))
+        procedure_turn = self._update_topic(text, kind)
+        # 雑談のターン: 手続きの語が無く、案内役に何かを尋ねていない（「うんまだ見てないです」のような返事・報告も雑談に数える。
+        # 天気などの語だけで数えていたので、紅葉の話への返事を数えられなかった）
+        smalltalk = not procedure_turn and (
+            self._smalltalk_re.search(text) is not None or re.search(self._cfg.share_fallback_topic, text) is not None
+            or not self._visitor_question_re.search(text.strip()))
+        self._session.smalltalk_streak = self._session.smalltalk_streak + 1 if smalltalk else 0
+        s_ = self._session
+        refer_offered = any(x.get("action") == "refer" for x in s_.proposals)
+        if (kind is None and s_.topic_approved and s_.topic_no_refer >= self._news_cfg.topic_turns
+                and not refer_offered and self._available("refer")):
+            # 承認済みの手続きが話題なのに LLM が続けて紹介状を提案しなかった: 規則で提案する（お知らせより先）
+            logger.info("承認済みの手続きの話が %d ターン続いたので、規則で紹介状を提案します", s_.topic_no_refer)
+            kind = "refer"
         if (kind is None and self._news_cfg.propose_in_smalltalk
-                and self._session.smalltalk_streak >= self._news_cfg.smalltalk_turns):
+                and s_.smalltalk_streak >= self._news_cfg.smalltalk_turns
+                and s_.turns >= self._news_cfg.smalltalk_min_session_turns):
             kind = "news"  # 雑談が続いた: 締めの定型の代わりに、お知らせを一つ紹介してよいか尋ねる
         proposing = kind is not None and self._available(kind)
         spoken = reply[: len(reply) - len(held)]  # 預からずに読み上げた文（応答の頭）
@@ -729,6 +775,84 @@ class Conversation:
                 or s.news_blocked is not None or s.news_proposed >= self._news_cfg.max_per_session):
             return False
         return self._news.next_candidate() is not None
+
+    def _is_news_ask(self, text: str) -> bool:
+        """来訪者が直接お知らせ・催しを聞いたか（問い・頼みの形で、手続きの語が無い）。深刻な打ち明けの後の会話では見ない。"""
+        t = text.strip()
+        if self._news is None or not self._news_cfg.enabled:
+            return False
+        if self._session is not None and self._session.news_blocked == "深刻な打ち明け・迷子":
+            return False
+        return (self._news_ask_re.search(t) is not None and self._news_ask_request_re.search(t) is not None
+                and not re.search(self._ref_cfg.procedure_pattern, t))
+
+    async def _present_news_direct(self, text: str, language: str, index: int) -> AsyncIterator[str]:
+        """聞かれたのでお知らせを 1 件紹介する（提案文なし）。候補が無い・この会話で紹介済みなら定型の一言。"""
+        s = self._session
+        assert s is not None
+        shown = any(x.get("action") == "news" and x.get("outcome") == "shown" for x in s.proposals)
+        if shown or self._news is None or self._news.next_candidate() is None:
+            line = self._t("news", "none_direct")
+            logger.info("お知らせを聞かれましたが、%s", "この会話では紹介済みです" if shown else "候補がありません")
+            self.dialogue.add_turn(text, line)
+            yield line
+            return
+        s.news_proposed += 1
+        s.proposals.append({"action": "news", "outcome": None, "trigger": "直接聞かれた"})
+        self.turn_info["proposed"] = "news"
+        logger.info("お知らせを直接聞かれたので、すぐ紹介します")
+        p = Pending("news", text, language, turn_index=index, speaker=self._speaker,
+                    history_before=self.dialogue.history)
+        self._pending = p
+        head = self._t("news", "direct")
+        yield head
+        async for line in self._do_news(p):
+            yield line
+        self.dialogue.add_turn(text, head + (self._news_history or ""))
+        self._news_history = None
+
+    def _update_topic(self, text: str, kind: str | None) -> bool:
+        """話題の手続きを覚える（このターンで手続きを言ったら True）。手続きでない問いが来たら話題は終わり。"""
+        s = self._session
+        assert s is not None
+        book = self._procedures.book
+        matched = self.dialogue.last_procedures
+        mentioned = sorted(self._procedures.mentioned(text, self._facility))
+        key = matched[0].id if matched else (mentioned[0] if mentioned else None)
+        if key is not None:
+            if key != s.topic:
+                s.topic, s.topic_turns, s.topic_no_refer = key, 0, 0
+                s.topic_approved = any(book is not None and book.usable(r) for r in matched)
+            s.topic_turns += 1
+        elif s.topic is not None and self._visitor_question_re.search(text.strip()):
+            s.topic, s.topic_turns, s.topic_approved, s.topic_no_refer = None, 0, False, 0
+        elif s.topic is not None:
+            s.topic_turns += 1  # 「退職とかで」のような、手続きの話の続き
+        if s.topic is not None and s.topic_approved:
+            s.topic_no_refer = s.topic_no_refer + 1 if kind != "refer" else 0
+        return key is not None
+
+    def _news_status(self) -> str:
+        """このターンのお知らせの判定（ログ用。提案したか、出さなかった理由、雑談のターン数、話題の手続き）。"""
+        s = self._session
+        if s is None:
+            return "会話なし"
+        if self.turn_info.get("proposed") == "news":
+            state = "提案した（または紹介した）"
+        elif self._news is None or not self._news_cfg.enabled:
+            state = "出さない（お知らせなし・無効）"
+        elif s.news_blocked is not None:
+            state = f"出さない（{s.news_blocked}）"
+        elif s.news_proposed >= self._news_cfg.max_per_session:
+            state = "出さない（この会話で提案済み）"
+        elif self._pending is not None:
+            state = f"出さない（返事待ち・聞き取り中: {self._pending.action}/{self._pending.phase}）"
+        elif self._news.next_candidate() is None:
+            state = "出さない（候補なし）"
+        else:
+            state = "きっかけ待ち"
+        topic = f"{s.topic}({s.topic_turns}ターン{'・承認済み' if s.topic_approved else ''})" if s.topic else "なし"
+        return f"{state} / 雑談 {s.smalltalk_streak} ターン / 会話 {s.turns} ターン / 話題の手続き {topic}"
 
     def _propose_news(self, text: str, language: str, index: int, trigger: str, extend: bool = True) -> str:
         """お知らせの提案（決まった文）。返事待ちにして、履歴の直前の応答の後ろに足す。"""

@@ -560,7 +560,8 @@ async def test_greeting_only_on_first_turn() -> None:
     llm = StubLLM(["こんにちは。", "いい天気ですね。"])
     d = Dialogue(llm, DialogueConfig(), now=_NOON)
     assert await _collect(d, "やあ") == ["こんにちは。", "いい天気ですね。"]
-    assert await _collect(d, "散歩してきました") == ["いい天気ですね。"]
+    # 途中の挨拶を捨て、前と同じ「いい天気ですね。」も繰り返さない。空になったので報告への穴埋め（WP11）
+    assert await _collect(d, "散歩してきました") == ["そうですか。"]
 
 
 async def test_floor_only_sentence_and_umbrella_are_checked() -> None:

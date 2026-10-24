@@ -340,6 +340,13 @@ class Dialogue:
                             if facility else [])
         self._residence_question_re = re.compile(self._cfg.residence_question_pattern)
         self._residence_allow_re = re.compile(self._cfg.residence_question_allow_pattern)
+        # この会話で言った「お困りのことは」「お変わりありませんか」の類（1 会話 1 回。履歴の長さに関係なく数える）
+        self._offers_said: set[str] = set()
+        self._offer_res = (("help", re.compile(self._cfg.help_offer_pattern)), ("checkin", re.compile(self._cfg.checkin_pattern)))
+        self._agree_re = re.compile(self._cfg.agree_prefix_pattern)
+        self._agree_context_re = re.compile(self._cfg.agree_context_pattern)
+        self._negative_re = re.compile(self._cfg.negative_reply_pattern)
+        self._dept_business_re = re.compile(self._cfg.department_business_pattern)
         # (user, assistant) の組を直近 history_turns 件だけ保持する
         self._history: deque[tuple[str, str]] = deque(maxlen=self._cfg.history_turns)
         self._question_re = re.compile(self._cfg.question_sentence_pattern)
@@ -360,6 +367,7 @@ class Dialogue:
         """履歴を消す（来訪者の切り替わり時など）。"""
         self._history.clear()
         self._draft_noted.clear()
+        self._offers_said.clear()
         logger.info("対話履歴をクリアしました")
 
     def build_messages(
@@ -396,6 +404,7 @@ class Dialogue:
         if self._history:
             user, reply = self._history[-1]
             self._history[-1] = (user, reply + line)
+        self._note_offers(line)
 
     def begin_turn(self) -> None:
         """ターンごとの記録（提案・検索・出典・捨てた文）を消す。LLM を通さない定型文のターンでも前のものを残さない。"""
@@ -425,6 +434,68 @@ class Dialogue:
 
     def _push(self, user: str, assistant: str) -> None:
         self._history.append((user, assistant))
+        self._note_offers(assistant)
+
+    def _note_offers(self, text: str) -> None:
+        """「お困りのことは」「お変わりありませんか」の類を言ったことを覚える（LLM・切り出し・定型のどれで言っても）。"""
+        for kind, pat in self._offer_res:
+            if pat.search(text):
+                self._offers_said.add(kind)
+
+    def _strip_agree(self, sentence: str, user_text: str) -> str:
+        """来訪者が意見を言っていないのに「おっしゃる通り」で始めた文の頭を外す（残りが無ければ空）。"""
+        if not sentence or self._agree_context_re.search(user_text) or not self._agree_re.search(sentence):
+            return sentence
+        rest = self._agree_re.sub("", sentence, count=1).strip()
+        logger.info("意見ではない発話への「おっしゃる通り」を外しました")
+        self.note_drop("同意の文脈でない「おっしゃる通り」", sentence)
+        return rest
+
+    def empty_filler(self, user_text: str) -> str:
+        """応答の文を全部捨てたときの穴埋め（質問 → もう一度、否定 → わかりました、雑談・報告 → そうですか）。"""
+        t = user_text.strip()
+        if self._negative_re.search(t):
+            return self._cfg.empty_negative_filler
+        if re.search(self._cfg.visitor_question_pattern, t):
+            return self._cfg.empty_question_filler
+        return self._cfg.empty_other_filler
+
+    def _invented_department_business(self, sentence: str, refs: list[Reference], expected: str | None) -> bool:
+        """「〇〇課で配布しています」のような、課の業務の作り話か（課の handles にも参考資料にも根拠が無い）。"""
+        if self._facility is None or not sentence:
+            return False
+        for m in self._dept_business_re.finditer(sentence):
+            dept = next((d for d in self._facility.departments if d.name in m.group("dept")), None)
+            if dept is None or dept.name == expected:
+                continue
+            words = [w for h in dept.handles for w in re.split(r"[（(）)・、]", h) if len(w) >= 2]
+            if any(w in sentence for w in words):
+                continue
+            sources = [r.text for r in refs] + [t for t in self._fact_texts if t]  # 参考資料と固定事実（拠点の補足）
+            if any(dept.name in t and grounding_overlap(sentence, t) >= self._cfg.grounding_min_overlap for t in sources):
+                continue
+            logger.info("資料に無い課の業務（%s）を言う文を読み上げずに捨てました", dept.name)
+            self.note_drop("課の業務の作り話", sentence)
+            return True
+        return False
+
+    def _procedure_name_first(self, sentence: str, user_text: str) -> str:
+        """承認済みの手続きに当たったターンの 1 文目で、別の手続きの語（「国保」を「国保税」）に言い換えたら手続きの名前に戻す。"""
+        book = self._procedures.book if self._procedures is not None else None
+        usable = [r for r in self.last_procedures if book is not None and book.usable(r)]
+        if not usable or self._procedures is None:
+            return sentence
+        rec = usable[0]
+        own = set(rec.surfaces) | {rec.name}
+        found = [w for w in self._procedures.surfaces() if w in sentence and w not in user_text]
+        found = [w for w in found if not any(w != o and w in o for o in found)]
+        for w in sorted(found, key=len, reverse=True):
+            if w in own or any(w in o for o in own):
+                continue
+            logger.info("承認済みの手続きの 1 文目の言い換え（%s）を手続きの名前に戻しました", w)
+            self.note_drop("手続きの言い換え", sentence)
+            sentence = sentence.replace(w, rec.name, 1)
+        return sentence
 
     def restore(self, snapshot: list[tuple[str, str]], user: str, assistant: str) -> None:
         """履歴を snapshot（history で取ったもの）に戻し、1 ターンを足す（紹介状の聞き取りを 1 行にまとめる）。
@@ -560,6 +631,11 @@ class Dialogue:
                         self.note_drop("捨てた期限・金額を指す文", sentence)
                         continue
                     sentence = self._strip_judgment_clause(sentence)
+                    sentence = self._strip_agree(sentence, text)
+                    if not sentences and proc_refs:
+                        sentence = self._procedure_name_first(sentence, text)
+                    if self._invented_department_business(sentence, refs, expected_dept):
+                        continue
                     if self._must_drop(sentence) or self._drop(sentence, text, sentences, previous):
                         dropped_echo = dropped_echo or not sentences
                         continue
@@ -596,10 +672,15 @@ class Dialogue:
                 tail = ""
             if tail and dropped_echo and not sentences:
                 tail = _LEADING_PARTICLE_RE.sub("", tail)
-            # 何も言っていないときの最後の文は捨てない（応答が空になる）
+            # 最後の文も、それまでに何も言っていなくても安全装置に通す（WP11 の実機確認で、1 文だけの「お変わりありませんか」
+            # 「おっしゃる通りですね」がここを素通りしていた）。空になったら下で穴埋めの文を選ぶ
             tail = self._strip_judgment_clause(tail)
-            if tail and not self._must_drop(tail) and (
-                    not sentences or not self._drop(tail, text, sentences, previous)):
+            tail = self._strip_agree(tail, text)
+            if tail and not sentences and proc_refs:
+                tail = self._procedure_name_first(tail, text)
+            if tail and self._invented_department_business(tail, refs, expected_dept):
+                tail = ""
+            if tail and not self._must_drop(tail) and not self._drop(tail, text, sentences, previous):
                 tail = self._attribute(tail, proc_refs, sentences, cited)
                 sentences.append(tail)
                 yield tail
@@ -625,7 +706,7 @@ class Dialogue:
             sentences.append(line)
             yield line
 
-        if not sentences:
+        if not sentences and re.search(self._cfg.visitor_question_pattern, text.strip()):
             # 来訪者が同じことを聞き直した: 前と同じ答えしか無いなら、それを言い直す（全部を繰り返しとして捨てると聞き返しになる）
             again = [d["text"] for d in self.last_dropped if d["reason"] == "同じ文の繰り返し"][:2]
             if again:
@@ -633,9 +714,15 @@ class Dialogue:
                 for line in again:
                     sentences.append(line)
                     yield line
-        if not sentences:
-            yield _FALLBACK_REPLY.get(language, _FALLBACK_REPLY["ja"])
+        if not sentences and not self.last_dropped:
+            yield _FALLBACK_REPLY.get(language, _FALLBACK_REPLY["ja"])  # LLM が何も返さなかった
             return
+        if not sentences:
+            # 全部捨てた: 直前の来訪者の発話の種類で穴埋めの文を選ぶ（「おっしゃる通りですね」を言わない）
+            filler = self.empty_filler(text)
+            logger.info("応答の文を全部捨てたので、穴埋めの文を言います")
+            sentences.append(filler)
+            yield filler
         reply = "".join(sentences)
         self._push(labeled(text, speaker), reply)
         logger.debug("応答: %s", reply)
@@ -1130,12 +1217,12 @@ class Dialogue:
 
     def _extra_help_offer(self, sentence: str, user_text: str) -> bool:
         """「お困りのことはありませんか」「お変わりありませんか」の類を言わない場面か（もう言った、または尋ねられた直後）。"""
-        for pat in (self._cfg.help_offer_pattern, self._cfg.checkin_pattern):
-            if not re.search(pat, sentence):
+        for kind, pat in self._offer_res:
+            if not pat.search(sentence):
                 continue
             if re.search(self._cfg.visitor_question_pattern, user_text.strip()):
                 return True
-            return any(re.search(pat, reply) for _, reply in self._history)
+            return kind in self._offers_said
         return False
 
     def _is_repeat(self, sentence: str, previous: set[str]) -> bool:
@@ -1166,8 +1253,9 @@ class Dialogue:
         self.last_search_ms = result.elapsed_ms
         self.last_search_query = query
         refs = result.references
-        if self._smalltalk_re.search(text):
-            # 雑談寄り（挨拶・天気・人物像への質問）は関係の薄い資料が付きやすいので、しきい値を上げる
+        if self._smalltalk_re.search(text) or len(_ECHO_IGNORE_RE.sub("", text)) <= self._cfg.short_reply_max_chars:
+            # 雑談寄り（挨拶・天気・人物像への質問）と短い返事（「わかりました」）は関係の薄い資料が付きやすいので、しきい値を上げる
+            # （WP11 の実機確認で「わかりました」に「協調学習の取組」が付き、8B がその話を始めた）
             # （「日本語うまいですね」に防災ガイドブックが付いた）
             weak = [r for r in refs if r.vector_score < self._cfg.smalltalk_min_vector_score]
             if weak:

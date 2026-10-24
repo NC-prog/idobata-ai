@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -301,8 +302,9 @@ async def test_news_not_proposed_after_crisis(tmp_path: Path) -> None:
 
 
 async def test_news_in_smalltalk_declined_is_not_proposed_again(tmp_path: Path) -> None:
-    c, book = _news_conv(tmp_path, ActLLM([["本当ですね。"], ["お散歩日和ですね。どちらまで行かれましたか？"],
+    c, book = _news_conv(tmp_path, ActLLM([["こんにちは。"], ["本当ですね。"], ["お散歩日和ですね。どちらまで行かれましたか？"],
                                             ["そうですね。"], ["そうですね。"]]))
+    assert PROPOSE not in await _say(c, "こんにちは")  # 挨拶の直後（会話の 2 ターン目まで）は出さない
     assert PROPOSE not in await _say(c, "今日は暖かいですね")
     out = await _say(c, "いい天気ですね")
     # 雑談が 2 ターン続いた: LLM の問いは落として、提案文だけを問いにする
@@ -350,3 +352,147 @@ def test_reception_role_keeps_the_prompt_and_select_role() -> None:
     roles.state.presenting_news = False
     assert roles.select() == (roles.reception, True)
     assert ACT_FAC.name
+
+
+# ------------------------------------------------------------------
+# 実機確認の直し（お知らせに届かなかった会話）
+# ------------------------------------------------------------------
+
+from tests.test_actions_unit import PROCS
+from tests.test_actions_unit import TEMPLATES as ACT_T
+from tests.test_dialogue_unit import _collect
+
+
+class DlgLLM:
+    """1 ターンに 1 つずつ応答を返す（ストリームは文ごと）。"""
+
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = list(replies)
+
+    def chat(self, model: str, messages: list[dict[str, Any]], **kw: Any) -> str:
+        return ""
+
+    def chat_stream(self, model: str, messages: list[dict[str, Any]], **kw: Any) -> Any:
+        text = self.replies.pop(0) if self.replies else ""
+        yield from [x for x in re.split(r"(?<=[。？！])", text) if x]
+
+REFER_PROPOSE = ACT_T["refer"]["propose"]
+
+
+def _with_procs(c: Any) -> Any:
+    c.dialogue._procedures = PROCS  # 承認済みの手続きナレッジ（国保の加入など）を対話に持たせる
+    return c
+
+
+async def test_direct_news_ask_presents_without_proposal(tmp_path: Path) -> None:
+    layouts: list[dict[str, Any]] = []
+    c, book = _news_conv(tmp_path, ActLLM([["こんにちは。"]]), layouts)
+    await _say(c, "こんにちは")
+    out = await _say(c, "ところで町からの何か案内ってありますか。")
+    assert out[0] == N["direct"] and out[1] == N["intro"].format(when="今日") and "".join(out[2:]) == OK_SUMMARY
+    assert layouts[0]["mode"] == "news" and c.take_news_closing() is not None
+    assert book.get("a").shown_count == 1  # type: ignore[union-attr]
+    # 2 回目は「いま新しいお知らせはありません」
+    assert await _say(c, "ほかにお知らせありますか") == [N["none_direct"]]
+
+
+async def test_direct_news_ask_closes_pending_proposal(tmp_path: Path) -> None:
+    c, _ = _news_conv(tmp_path, ActLLM([["国保ですね。<propose:refer>"]], chat_reply=[PHRASED, _refer_json()]))
+    assert (await _say(c, "国保の切り替えで聞きたいことがあって"))[-1] == REFER_PROPOSE
+    out = await _say(c, "町からのお知らせってある？")
+    assert out[0] == N["direct"] and c.pending_action is None
+    assert [p["outcome"] for p in c._session.proposals] == ["declined", "shown"]
+
+
+async def test_direct_news_ask_with_no_candidates(tmp_path: Path) -> None:
+    c, book = _news_conv(tmp_path, ActLLM([]))
+    rec = book.get("a")
+    assert rec is not None
+    rec.status = "stopped"
+    book.save(rec)
+    assert await _say(c, "最近なにかイベントありますか") == [N["none_direct"]]
+
+
+def test_news_ask_pattern() -> None:
+    import yaml
+
+    from src.config import ReferralConfig
+
+    t = yaml.safe_load((SERVER_ROOT / "context" / "actions.yaml").read_text(encoding="utf-8"))["actions"]["news"]
+    ask, req = re.compile(t["ask_pattern"]), re.compile(t["ask_request_pattern"])
+    proc = re.compile(ReferralConfig().procedure_pattern)
+
+    def hit(x: str) -> bool:
+        return bool(ask.search(x) and req.search(x) and not proc.search(x))
+
+    for x in ("ところで町からの何か案内ってありますか。", "市から何かお知らせある？", "最近なにかイベントありますか",
+              "お知らせを教えて", "催しはありますか"):
+        assert hit(x), x
+    for x in ("国保の手続きの案内はありますか", "お知らせありがとう", "今日は暖かいですね", "住民票の届出の案内は"):
+        assert not hit(x), x
+
+
+async def test_rule_refer_after_two_turns_on_approved_procedure(tmp_path: Path) -> None:
+    c, _ = _news_conv(tmp_path, ActLLM([["国保ですね。保健医療課です。"], ["退職のときは保健医療課でご案内します。"]]))
+    _with_procs(c)
+    assert REFER_PROPOSE not in await _say(c, "うんと国保のことで聞きに来ました。")
+    out = await _say(c, "いや、えっと退職とかで。")
+    assert out[-1] == REFER_PROPOSE and c.pending_action == "refer"  # LLM が 2 ターン提案しなかった: 規則で
+
+
+async def test_news_after_closing_reply_on_procedure_topic(tmp_path: Path) -> None:
+    c, _ = _news_conv(tmp_path, ActLLM([["国保ですね。<propose:refer>"]]))
+    _with_procs(c)
+    await _say(c, "国保のことで聞きに来ました。")  # 紹介状の提案（LLM）
+    await _say(c, "退職とかで。")  # 返事として分からない → 聞き直し（話題の続きに数える）
+    await _say(c, "いえ、大丈夫です。")  # 辞退
+    assert await _say(c, "わかりました。") == [PROPOSE]  # 手続きの話の後の締めの返事 → お知らせの提案
+    assert c._session.proposals[-1]["trigger"] == "手続きの話の後の締めの返事"
+
+
+async def test_smalltalk_counts_replies_and_needs_three_turns(tmp_path: Path) -> None:
+    c, _ = _news_conv(tmp_path, ActLLM([["お変わりありませんか？"], ["お住まいの近くはもう紅葉していますか？"],
+                                        ["そうなんですね。"]]))
+    assert PROPOSE not in await _say(c, "こんにちは。")
+    assert PROPOSE not in await _say(c, "うんないです。")  # 会話の 2 ターン目までは出さない
+    out = await _say(c, "うんまだ知ってないです。")  # 返事も雑談に数える（天気などの語が無くても）
+    assert out[-1] == PROPOSE
+
+
+async def test_offer_once_per_conversation_even_as_single_sentence() -> None:
+    d = Dialogue(DlgLLM(["お変わりありませんか？", "お変わりありませんか？", "最近どうですか？", "お元気でしたか？"]),
+                 DialogueConfig(), now=lambda: NOW)
+    assert await _collect(d, "こんにちは") == ["お変わりありませんか？"]
+    # 1 文だけの応答も安全装置に通す（前は最後の 1 文が素通りした）。類語も同じ 1 回に数える
+    assert await _collect(d, "はい") == ["そうですか。"]
+    assert await _collect(d, "ないですよ") == [DialogueConfig().empty_negative_filler]
+    assert await _collect(d, "元気ですか？") == [DialogueConfig().empty_question_filler]
+
+
+async def test_agree_phrase_only_after_opinion() -> None:
+    d = Dialogue(DlgLLM(["おっしゃる通りですね。", "おっしゃる通り、退職のことですね。", "おっしゃる通りですね。"]),
+                 DialogueConfig(), now=lambda: NOW)
+    assert await _collect(d, "うんまだ知ってないです。") == ["そうですか。"]
+    assert await _collect(d, "退職とかで") == ["退職のことですね。"]
+    assert await _collect(d, "役所はもっと早く開けるべきだと思うんよ") == ["おっしゃる通りですね。"]
+
+
+async def test_invented_department_business_is_dropped() -> None:
+    fac = load_facility("akiota", SERVER_ROOT / "context")
+    d = Dialogue(DlgLLM(["町からの案内やお知らせは、地域協働課で配布しています。お気軽にどうぞ。"]),
+                 DialogueConfig(), facility=fac, now=lambda: NOW)
+    out = await _collect(d, "町からの何か案内ってありますか")
+    assert all("地域協働課" not in x for x in out)
+    assert any(x["reason"] == "課の業務の作り話" for x in d.last_dropped)
+    # 課の handles にある業務は言ってよい（空き家バンクは地域協働課）
+    d2 = Dialogue(DlgLLM(["空き家バンクは地域協働課で受け付けています。"]), DialogueConfig(), facility=fac,
+                  now=lambda: NOW)
+    assert await _collect(d2, "空き家バンクに登録したい") == ["空き家バンクは地域協働課で受け付けています。"]
+
+
+async def test_first_sentence_uses_procedure_name() -> None:
+    fac = load_facility("akiota", SERVER_ROOT / "context")
+    d = Dialogue(DlgLLM(["国保税についてご相談ですね。窓口でご案内します。"]), DialogueConfig(), facility=fac,
+                 procedures=PROCS, now=lambda: NOW)
+    out = await _collect(d, "うんと国保のことで聞きに来ました。")
+    assert out[0].startswith("国民健康保険の加入（退職・転入など）についてご相談ですね") and "国保税" not in out[0]
