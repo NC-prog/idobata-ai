@@ -156,3 +156,17 @@ async def test_clarified_intake_is_one_shorter(tmp_path: Path) -> None:
     await _say(c, "お願いします")
     p = c._pending
     assert p is not None and p.department == "保健医療課" and len(p.intake) == 2
+
+
+async def test_repeated_question_is_answered_not_reasked(tmp_path: Path) -> None:
+    # 聞き分けの問いに答えず同じ問いを言い直した（意地悪 20 番）: 聞き直しを重ねず、ふつうに答える
+    llm = StubLLM([["国保の手続きは保健医療課（2階）で承ります。"]] * 4)
+    c = _conv(tmp_path, llm)
+    first = await _say(c, "国保の手続きはどこですか")
+    assert first[0].startswith("国保のことですね。")
+    second = await _say(c, "国保の手続きはどこですか")
+    assert "保健医療課" in "".join(second)
+    assert c.turn_info["clarify"] == "聞き分けた（候補 3 件 → 未決（別の話））"
+    for _ in range(3):
+        said = await _say(c, "国保の手続きはどこですか")
+        assert not any(x.startswith(("国保のことですね", "すみません、国保に入る")) for x in said)  # 聞き分けを重ねない

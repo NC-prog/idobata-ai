@@ -1094,6 +1094,8 @@ class ProcedureConfig:
     clarify_max: int = 4
     clarify_show: int = 3
     clarify_max_reasks: int = 1
+    # 聞き分けの問いへの返事が、元の発話とこれ以上（文字 2-gram の重なり）似ていれば言い直しとみなし、聞き直さずに答える
+    clarify_repeat_overlap: float = 0.6
     # 手続きナレッジから答えた文には「市の案内では、」を一度だけ添える。文字 2-gram の重なりがこれ以上の文を、
     # 手続きナレッジから答えた文とみなす
     attribution_min_overlap: float = 0.5

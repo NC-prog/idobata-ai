@@ -639,10 +639,12 @@ class Conversation:
             self.dialogue.add_turn(text, line)
             yield line
             return
-        if (classify_reply(text, self._words) == "unclear"
-                and len(re.sub(r"[\s、。！？!?]", "", text)) > self._cfg.reply_max_chars
-                and c.reasks >= self.dialogue._proc_cfg.clarify_max_reasks):
-            # 問いに答えず別の話を始めた（聞き直しの後）: 聞き分けは閉じて、その話に答える
+        repeated = ngram_overlap(text, p.user_text) >= self.dialogue._proc_cfg.clarify_repeat_overlap
+        if repeated or (classify_reply(text, self._words) == "unclear"
+                        and len(re.sub(r"[\s、。！？!?]", "", text)) > self._cfg.reply_max_chars
+                        and c.reasks >= self.dialogue._proc_cfg.clarify_max_reasks):
+            # 問いに答えず、元の問いを言い直した（意地悪 20 番の「国保の手続きはどこですか」の繰り返し）・
+            # 聞き直しの後に別の話を始めた: 聞き分けは閉じて、その発話にふつうに答える（聞き直しを重ねない）
             self._pending = None
             self._clarify_done(c, "未決（別の話）")
             async for s in self._answer(text, language, index):
