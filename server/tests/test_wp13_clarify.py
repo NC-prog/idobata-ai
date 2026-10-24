@@ -54,7 +54,8 @@ def test_find_asks_only_when_tied(tmp_path: Path) -> None:
     assert q is not None and set(q.ids) == {"kokuho_withdraw", "kouki_korei"}
     # 1 件に絞れる発話では聞かない
     for text in ("国保に入りたい", "国保税のことで", "国保の保険証をなくした", "児童手当について", "マイナンバーカードをなくした",
-                 "転入の手続き", "住民票はどこで取れますか"):
+                 "転入の手続き", "住民票はどこで取れますか", "子どもが生まれたので児童手当の申請をしたいのですが",
+                 "代わりに申請しといてよ", "子どもの学校かわるんじゃけど何すりゃええ？", "ゴミの日っていつなん？"):
         assert c.find(text) is None, text
 
 

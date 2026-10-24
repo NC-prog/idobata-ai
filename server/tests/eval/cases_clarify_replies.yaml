@@ -1,0 +1,42 @@
+# 用件の聞き分け（WP13 E-3）の返事の判定の例。expected は人の見立て（Claude Code が来訪者の言い方を想定して付けた。Norio が見直す）。
+# ask: 聞き分けに入る発話、reply: 問いへの返事、expected: 決まるはずの候補の id（other は「ほかのこと」、none は決まらない＝聞き直し）
+# 走らせ方: cd server && uv run python -m tests.eval.run_clarify
+- {ask: 国保のことで, reply: 入りたいんです, expected: kokuho_switch}
+- {ask: 国保のことで, reply: 仕事を辞めたので, expected: kokuho_switch}
+- {ask: 国保のことで, reply: 引っ越してきたので, expected: kokuho_switch}
+- {ask: 国保のことで, reply: 会社の保険に入ったのでやめたいんです, expected: kokuho_withdraw}
+- {ask: 国保のことで, reply: 保険証をなくしまして, expected: kokuho_withdraw}
+- {ask: 国保のことで, reply: 二つ目のやつ, expected: kokuho_withdraw}
+- {ask: 国保のことで, reply: 税金の方です, expected: "term:国民健康保険税"}
+- {ask: 国保のことで, reply: 払い方を知りたくて, expected: "term:国民健康保険税"}
+- {ask: 国保のことで, reply: 最後のです, expected: "term:国民健康保険税"}
+- {ask: 国保のことで, reply: 国保です, expected: none}
+- {ask: 手当のことで, reply: 児童手当です, expected: jido_teate}
+- {ask: 手当のことで, reply: 最初の, expected: jido_teate}
+- {ask: 手当のことで, reply: 扶養手当のほう, expected: "term:児童扶養手当"}
+- {ask: 手当のことで, reply: ひとり親なので, expected: "term:児童扶養手当"}
+- {ask: 手当のことで, reply: 特別のほう, expected: "term:特別児童扶養手当"}
+- {ask: 手当のことで, reply: 子どもに障害があって, expected: "term:特別児童扶養手当"}
+- {ask: 保険証, reply: 後期高齢者のです, expected: kouki_korei}
+- {ask: 保険証, reply: 75歳になったので, expected: kouki_korei}
+- {ask: 保険証, reply: 国保の方, expected: kokuho_withdraw}
+- {ask: マイナンバーカードのことで, reply: なくしたんです, expected: mynumber_lost}
+- {ask: マイナンバーカードのことで, reply: 更新の時期で, expected: mynumber_renew}
+- {ask: マイナンバーカードのことで, reply: 新しく作りたい, expected: mynumber_apply}
+- {ask: マイナンバーカードのことで, reply: えーと、わからない, expected: none}
+- {ask: ごみのことで, reply: タンスを捨てたい, expected: sodai_gomi}
+- {ask: ごみのことで, reply: 曜日を知りたい, expected: gomi}
+- {ask: ごみのことで, reply: どれでもないです, expected: other}
+# --- ここから下は、上の例で語を足した後に、語を足さずに試した例（手直しなしの成績を見る。held_out） ---
+- {ask: 国保のことで, reply: 定年でこれから国保になるんです, expected: kokuho_switch, held_out: true}
+- {ask: 国保のことで, reply: 社保になったけえ, expected: kokuho_withdraw, held_out: true}
+- {ask: 国保のことで, reply: 納付書が来たんですけど, expected: "term:国民健康保険税", held_out: true}
+- {ask: 国保のことで, reply: 入るほう, expected: kokuho_switch, held_out: true}
+- {ask: 国保のことで, reply: 真ん中の, expected: kokuho_withdraw, held_out: true}
+- {ask: 国保のことで, reply: 保険料が高くて, expected: "term:国民健康保険税", held_out: true}
+- {ask: 手当のことで, reply: うちは母子家庭で, expected: "term:児童扶養手当", held_out: true}
+- {ask: 手当のことで, reply: 普通の児童手当, expected: jido_teate, held_out: true}
+- {ask: 保険証, reply: 後期のほう, expected: kouki_korei, held_out: true}
+- {ask: 保険証, reply: 主人が退職して, expected: kokuho_withdraw, held_out: true}
+- {ask: マイナンバーカードのことで, reply: 落としてしもうて, expected: mynumber_lost, held_out: true}
+- {ask: ごみのことで, reply: 分け方を教えて, expected: gomi, held_out: true}

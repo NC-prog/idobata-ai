@@ -45,6 +45,8 @@ class ClarifyRules:
     extra_words: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # 鍵を含んでいても、それだけでは候補に入れない語（「転入」は「転入学」の中にあるが、転校の手続きではない）
     not_join: tuple[str, ...] = ()
+    # 発話の名詞を鍵にするとき、使わない一般の語
+    generic_nouns: tuple[str, ...] = ()
 
 
 def _words(v: Any) -> tuple[str, ...]:
@@ -67,6 +69,7 @@ def load_clarify_rules(path: Path) -> ClarifyRules:
         cues={str(k): _words(v) for k, v in (data.get("cues") or {}).items()},
         extra_words={str(k): _words(v) for k, v in (data.get("extra_words") or {}).items()},
         not_join=_words(data.get("not_join")),
+        generic_nouns=_words(data.get("generic_nouns")),
     )
 
 
@@ -147,10 +150,19 @@ class Clarifier:
         keys = tuple(dict.fromkeys(w for a, b, w in spans if not any(
             a2 <= a and b <= b2 and (b2 - a2) > (b - a) for a2, b2, _ in spans)))
         if not keys:
-            keys = tuple(n for n in nouns(text) if len(n) >= 2)
+            # 手続きの語が無ければ発話の名詞（「手当」）。候補を持つ名詞がそれ 1 つだけのときに限る
+            # （「子どもの学校かわる」の「子ども」は鍵にしない）。一般の語（申請・手続き・相談）は鍵にしない
+            found = [n for n in nouns(text) if len(n) >= 2 and n not in self._rules.generic_nouns
+                     and any(self._joins(r, n) for r in recs)]
+            keys = tuple(found) if len(found) == 1 else ()
         if not keys:
             return None
-        family = [r for r in recs if any(self._joins(r, k) for k in keys)]
+        # 聞くのは、1 つの鍵に候補が 2 件以上あるとき（その語そのものがあいまい）。別々の手続きをはっきり言った
+        # 発話（「子どもが生まれたので児童手当の申請」）は聞かない
+        ambiguous = [k for k in keys if sum(1 for r in recs if self._joins(r, k)) >= cfg.clarify_min]
+        if not ambiguous:
+            return None
+        family = [r for r in recs if any(self._joins(r, k) for k in ambiguous)]
         if not cfg.clarify_min <= len(family) <= cfg.clarify_max:
             return None
         scores = [self.score(r, text, keys) for r in family]
@@ -167,7 +179,7 @@ class Clarifier:
 
         tied.sort(key=order)
         shown = tied[: cfg.clarify_show]
-        key = max(keys, key=len) if len(keys) > 1 else keys[0]
+        key = max(ambiguous, key=len)
         return Clarify(key, shown, keys, more=len(tied) > cfg.clarify_show)
 
     # --- 問い ---

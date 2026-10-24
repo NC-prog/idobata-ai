@@ -108,12 +108,22 @@ async def run_procedures(site: str) -> str:
     counts = {"課の誤り": 0, "作り話": 0, "言い回しの崩れ": 0, "過剰な定型": 0, "市の案内が無い": 0,
               "担当の課の案内が無い": 0, "課を言わない": 0}
     n = 0
+    n_clarify = 0
     for entry in catalog:
         for style, utterance in zip(("丁寧", "くだけた"), entry["asks"], strict=True):
             n += 1
             await conv.end_session()
             t0 = time.monotonic()
             reply = "".join([s async for s in conv.respond(utterance, "ja")])
+            clarify = ""
+            p = conv._pending
+            if p is not None and p.action == "clarify" and p.clarify is not None:
+                # 用件の聞き分け（WP13 E）に入った: 来訪者役は正解の手続きの名前で答える（候補に無ければ「ほかのこと」）
+                n_clarify += 1
+                pick = next((r for r in p.clarify.candidates if r.id == entry["id"]), None)
+                answer = conv._clarifier.label(pick) if pick is not None else "ほかのことです"
+                clarify = f"聞き分け（{'・'.join(p.clarify.ids)}）→「{answer}」 → "
+                reply = "".join([s async for s in conv.respond(answer, "ja")])
             sec = time.monotonic() - t0
             proposed = conv.turn_info.get("proposed")
             matched = dialogue.last_procedures
@@ -171,11 +181,11 @@ async def run_procedures(site: str) -> str:
             if guards:
                 notes.append("安全装置: " + "・".join(guards))
             hit = " / ".join(f"{r.id}（{r.status}）" for r in matched) or "-"
-            rows.append(f"| {n} | {entry['id']} | {style} | {utterance} | {reply} | {hit} | "
+            rows.append(f"| {n} | {entry['id']} | {style} | {utterance} | {clarify}{reply} | {hit} | "
                         f"{expected or '-'}（{how}） | {proposed or '-'} | {'; '.join(notes) or 'OK'}（{sec:.1f}s） |")
             print(f"[{n}] {utterance}\n  → {reply}\n  {hit} 期待 {expected} 提案 {proposed} {notes or 'OK'}", flush=True)
     rows += ["", "| 型 | 件数 |", "|---|---|"] + [f"| {k} | {v} |" for k, v in counts.items()]
-    rows.append(f"\n{n} 問。")
+    rows.append(f"\n{n} 問。用件の聞き分けに入った問い: {n_clarify}")
     return "\n".join(rows)
 
 

@@ -29,9 +29,12 @@ async def run(site: str) -> int:
         for text in case["turns"]:
             reply = "".join([s async for s in conv.respond(text, "ja")])
             titles = [r.title for r in dialogue.last_references]
-            found = [w for w in case["off_topic"] if w in reply or any(w in t for t in titles)]
+            # 用件の聞き分け（WP13 E）の問いの文は選択肢を並べるだけ（「国保税か」）なので、脱線に数えない
+            asked = str(conv.turn_info.get("clarify") or "").startswith("聞き分けの問い")
+            found = [w for w in case["off_topic"] if (w in reply and not asked) or any(w in t for t in titles)]
             hits += found
             print(f"[{case['id']}] {text}\n  → {reply}\n  型: {getattr(dialogue, 'last_intent', '-')}  資料: {titles}"
+                  f"  {conv.turn_info.get('clarify') or ''}"
                   f"  脱線の語: {found or 'なし'}", flush=True)
         bad += bool(hits)
         print(f"== {case['id']}: {'脱線あり ' + str(sorted(set(hits))) if hits else '脱線なし'}\n", flush=True)

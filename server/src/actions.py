@@ -587,6 +587,9 @@ class Conversation:
         s = self._session
         if s is None or s.news_blocked is not None or self.dialogue.intent_of(text) != "procedure":
             return None
+        if self.dialogue.safety_reply(text) is not None:
+            self.dialogue.last_safety = None  # 定型（代わりに申請・不満など）のターンでは聞かない（定型は応答の側で言う）
+            return None
         c = self._clarifier.find(text)
         if c is None or frozenset(c.ids) in s.clarified:
             return None
