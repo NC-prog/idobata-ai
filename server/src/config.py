@@ -1014,8 +1014,9 @@ class NewsConfig:
     # 1 会話で紹介する件数
     max_per_session: int = 1
     # 要約（LLM に頼む字数。長さの判定は読み上げの秒数で行う）
-    summary_min_chars: int = 90
-    summary_max_chars: int = 120
+    # （WP11 の判断で 90〜120 から上げた。話速 1.0 では 90〜120 字が約 13〜18 秒で、15 秒に届かないものが多かった）
+    summary_min_chars: int = 110
+    summary_max_chars: int = 140
     # 合成した読み上げの長さ（秒）。外れたら 1 回だけ書き直させ、それでも外れたら保留（held）
     speech_min_sec: float = 15.0
     speech_max_sec: float = 22.0
@@ -1072,8 +1073,10 @@ class NewsConfig:
         "- 日付・時刻・金額・数は【記事】の本文にそのまま書いてあるものだけ。書いていなければ日付を言わない。足さない。\n"
         "- 課の名前・電話番号・URL・建物の階・資料のファイルの話は書かない。「くわしくはホームページで」も書かない（画面に出します）。\n"
         "- 英単語・アルファベット・記号（■《》など）は使わない。曜日の括弧書きは付けない。「来訪者」という言葉は使わない。\n"
-        "- 今日は{today}です（今日の日付は、記事の日付の前後を判断するためだけに使い、要約には書かない）。今日より前に始まって続いていることは「〜から始まっています」「〜から行っています」と言い、"
-        "「始まります」とは言わない。今日より前に終わったことは書かない。「今日」「明日」「今月」とは書かない（読む日がずれるので、日付で言う）。\n"
+        "- 【日付の一覧】で（今日より前）の付いた日に始まって続いていることは「〜から行っています」と言い、「始まります」とは言わない。"
+        "今日より前に終わったことは書かない。\n"
+        "- 日付は【日付の一覧】にあるものだけを使う。一覧に無い日付・「今日」「明日」「今月」「始まります」などの時制の語は使わない。"
+        "一覧が「本文に日付なし」なら日付を言わない。掲載日は実施日ではないので、実施日として言わない。\n"
         "- 前置き（「お知らせです」など）や締めの挨拶は書かない。お知らせの文だけを返す。\n"
         "【話し方】\n{speaking}"
     )
@@ -1094,6 +1097,12 @@ class NewsConfig:
         r"Adobe|Acrobat|PDF形式のファイル|PDFファイル.{0,10}(ご覧|閲覧)|バナーのリンク先|＜外部リンク＞|<外部リンク>|"
         r"^本文$|^このページの先頭へ|^\\?\[PDFファイル"
     )
+    # 要約の入力に付ける、規則で本文から抜いた日付の一覧（実施日・期間・締切）。保留の 3 つの型（日付の作り話・
+    # 掲載日を実施日と取り違え・過去の開始を未来形）を減らす。行の抜粋の字数と、一覧の件数の上限
+    date_list_line_chars: int = 60
+    date_list_max: int = 8
+    date_list_none: str = "本文に日付なし"
+    published_note: str = "掲載日は{month}月{day}日（これは実施日ではない）"
     summarize_max_tokens: int = 300
     classify_prompt: str = (
         "役所のロビーで来訪者に紹介するお知らせを選んでいます。下の記事が「住民に広く関係する案内」"
@@ -1103,6 +1112,10 @@ class NewsConfig:
     )
     classify_max_tokens: int = 80
     # 夜の LLM・VOICEVOX 呼び出し
+    # 夜の分類・要約だけに使う LLM の /v1 URL（環境変数 IDOBATA_NIGHT_LLM_URL。T2 の大きいモデルなど）。空なら config.llm と同じ
+    night_llm_url: str = ""
+    # その LLM のモデル名（環境変数 IDOBATA_NIGHT_LLM_MODEL。空なら config.llm.chat_model）
+    night_llm_model: str = ""
     llm_timeout_sec: float = 60.0
     llm_retries: int = 2
     # 掲載日の言い方（今日・昨日・N月N日）
@@ -1226,7 +1239,9 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
         procedure=ProcedureConfig(recheck_keep_using=env.get("IDOBATA_PROCEDURE_RECHECK_USE", "1").strip().lower()
                                   not in ("0", "false", "no", "off")),
-        news=NewsConfig(enabled=env.get("IDOBATA_NEWS", "1").strip().lower() not in ("0", "false", "no", "off")),
+        news=NewsConfig(enabled=env.get("IDOBATA_NEWS", "1").strip().lower() not in ("0", "false", "no", "off"),
+                        night_llm_url=env.get("IDOBATA_NIGHT_LLM_URL", "").strip().rstrip("/"),
+                        night_llm_model=env.get("IDOBATA_NIGHT_LLM_MODEL", "").strip()),
     )
 
 

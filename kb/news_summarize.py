@@ -143,9 +143,10 @@ def summarize_record(r: NewsRecord, llm: NightLLM, meter: SpeechMeter | None, ch
     persona = checker._persona
     speaking = "".join(f"- {x}\n" for x in (persona.speaking if persona else ()))
     system = cfg.summarize_prompt.format(min_chars=cfg.summary_min_chars, max_chars=cfg.summary_max_chars,
-                                         speaking=speaking, today=f"{today.year}年{today.month}月{today.day}日")
+                                         speaking=speaking)
     messages = [{"role": "system", "content": system},
-                {"role": "user", "content": f"【記事】\n題名: {r.title}\n{r.body[:cfg.summarize_body_chars]}"}]
+                {"role": "user", "content": f"【記事】\n題名: {r.title}\n{r.body[:cfg.summarize_body_chars]}\n\n"
+                                            f"【日付の一覧】\n{date_list(r, today, cfg)}"}]
     sec: float | None = None
     problems: list[str] = []
     summary = ""
@@ -172,6 +173,35 @@ def summarize_record(r: NewsRecord, llm: NightLLM, meter: SpeechMeter | None, ch
     r.summarized_hash = r.content_hash
     refresh_status(r)
     return True
+
+
+_DEADLINE_WORDS = ("締切", "締め切り", "申込期限", "申し込み期限", "期限")
+_SPAN_WORDS = ("期間", "から", "まで", "～", "〜")
+
+
+def date_list(r: NewsRecord, today: date, cfg: NewsConfig) -> str:
+    """要約の入力に付ける日付の一覧（規則で本文から抜く。実施日・期間・締切と、掲載日は実施日ではないこと）。"""
+    from news_collect import body_dates
+
+    published = r.published_date()
+    lines: list[str] = []
+    for raw in [r.title, *r.body.splitlines()]:
+        line = re.sub(r"\s+", " ", raw.replace("|", " ")).strip()
+        found = body_dates(line, published) if line else []
+        if not found:
+            continue
+        kind = ("締切" if any(w in line for w in _DEADLINE_WORDS)
+                else "開始（続いている）" if len(found) == 1 and re.search(r"日\S{0,6}(から|より|以降)", line)
+                else "期間" if any(w in line for w in _SPAN_WORDS) else "実施日など")
+        past = "（今日より前）" if all(d < today for d in found) else ""
+        days = "・".join(f"{d.month}月{d.day}日" for d in found)  # 年は書かない（本文の和暦と西暦の食い違いを作らない）
+        entry = f"- {kind}: {days}{past}　{line[:cfg.date_list_line_chars]}"
+        if entry not in lines:
+            lines.append(entry)
+        if len(lines) >= cfg.date_list_max:
+            break
+    head = cfg.published_note.format(month=published.month, day=published.day) if published != date.min else ""
+    return "\n".join([*(lines or [cfg.date_list_none]), *([head] if head else [])])
 
 
 def measure(meter: SpeechMeter | None, text: str) -> float | None:

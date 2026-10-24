@@ -41,12 +41,16 @@ class NightLLM:
 
     def __init__(self, cfg: NewsConfig | None = None) -> None:
         self.cfg = cfg or config.news
-        self.url = f"{config.llm.gateway_url}/chat/completions"
+        # 夜だけ別の LLM（IDOBATA_NIGHT_LLM_URL）。未設定なら会話と同じ 7560 の LLM
+        self.base = self.cfg.night_llm_url or config.llm.gateway_url
+        self.model = self.cfg.night_llm_model or config.llm.chat_model
+        self.url = f"{self.base}/chat/completions"
+        logger.info("夜の LLM: %s（%s）", self.base, self.model)
         self.client = httpx.Client(timeout=self.cfg.llm_timeout_sec)
 
     def chat(self, messages: list[dict[str, str]], max_tokens: int) -> str:
         body: dict[str, Any] = {
-            "model": config.llm.chat_model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.0,
+            "model": self.model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.0,
             "chat_template_kwargs": {"enable_thinking": False},
         }
         last: Exception | None = None
