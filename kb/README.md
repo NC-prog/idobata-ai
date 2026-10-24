@@ -57,7 +57,7 @@ CUDA_VISIBLE_DEVICES= uv run --project kb python kb/build.py --site etajima --we
   - `final` でない規則は「既定」を差し替えるだけ（課の区画を lookup にしても、題名の引き上げ語の記事は dialogue に戻る）
 - `kb/scope_rules.yaml`（全拠点に効く、題名の語での use の規則）:
   - `exclude_title_words`: 題名に当たれば exclude（求人情報・入札・議会・例規・統計・人事・公告・予算・決算・監査・パブリックコメント）
-  - `dialogue_title_words`: 既定が lookup の題名に当たれば dialogue に引き上げる（防災・ごみ・休館・バス・断水・支所・予防接種など）
+  - `dialogue_title_words`: 既定が lookup の題名に当たれば dialogue に引き上げる（防災・ごみ・休館・路線バス・バス停・断水・支所・予防接種・詐欺・不審など。「バス」単独は観光の記事も上げるので使わない）
   - 語は正規表現として当てる（「協議会」「審議会」を議会にしないために `(?<![協審評])議会` と書く）
   - 決め方の順: URL の規則（final）→ 題名の exclude → 題名の dialogue 引き上げ → 既定（final でない URL の規則 → seed の use）。
     exclude と dialogue の語が同時に当たれば exclude
