@@ -24,6 +24,7 @@ import re
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -143,8 +144,11 @@ async def run_procedures(site: str) -> str:
                     if said_floor and said_floor.translate(str.maketrans("０１２３４５", "012345")) != (x.floor or ""):
                         notes.append(f"作り話（{x.name}の階 {said_floor}）")
                         counts["作り話"] += 1
-            sources = [f"{r.title}{r.text}" for r in dialogue.last_references] + [t for t in facts if t]
-            invented = [c for c in claim_re.findall(reply) if not any(c in s for s in sources)]
+            # 全角の数（承認済みの「１４日以内」）と半角の数（応答の「14日以内」）は同じものとして照らす
+            sources = [unicodedata.normalize("NFKC", f"{r.title}{r.text}") for r in dialogue.last_references] + [
+                unicodedata.normalize("NFKC", t) for t in facts if t]
+            invented = [c for c in claim_re.findall(unicodedata.normalize("NFKC", reply))
+                        if not any(c in s for s in sources)]
             if invented:
                 notes.append(f"作り話 {invented}")
                 counts["作り話"] += 1

@@ -1433,6 +1433,14 @@ class Dialogue:
             if len(kept) < len(refs):
                 logger.info("発話の名詞が題名・本文の先頭に無い資料を %d 件外しました", len(refs) - len(kept))
             refs = kept
+        if scope.distinct_pages:
+            seen: set[str] = set()
+            distinct: list[Reference] = []
+            for r in refs:
+                if r.source_url not in seen:
+                    seen.add(r.source_url)
+                    distinct.append(r)
+            refs = distinct
         return refs[: scope.top_k]
 
     def _expand_dates(self, text: str) -> str:

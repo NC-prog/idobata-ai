@@ -645,6 +645,9 @@ class IntentScope:
     need_noun: bool = False
     news: bool = False
     only_without_approved: bool = False
+    # 同じページのチャンクは 1 件と数える（手続きの上位 2 件が「イノシシに注意」の 2 チャンクで埋まり、
+    # 担当の課の載ったページが落ちた。WP13 C の手続き 100 問の 96 番）
+    distinct_pages: bool = False
 
 
 @dataclass(frozen=True)
@@ -681,7 +684,7 @@ class KnowledgeConfig:
     # uses: パックの用途 / top_k: 渡す件数（0 で渡さない） / need_noun: 発話の名詞が資料の題名か本文の先頭にあるものだけ /
     # news: お知らせ（WP11 の紹介する記事）も候補に / only_without_approved: 承認済みの手続きナレッジに当たらなかったときだけ
     scope_by_intent: dict[str, IntentScope] = field(default_factory=lambda: {
-        "procedure": IntentScope(("dialogue",), 2, need_noun=False, only_without_approved=True),
+        "procedure": IntentScope(("dialogue",), 2, need_noun=False, only_without_approved=True, distinct_pages=True),
         "facility": IntentScope((), 0),
         "event": IntentScope(("dialogue",), 3, need_noun=True, news=True),
         "tourism": IntentScope((), 0),
