@@ -570,7 +570,8 @@ class Dialogue:
         # 発話の型（WP13 B）。型ごとに、毎ターンの検索で渡してよい範囲が決まる
         self.last_intent = classify_intent(text, self._intent_rules, self._procedures, self._facility,
                                            self._question_re_visitor)
-        scope = self._kcfg.scope_by_intent.get(self.last_intent)
+        # 絞り込みを切った比較（IDOBATA_KB_SCOPE=0）では、型は数えるだけで、検索は WP13 より前と同じ
+        scope = self._kcfg.scope_by_intent.get(self.last_intent) if self._kcfg.scope_enabled else None
         # 手続きナレッジ（WP09）を先に引く（承認済みに当たれば、手続きの型ではパックを渡さない。WP13 B-1）
         proc_refs, draft_dept = self._procedure_refs(text) if extra_refs is None else ([], None)
         if extra_refs is not None:

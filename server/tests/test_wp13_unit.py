@@ -279,3 +279,35 @@ async def test_procedure_without_approved_counts_pages_not_chunks() -> None:
     await _say(d, "イノシシの補助金の申請をしたい")
     assert d.last_intent == "procedure"
     assert [r.source_url for r in d.last_references] == ["u/a", "u/b"]
+
+
+async def test_procedure_without_approved_needs_nouns() -> None:
+    # 承認済みが無い手続きの問いにも名詞の足切り（店・補助→ふれあいサロン が消える。10/24 の判断）
+    from src.dialogue import Dialogue
+
+    salon = Reference("ふれあいサロン", "u/s", "社協からサロンの活動助成金を支給します。", 0.9, 1.0)
+    shoko = Reference("創業支援の補助金", "u/c", "お店を始める方への補助です。", 0.88, 1.0)
+    d = Dialogue(_LLM("そうですか。"), DialogueConfig(), knowledge=_KB([salon, shoko]))
+    await _say(d, "店やりたいんじゃけど補助とかある？")
+    assert d.last_intent == "procedure" and [r.title for r in d.last_references] == ["創業支援の補助金"]
+
+
+async def test_kb_scope_off_searches_like_before() -> None:
+    # IDOBATA_KB_SCOPE=0: 型は数えるが、検索は use を問わず WP13 より前と同じ（比較のため）
+    from dataclasses import replace
+
+    from src.config import config
+    from src.dialogue import Dialogue
+
+    kb = _KB([TAX, EVENT, JOB])
+    d = Dialogue(_LLM("そうですか。"), DialogueConfig(), knowledge=kb)
+    d._kcfg = replace(config.knowledge, scope_enabled=False)
+    await _say(d, "おすすめの観光地は")
+    assert d.last_intent == "tourism" and kb.calls == [None]
+
+
+def test_kb_scope_env() -> None:
+    from src.config import build_config
+
+    assert build_config({"IDOBATA_KB_SCOPE": "0"}).knowledge.scope_enabled is False
+    assert build_config({}).knowledge.scope_enabled is True

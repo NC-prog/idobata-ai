@@ -684,7 +684,9 @@ class KnowledgeConfig:
     # uses: パックの用途 / top_k: 渡す件数（0 で渡さない） / need_noun: 発話の名詞が資料の題名か本文の先頭にあるものだけ /
     # news: お知らせ（WP11 の紹介する記事）も候補に / only_without_approved: 承認済みの手続きナレッジに当たらなかったときだけ
     scope_by_intent: dict[str, IntentScope] = field(default_factory=lambda: {
-        "procedure": IntentScope(("dialogue",), 2, need_noun=False, only_without_approved=True, distinct_pages=True),
+        # 承認済みが無い手続きにも名詞の足切り（ふるさと納税→国税の相談・義援金、店・補助→ふれあいサロン。10/24 の判断。
+        # 課を言わないのは承認済みの課の一文で補い、資料が減る害より脱線の害を重く見る）
+        "procedure": IntentScope(("dialogue",), 2, need_noun=True, only_without_approved=True, distinct_pages=True),
         "facility": IntentScope((), 0),
         "event": IntentScope(("dialogue",), 3, need_noun=True, news=True),
         "tourism": IntentScope((), 0),
@@ -700,6 +702,9 @@ class KnowledgeConfig:
     )
     # 名詞の足切り（B-2）で見る本文の先頭の字数
     noun_head_chars: int = 200
+    # 会話で使う範囲の絞り込み（use・型ごとの範囲・名詞の足切り）。環境変数 IDOBATA_KB_SCOPE（既定 1）。
+    # 0 で WP13 より前と同じ毎ターンの検索（全部の use を dialogue として扱う）。比較のための設定
+    scope_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -1339,6 +1344,8 @@ def build_config(environ: Mapping[str, str] | None = None) -> AppConfig:
         audio=AudioRetentionConfig(retention_days=int(_parse_float(
             env, "IDOBATA_AUDIO_RETENTION_DAYS", AudioRetentionConfig.retention_days))),
         camera=camera,
+        knowledge=KnowledgeConfig(scope_enabled=env.get("IDOBATA_KB_SCOPE", "1").strip().lower()
+                                  not in ("0", "false", "no", "off")),
         persona=PersonaConfig(role_title=env.get("IDOBATA_ROLE_TITLE", "").strip()),
         procedure=ProcedureConfig(recheck_keep_using=env.get("IDOBATA_PROCEDURE_RECHECK_USE", "1").strip().lower()
                                   not in ("0", "false", "no", "off")),

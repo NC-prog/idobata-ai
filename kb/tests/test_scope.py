@@ -107,3 +107,16 @@ def test_title_words_are_regex_with_lookbehind() -> None:
     assert build.decide_use(url, "求人事業主の皆様へ", soshiki, src)[0] == "dialogue"
     assert build.decide_use(url, "議会だより", soshiki, src)[0] == "exclude"
     assert build.decide_use(url, "人事異動について", soshiki, src)[0] == "exclude"
+
+
+def test_bus_word_is_narrowed_and_safety_words_lift() -> None:
+    # 「バス」単独では上げない（観光バスツアー・企画チケット）。路線バス・バス停・身の安全の語は上げる（10/24 の判断）
+    src = build.load_sources("akiota")
+    soshiki = next(s for s in src.seeds if s.url == "https://www.akiota.jp/soshiki/")
+    url = "https://www.akiota.jp/soshiki/8/1.html"
+    assert build.decide_use(url, "江田島市観光バスツアー誘客促進事業補助金のご案内", soshiki, src)[0] == "lookup"
+    assert build.decide_use(url, "広電バスMOBIRY TRAVEL企画チケット", soshiki, src)[0] == "lookup"
+    assert build.decide_use(url, "「戸河内ICバスセンター」バス停位置の変更について", soshiki, src)[0] == "dialogue"
+    assert build.decide_use(url, "バスの時刻表と運賃表", soshiki, src)[0] == "dialogue"
+    assert build.decide_use(url, "不審なメールやメッセージにご注意ください", soshiki, src)[0] == "dialogue"
+    assert build.decide_use(url, "山岳遭難を防ごう", soshiki, src)[0] == "dialogue"
