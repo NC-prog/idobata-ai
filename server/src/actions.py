@@ -668,10 +668,12 @@ class Conversation:
         yield line
 
     def _is_new_topic(self, text: str) -> bool:
+        """提案に答えず別の話を始めたか（返事として分からず、長いか、問いの形「〜はどこですか」）。"""
         p = self._pending
         return (p is not None and p.phase == "proposed"
                 and classify_reply(text, self._words) == "unclear"
-                and len(re.sub(r"[\s、。！？!?]", "", text)) > self._cfg.reply_max_chars)
+                and (len(re.sub(r"[\s、。！？!?]", "", text)) > self._cfg.reply_max_chars
+                     or self._visitor_question_re.search(text.strip()) is not None))
 
     def _adjust_proposal(self, kind: str | None, text: str, reply: str) -> str | None:
         """LLM のタグを規則で補正する（手続きの相談は lookup より refer、付け忘れの補い）。"""
