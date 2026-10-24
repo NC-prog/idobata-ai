@@ -28,6 +28,11 @@ procedures:
     aliases: [要介護認定, 介護認定, 介護]
   - term: 児童手当
     tags: [子育て]
+  # 名前の似た手当（WP13 E の聞き分けの候補。手続きナレッジはまだ無い。課は handles で決まる）
+  - term: 児童扶養手当
+    tags: [子育て]
+  - term: 特別児童扶養手当
+    tags: [障害]
   - term: 保育施設
     tags: [子育て]
     aliases: [保育所, 保育園]

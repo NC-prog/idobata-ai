@@ -1086,6 +1086,14 @@ class ProcedureConfig:
     recheck_keep_using: bool = True
     # 1 ターンに【市の案内（承認済み）】へ入れる手続きの数
     max_per_turn: int = 2
+    # 用件の聞き分け（WP13 E）: 候補が clarify_min〜clarify_max 件で、1 位と 2 位の点差が clarify_margin 未満なら 1 問だけ聞く。
+    # 選択肢は clarify_show 件まで（多ければ「ほかのこと」を足す）。返事が合わなければ clarify_max_reasks 回だけ聞き直す
+    clarify_enabled: bool = True
+    clarify_margin: int = 1
+    clarify_min: int = 2
+    clarify_max: int = 4
+    clarify_show: int = 3
+    clarify_max_reasks: int = 1
     # 手続きナレッジから答えた文には「市の案内では、」を一度だけ添える。文字 2-gram の重なりがこれ以上の文を、
     # 手続きナレッジから答えた文とみなす
     attribution_min_overlap: float = 0.5

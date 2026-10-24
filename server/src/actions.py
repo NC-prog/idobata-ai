@@ -33,12 +33,14 @@ from typing import Any
 import yaml
 
 from .asr_client import ngram_overlap
+from .clarify import OTHER, Clarifier, Clarify, load_clarify_rules
 from .config import ActionsConfig, NewsConfig, ReferralConfig, TidbitConfig
 from .dialogue import ChatBackend, Dialogue
 from .knowledge import JST
 from .lookup import Lookup
 from .news import NewsBook, spoken_date, tidy_summary
 from .persona import organization_word
+from .procedure_kb import ProcedureRecord
 from .procedures import AsrFixes, IntakeSet, Procedures
 from .referrals import (
     CATEGORIES,
@@ -147,6 +149,10 @@ class Pending:
     silence_reasked: bool = False
     # 保存の後に、来訪者が触れた項目だけ聞き取りを再開したとき: 書き直す紹介状の (ID, 日付)（WP07）
     reopen: tuple[str, str] | None = None
+    # 用件の聞き分けの問い（action が clarify のとき。WP13 E）
+    clarify: Clarify | None = None
+    # 聞き分けで決まらなかったときの紹介状: 担当課は未特定のまま（規則でも決めない）
+    unspecified: bool = False
 
 
 @dataclass
@@ -172,6 +178,8 @@ class Session:
     topic_turns: int = 0
     topic_approved: bool = False
     topic_no_refer: int = 0
+    # 用件の聞き分け（WP13 E）: この会話で聞いた候補の組（1 つの用件につき 1 回）
+    clarified: set[frozenset[str]] = field(default_factory=set)
 
 
 StateHook = Callable[[str], Awaitable[None]]
@@ -243,6 +251,9 @@ class Conversation:
         # このターンの行為（文字記録用）: 提案した行為、返事をした相手の行為と段、その結果
         self.turn_info: dict[str, str | None] = {}
         self._words, self._templates = load_templates(cfg.templates_path)
+        # 用件の聞き分け（WP13 E）と、聞き分けで決まった手続き（紹介状の課・聞き取りに使う。会話の区切りで消す）
+        self._clarifier = Clarifier(self._procedures, load_clarify_rules(cfg.templates_path), dialogue._proc_cfg)
+        self._clarified: ProcedureRecord | None = None
         self._pending: Pending | None = None
         self._session: Session | None = None
         # 直前のターンで行為が終わったか（次の短い相づちを決まった文で受ける）
@@ -344,6 +355,7 @@ class Conversation:
         self._session, self._pending = None, None
         self._saved_at, self._history_note = None, None
         self._saved_referral = None
+        self._clarified = None
         self._news_closing, self._news_history, self._business_done = None, None, False
         self._turns = []
         self._private_values = set()
@@ -441,6 +453,10 @@ class Conversation:
             yield line
             self.dialogue.add_turn(text, line)
             return
+        if self._pending is not None and self._pending.action == "clarify":
+            async for s in self._on_clarify_reply(text, language, index):
+                yield s
+            return
         if self._pending is not None and self._is_new_topic(text):
             # 提案には答えず別の話を始めた: 聞き直さずに辞退として、その話に普通に答える
             logger.info("返事待ちに別の話が来たので、提案を辞退扱いにします")
@@ -491,13 +507,24 @@ class Conversation:
             yield line
             return
 
+        c = self._clarify_needed(text)
+        if c is not None:
+            async for s in self._ask_clarify(c, text, language, index):
+                yield s
+            return
+        async for s in self._answer(text, language, index):
+            yield s
+
+    async def _answer(self, text: str, language: str, index: int, llm_text: str | None = None) -> AsyncIterator[str]:
+        """ふつうの応答（LLM）と、それに付ける行為の提案。llm_text は LLM に渡す発話（聞き分けの短い返事の言い換え）。"""
+        assert self._session is not None
         reply: list[str] = []
         offered = self._tidbit_to_offer(text)
         hint = self._tidbit_cfg.offer_template.format(text=offered["text"]) if offered else ""
         # 問いの文から後は、提案が付くか分かるまで（応答の終わりまで）読み上げずに預かる。
         # 提案が付けば LLM の問いは落とし、提案文だけを問いとして残す（問いは 1 回の応答で 1 つ）
         held: list[str] = []
-        async for s in self.dialogue.respond(text, language, hint=hint, speaker=self._speaker):
+        async for s in self.dialogue.respond(llm_text or text, language, hint=hint, speaker=self._speaker):
             reply.append(s)
             if held or self.dialogue.is_question(s):
                 held.append(s)
@@ -538,7 +565,7 @@ class Conversation:
             yield s
         if len(spoken) < len(reply):
             # 読み上げなかった問いは履歴にも残さない
-            self.dialogue.replace_last_reply(text.strip(), "".join(reply), "".join(spoken))
+            self.dialogue.replace_last_reply((llm_text or text).strip(), "".join(reply), "".join(spoken))
         if kind == "news" and proposing:
             yield self._propose_news(text, language, index, "雑談の区切り", extend=True)
         elif kind is not None and proposing:
@@ -551,6 +578,90 @@ class Conversation:
             logger.info("行為を提案しました: %s", kind)
             yield line
 
+    # ------------------------------------------------------------------
+    # 用件の聞き分け（WP13 E）
+    # ------------------------------------------------------------------
+
+    def _clarify_needed(self, text: str) -> Clarify | None:
+        """聞き分けの問いが要るか（手続きの型で、候補が同程度に当たる。急いでいる・深刻な打ち明けの後・同じ組を聞いた後は聞かない）。"""
+        s = self._session
+        if s is None or s.news_blocked is not None or self.dialogue.intent_of(text) != "procedure":
+            return None
+        c = self._clarifier.find(text)
+        if c is None or frozenset(c.ids) in s.clarified:
+            return None
+        return c
+
+    async def _ask_clarify(self, c: Clarify, text: str, language: str, index: int) -> AsyncIterator[str]:
+        assert self._session is not None
+        self._session.clarified.add(frozenset(c.ids))
+        self._session.smalltalk_streak = 0
+        line = self._clarifier.question(c)
+        self._pending = Pending("clarify", text, language, phase="clarify", turn_index=index, speaker=self._speaker,
+                                clarify=c)
+        self.turn_info["clarify"] = f"聞き分けの問い（候補 {len(c.ids)} 件: {'・'.join(c.ids)}）"
+        logger.info("用件の聞き分けを聞きます（候補 %d 件: %s）", len(c.ids), "・".join(c.ids))
+        self.dialogue.add_turn(text, line)
+        yield line
+
+    def _clarify_done(self, c: Clarify, outcome: str) -> None:
+        """聞き分けの結果を、文字記録（このターンの行為）と来訪記録に 1 行（本文は入れない）。"""
+        note = f"聞き分けた（候補 {len(c.ids)} 件 → {outcome}）"
+        self.turn_info["clarify"] = note
+        logger.info("%s", note)
+        if self._session is not None:
+            self._session.proposals.append({"action": "clarify", "outcome": outcome, "candidates": str(len(c.ids))})
+
+    async def _on_clarify_reply(self, text: str, language: str, index: int) -> AsyncIterator[str]:
+        p = self._pending
+        assert p is not None and p.clarify is not None
+        c = p.clarify
+        got = self._clarifier.pick(c, text)
+        if isinstance(got, ProcedureRecord):
+            # 決まった: その 1 件だけを資料にして、ふつうの流れで答える（承認済みならその中身、下書きなら担当の課で）
+            self._pending = None
+            self._clarify_done(c, got.id)
+            self._clarified = got
+            self.dialogue.forced_procedure = got
+            # 短い返事（「二つ目」「やめるほう」）は、LLM には決まった手続きの名前で渡す（おうむ返しで「二つ目ですね」と言った）
+            short = len(re.sub(r"[\s、。！？!?]", "", text)) <= self._cfg.reply_max_chars
+            llm_text = f"{self._clarifier.label(got)}のことです。" if short else None
+            async for s in self._answer(text, language, index, llm_text):
+                yield s
+            return
+        if got == OTHER:
+            self._pending = None
+            self._clarify_done(c, "ほか")
+            line = self._clarifier.rules.other
+            self.dialogue.add_turn(text, line)
+            yield line
+            return
+        if (classify_reply(text, self._words) == "unclear"
+                and len(re.sub(r"[\s、。！？!?]", "", text)) > self._cfg.reply_max_chars
+                and c.reasks >= self.dialogue._proc_cfg.clarify_max_reasks):
+            # 問いに答えず別の話を始めた（聞き直しの後）: 聞き分けは閉じて、その話に答える
+            self._pending = None
+            self._clarify_done(c, "未決（別の話）")
+            async for s in self._answer(text, language, index):
+                yield s
+            return
+        if c.reasks < self.dialogue._proc_cfg.clarify_max_reasks:
+            c.reasks += 1
+            line = self._clarifier.reask(c)
+            self.dialogue.add_turn(text, line)
+            yield line
+            return
+        # 聞き直しても決まらない: 担当課は未特定のまま、紹介状を提案する
+        self._clarify_done(c, "未決")
+        line = self._clarifier.rules.fallback + self._t("refer", "propose")
+        self._pending = Pending("refer", c.key, language, turn_index=index, speaker=self._speaker,
+                                history_before=self.dialogue.history, unspecified=True)
+        assert self._session is not None
+        self._session.proposals.append({"action": "refer", "outcome": None})
+        self.turn_info["proposed"] = "refer"
+        self.dialogue.add_turn(text, line)
+        yield line
+
     def _is_new_topic(self, text: str) -> bool:
         p = self._pending
         return (p is not None and p.phase == "proposed"
@@ -559,7 +670,8 @@ class Conversation:
 
     def _adjust_proposal(self, kind: str | None, text: str, reply: str) -> str | None:
         """LLM のタグを規則で補正する（手続きの相談は lookup より refer、付け忘れの補い）。"""
-        procedure = re.search(self._ref_cfg.procedure_pattern, text) is not None
+        # 聞き分けで手続きが決まったターン（「入りたいんです」）も手続きの相談（WP13 E）
+        procedure = re.search(self._ref_cfg.procedure_pattern, text) is not None or self.dialogue.forced_this_turn
         if kind == "lookup" and procedure and self._available("refer"):
             logger.info("手続き・相談の発話のため、提案を lookup から refer に置き換えます")
             return "refer"
@@ -958,6 +1070,15 @@ class Conversation:
         cands = (self._procedures.departments_for(recent, self._facility)
                  or self._procedures.departments_for(topic, self._facility))
         worry = self._worry_department() if self._is_worry(topic) else None
+        decided = self._clarified
+        book = self._procedures.book
+        decided_ok = decided is not None and book is not None and book.usable(decided) and bool(decided.department)
+        if p.unspecified:
+            # 聞き分けで決まらなかった: 規則でも決めず、職員が職員パネルで課を付ける（WP13 E-3）
+            cands = []
+            worry = None
+        elif decided_ok and decided is not None:
+            cands = [decided.department]  # 聞き分けで決まった承認済みの手続きの課
         if len(cands) == 1:
             p.department = cands[0]
         elif worry is not None:
@@ -968,10 +1089,17 @@ class Conversation:
             p.department = UNSPECIFIED_DEPARTMENT
             logger.info("担当課が規則で一意に決まりません（候補 %d）。未特定で保存します", len(cands))
         p.phone = find_phone(topic)  # 来訪者が先に言っていれば、後で読み上げて確かめる
-        p.intake_set = (self._procedures.intake_for(recent, self._facility)
-                        or self._procedures.intake_for(topic, self._facility))
+        if p.unspecified:
+            p.intake_set = None
+        elif decided_ok and decided is not None:
+            p.intake_set = decided.intake_set()
+        else:
+            p.intake_set = (self._procedures.intake_for(recent, self._facility)
+                            or self._procedures.intake_for(topic, self._facility))
         if p.intake_set is not None:
-            labels = list(p.intake_set.questions[: self._ref_cfg.intake_max_questions])
+            # 聞き分けの 1 問と聞き取りは合わせて最大 3 問（聞き分けで決まったら 1 問減らす。WP13 E-1）
+            most = self._ref_cfg.intake_max_questions - (1 if decided is not None else 0)
+            labels = list(p.intake_set.questions[: max(0, most)])
             asks = await self._phrase_questions(labels, p.user_text)
             p.intake = [{"question": q, "ask": a, "answer": ""} for q, a in zip(labels, asks, strict=True)]
         if p.intake:

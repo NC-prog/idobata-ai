@@ -434,9 +434,16 @@ def test_news_ask_pattern() -> None:
         assert not hit(x), x
 
 
+def _no_clarify(c: Any) -> None:
+    from dataclasses import replace
+
+    c._clarifier._cfg = replace(c._clarifier._cfg, clarify_enabled=False)
+
+
 async def test_rule_refer_after_two_turns_on_approved_procedure(tmp_path: Path) -> None:
     c, _ = _news_conv(tmp_path, ActLLM([["国保ですね。保健医療課です。"], ["退職のときは保健医療課でご案内します。"]]))
     _with_procs(c)
+    _no_clarify(c)  # WP11 の規則を見る（「国保のことで」の聞き分け（WP13 E）は test_wp13_clarify で）
     assert REFER_PROPOSE not in await _say(c, "うんと国保のことで聞きに来ました。")
     out = await _say(c, "いや、えっと退職とかで。")
     assert out[-1] == REFER_PROPOSE and c.pending_action == "refer"  # LLM が 2 ターン提案しなかった: 規則で
@@ -456,6 +463,7 @@ async def test_news_after_closing_reply_on_procedure_topic(tmp_path: Path) -> No
 async def test_news_after_closing_reply_without_proposal(tmp_path: Path) -> None:
     c, _ = _news_conv(tmp_path, ActLLM([["国保ですね。保健医療課です。"]]))
     _with_procs(c)
+    _no_clarify(c)  # WP11 の規則を見る（「国保のことで」の聞き分け（WP13 E）は test_wp13_clarify で）
     c._cfg = ActionsConfig(enabled=())  # 紹介状を出さない拠点（規則の紹介状の提案も出ない）
     await _say(c, "国保のことで聞きに来ました。")
     await _say(c, "退職とかで。")

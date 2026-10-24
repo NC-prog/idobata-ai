@@ -307,6 +307,9 @@ class Dialogue:
         self.news_refs: Callable[[str], list[Reference]] | None = None
         # このターンで当たった手続きナレッジ（承認済み・下書き。文字記録用）
         self.last_procedures: list[ProcedureRecord] = []
+        # 用件の聞き分け（WP13 E）で決まった手続き。次の respond の 1 ターンだけ、照合の代わりにこれを使う
+        self.forced_procedure: ProcedureRecord | None = None
+        self._forced: ProcedureRecord | None = None
         # この会話で「詳しいことは〇〇課でご案内します」を足した手続き（同じ手続きで繰り返さない）
         self._draft_noted: set[str] = set()
         # 直近の応答が出した行為の提案（<propose:…>）。無ければ None
@@ -415,11 +418,22 @@ class Dialogue:
             self._history[-1] = (user, reply + line)
         self._note_offers(line)
 
+    @property
+    def forced_this_turn(self) -> bool:
+        """このターンは、聞き分けで決まった手続きで答えたか（WP13 E）。"""
+        return self._forced is not None
+
+    def intent_of(self, text: str) -> str:
+        """発話の型（WP13 B）。進行役が用件の聞き分け（E）の前に見る。"""
+        return classify_intent(text.strip(), self._intent_rules, self._procedures, self._facility,
+                               self._question_re_visitor)
+
     def begin_turn(self) -> None:
         """ターンごとの記録（提案・検索・出典・捨てた文）を消す。LLM を通さない定型文のターンでも前のものを残さない。"""
         self.last_proposal = None
         self.last_safety = None
         self.last_procedures = []
+        self._forced = None
         self.last_dropped = []
         self.last_search_query = None
         self.last_search_ms = None
@@ -535,6 +549,7 @@ class Dialogue:
             履歴には、言い終えた全文を 1 ターンとして積む。
         """
         self.begin_turn()
+        self._forced, self.forced_procedure = self.forced_procedure, None
         text = text.strip()
         if not text:
             return
@@ -568,8 +583,8 @@ class Dialogue:
             return
 
         # 発話の型（WP13 B）。型ごとに、毎ターンの検索で渡してよい範囲が決まる
-        self.last_intent = classify_intent(text, self._intent_rules, self._procedures, self._facility,
-                                           self._question_re_visitor)
+        self.last_intent = "procedure" if self._forced is not None else classify_intent(
+            text, self._intent_rules, self._procedures, self._facility, self._question_re_visitor)
         # 絞り込みを切った比較（IDOBATA_KB_SCOPE=0）では、型は数えるだけで、検索は WP13 より前と同じ
         scope = self._kcfg.scope_by_intent.get(self.last_intent) if self._kcfg.scope_enabled else None
         # 手続きナレッジ（WP09）を先に引く（承認済みに当たれば、手続きの型ではパックを渡さない。WP13 B-1）
@@ -890,7 +905,8 @@ class Dialogue:
         """発話で言った手続きナレッジ。承認済みは参考資料にし、下書きだけなら足す一文の課（WP09）。"""
         if self._procedures is None:
             return [], None
-        matched = self._procedures.matched(text)
+        forced = self._forced
+        matched = [forced] if forced is not None else self._procedures.matched(text)
         self.last_procedures = matched
         if not matched:
             return [], None
@@ -900,8 +916,8 @@ class Dialogue:
             logger.info("承認済みの手続きナレッジを %d 件、市の案内として入れます", len(refs))
             return refs, None
         fresh = [r for r in matched if r.id not in self._draft_noted]
-        if not fresh or not re.search(f"{self._cfg.visitor_question_pattern}|{config.referral.procedure_pattern}|"
-                                      f"{self._proc_cfg.draft_request_pattern}", text):
+        if forced is None and (not fresh or not re.search(f"{self._cfg.visitor_question_pattern}|{config.referral.procedure_pattern}|"
+                                      f"{self._proc_cfg.draft_request_pattern}", text)):
             return [], None
         self._draft_noted.update(r.id for r in fresh)
         # 担当課: 別名表の規則 → 下書きの課（対象一覧の handles の規則か、出典のページの課。LLM が選んだ課ではない）が 1 つなら
@@ -1011,6 +1027,13 @@ class Dialogue:
     def _expected_department(self, text: str) -> str | None:
         if self._procedures is None or self._facility is None:
             return None
+        forced = self._forced
+        if forced is not None:
+            # 聞き分けで決まった手続き: 承認済みならその課、ほかは名前と別名で規則の課
+            book = self._procedures.book
+            if book is not None and book.usable(forced) and forced.department:
+                return forced.department
+            text = " ".join((forced.name, *forced.aliases))
         cands = self._procedures.departments_for(text, self._facility)
         return cands[0] if len(cands) == 1 else None
 
@@ -1393,6 +1416,8 @@ class Dialogue:
         if self._kb is None:
             return self._scoped(text, news, scope)
         query = self._expand_dates(text)
+        if self._forced is not None:
+            query = f"{self._forced.name} {query}"  # 聞き分けの返事（「二つ目」）だけでは探せない
         try:
             uses = frozenset(scope.uses) if scope is not None else None
             result = await asyncio.to_thread(self._kb.search, query, uses) if uses is not None \
@@ -1436,6 +1461,8 @@ class Dialogue:
             ns = nouns(text) + self._expand_dates(text)[len(text):].split()
             said = procedure_names(text, self._procedures) if (
                 self.last_intent == "procedure" and self._procedures is not None) else []
+            if self._forced is not None:
+                said = [self._forced.name, *self._forced.surfaces]
             if said:
                 # 手続きの名前・別名で当たった問いは、その手続きの名前と別名で足切りする（「ふるさと納税」の名詞が
                 # 「納税」だけになり、国税の相談のページが残った。10/24 の判断の確認で）
