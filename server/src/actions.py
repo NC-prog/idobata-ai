@@ -70,13 +70,16 @@ class ReplyWords:
     yes_override: list[str]
     no: list[str]
     yes: list[str]
+    leading_ack: list[str] = field(default_factory=list)
+    no_after_ack: list[str] = field(default_factory=list)
 
 
 def load_templates(path: Path) -> tuple[ReplyWords, dict[str, dict[str, str]]]:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     r = data.get("reply") or {}
     words = ReplyWords(*([str(x) for x in r.get(k) or []]
-                         for k in ("strong_consent", "consent_override", "decline", "consent")))
+                         for k in ("strong_consent", "consent_override", "decline", "consent",
+                                   "leading_ack", "decline_after_ack")))
     actions = {str(k): {str(a): str(b) for a, b in (v or {}).items()} for k, v in (data.get("actions") or {}).items()}
     return words, actions
 
@@ -88,6 +91,15 @@ def classify_reply(text: str, words: ReplyWords) -> str:
     「はい、大丈夫です」は辞退（よくある言い方）、「いや、お願いします」は同意。
     """
     t = text.strip()
+    ack = next((a for a in sorted(words.leading_ack, key=len, reverse=True) if t.startswith(a)), None)
+    rest = re.sub(r"^[\s、。,.!！]+", "", t[len(ack):]) if ack else ""
+    if rest:
+        # 「うん、ないです」「はい、大丈夫です」: 頭の相槌より後ろの語を優先する
+        if not any(w in rest for w in words.strong_yes + words.yes_override) and any(w in rest for w in words.no_after_ack):
+            return "no"
+        verdict = classify_reply(rest, words)
+        if verdict != "unclear":
+            return verdict
     if any(w in t for w in words.strong_yes) or any(w in t for w in words.yes_override):
         return "yes"
     if any(w in t for w in words.no):

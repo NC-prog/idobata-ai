@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
-from src.config import SERVER_ROOT, DialogueConfig, NewsConfig, StaffConfig
+from src.config import SERVER_ROOT, ActionsConfig, DialogueConfig, NewsConfig, StaffConfig
 from src.dialogue import Dialogue
 from src.knowledge import JST
 from src.news import (
@@ -446,6 +447,17 @@ async def test_news_after_closing_reply_on_procedure_topic(tmp_path: Path) -> No
     await _say(c, "国保のことで聞きに来ました。")  # 紹介状の提案（LLM）
     await _say(c, "退職とかで。")  # 返事として分からない → 聞き直し（話題の続きに数える）
     await _say(c, "いえ、大丈夫です。")  # 辞退
+    # 辞退の直後の「わかりました」は（同意の語なので）行為の後の相づちとして受け、お知らせの提案
+    assert await _say(c, "わかりました。") == [N["ack_prefix"], PROPOSE]
+    assert c._session.proposals[-1]["trigger"] == "行為の後"
+
+
+async def test_news_after_closing_reply_without_proposal(tmp_path: Path) -> None:
+    c, _ = _news_conv(tmp_path, ActLLM([["国保ですね。保健医療課です。"]]))
+    _with_procs(c)
+    c._cfg = ActionsConfig(enabled=())  # 紹介状を出さない拠点（規則の紹介状の提案も出ない）
+    await _say(c, "国保のことで聞きに来ました。")
+    await _say(c, "退職とかで。")
     assert await _say(c, "わかりました。") == [PROPOSE]  # 手続きの話の後の締めの返事 → お知らせの提案
     assert c._session.proposals[-1]["trigger"] == "手続きの話の後の締めの返事"
 
@@ -496,3 +508,16 @@ async def test_first_sentence_uses_procedure_name() -> None:
                  procedures=PROCS, now=lambda: NOW)
     out = await _collect(d, "うんと国保のことで聞きに来ました。")
     assert out[0].startswith("国民健康保険の加入（退職・転入など）についてご相談ですね") and "国保税" not in out[0]
+
+
+@pytest.mark.parametrize(("text", "verdict"), [
+    ("うんないです。", "no"), ("うん、ないです", "no"), ("はい大丈夫です", "no"), ("ええ、けっこうです", "no"),
+    ("わかりました", "yes"), ("わかりました。", "yes"), ("はいはい", "yes"), ("了解です", "yes"),
+    ("いいですね", "yes"), ("いいです", "no"), ("うん、お願い", "yes"), ("いや、お願いします", "yes"), ("うん", "yes"),
+])
+def test_reply_after_leading_ack(text: str, verdict: str) -> None:
+    """頭の相槌（うん・はい）より後ろの語を優先する。「わかりました」は提案を受けた返事として同意（WP11 の実機確認）。"""
+    from src.actions import classify_reply, load_templates
+
+    words, _ = load_templates(SERVER_ROOT / "context" / "actions.yaml")
+    assert classify_reply(text, words) == verdict
