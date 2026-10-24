@@ -748,6 +748,17 @@ class Dialogue:
                 for line in again:
                     sentences.append(line)
                     yield line
+        elif sentences and re.search(self._cfg.visitor_question_pattern, text.strip()) and self._facility is not None:
+            # 聞き直されて課の名前の文を繰り返しとして捨てた結果、残りに課の名前が無くなった（「詳しくは担当の課に」だけ）:
+            # 捨てた課の名前の文を言い直す（意地悪 20 番。5 回目に保健医療課を言わなかった）
+            names = [d.name for d in self._facility.departments]
+            if not any(n in x for x in sentences for n in names):
+                again = [d["text"] for d in self.last_dropped
+                         if d["reason"] == "同じ文の繰り返し" and any(n in d["text"] for n in names)][:1]
+                for line in again:
+                    logger.info("聞き直されて課の名前の文を捨てたので、その文を言い直します")
+                    sentences.append(line)
+                    yield line
         if not sentences and not self.last_dropped:
             yield _FALLBACK_REPLY.get(language, _FALLBACK_REPLY["ja"])  # LLM が何も返さなかった
             return

@@ -623,3 +623,17 @@ async def test_confusable_allowance_is_not_answered() -> None:
     d2 = Dialogue(DlgLLM(["児童扶養手当は、申請に個人番号が必要です。"]), DialogueConfig(), facility=fac, now=lambda: NOW)
     out2 = [s async for s in d2.respond("児童扶養手当の申請をしたい", extra_refs=[fuyo])]
     assert "".join(out2) == "児童扶養手当は、申請に個人番号が必要です。" and d2.last_references == [fuyo]
+
+
+async def test_repeated_question_keeps_department_name() -> None:
+    """聞き直しで課の名前の文を繰り返しとして捨て、残りに課の名前が無くなったら、その文を言い直す（意地悪 20 番）。"""
+    d = Dialogue(DlgLLM(["国保の手続きは保健医療課（2階）で承ります。",
+                         "国保の手続きは保健医療課（2階）で承ります。詳しくは担当の課にお尋ねくださいね。",
+                         "国保の手続きは保健医療課（2階）で承ります。市民課でも案内できます。"]),
+                 DialogueConfig(), facility=FAC, now=lambda: NOW)
+    assert await _collect(d, "国保の手続きはどこですか") == ["国保の手続きは保健医療課（2階）で承ります。"]
+    out = await _collect(d, "国保の手続きはどこですか")
+    assert out == ["詳しくは担当の課にお尋ねくださいね。", "国保の手続きは保健医療課（2階）で承ります。"]
+    # 残りに課の名前があれば言い直さない
+    out = await _collect(d, "国保の手続きはどこですか")
+    assert out == ["市民課でも案内できます。"]
